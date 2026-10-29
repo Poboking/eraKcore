@@ -13,7 +13,7 @@
 
 **A pure-JVM ERA engine, rewritten in Kotlin.**
 
-A faithful, line-by-line behavioral reimplementation of Emuera — official bugs included, unchanged.
+A faithful, line-by-line behavioral reimplementation of Emuera.
 No game data, no Android dependency: builds and runs standalone on desktop, server, and CI.
 
 </div>
