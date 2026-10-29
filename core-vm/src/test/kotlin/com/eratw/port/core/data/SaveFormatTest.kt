@@ -16,7 +16,9 @@ import kotlin.test.assertTrue
  * （`save00-03.sav` / `save1000.sav` / `global.sav`）逐个 read + 版本/游戏码/描述断言，
  * 再做 `write(read(f)) == f` 的逐字节幂等判定。
  *
- * 样本位置（只读，仓内跟踪）：`.workbuddy/sav-backup/sav-20261018-110513/`。
+ * 样本位置（只读，**仓外数据，不入公开仓**）：缺省找 `.workbuddy/sav-backup/sav-20261018-110513/`，
+ * 也可用环境变量 `ERATW_SAV_SAMPLES` 指向样本目录。样本缺失时本组用例**跳过**（不是失败）——
+ * 公开仓 / CI 上天然没有玩家存档，硬炸只会制造噪音。
  * 从 gradle test JVM 的 cwd（模块目录 `core-vm/`）上溯两级即仓库根。
  *
  * 口径：所有期望值都取**样本自身的实测字面量**（下表），不用实现算出来的值当期望
@@ -24,12 +26,18 @@ import kotlin.test.assertTrue
  */
 class SaveFormatTest {
 
-    private val samplesDir: File = sequenceOf(
+    private val samplesDir: File? = sequenceOf(
+        System.getenv("ERATW_SAV_SAMPLES")?.let { File(it) },
         File("../../.workbuddy/sav-backup/sav-20261018-110513"),
         File(".workbuddy/sav-backup/sav-20261018-110513"),
         File("../.workbuddy/sav-backup/sav-20261018-110513"),
-    ).firstOrNull { it.isDirectory }
-        ?: error("找不到真实存档样本目录（cwd=${File(".").absolutePath}）")
+    ).firstOrNull { it != null && it.isDirectory }
+
+    /** 有样本才有断言资格；没有就整组跳过（Assumption failed），不算红。 */
+    private fun requireSamples(): File =
+        samplesDir ?: throw org.opentest4j.TestAbortedException(
+            "跳过：找不到真实存档样本目录（设 ERATW_SAV_SAMPLES 指向 sav-20261018-110513 可启用）",
+        )
 
     /** 样本清单：文件名 → (类别, UniqueCode, ScriptVersion, 描述文本)。 */
     private data class Expect(
@@ -79,11 +87,11 @@ class SaveFormatTest {
     /** 描述文本（SAVEDATA_TEXT）实测字面量片段：时间戳 + 天数行 + 版本尾巴（空白由幂等测试兜底）。 */
     @Test
     fun `描述文本逐字断言语料`() {
-        val d0 = SaveFormat.read(samplesDir.resolve("save00.sav").readBytes())
+        val d0 = SaveFormat.read(requireSamples().resolve("save00.sav").readBytes())
         assertTrue(d0.text.startsWith("2026/05/18 14:22:54 "), "save00 时间戳: ${d0.text}")
         assertTrue(d0.text.contains("第  1日(春之月1日)"), "save00 天数行（两空格实测量）: ${d0.text}")
         assertTrue(d0.text.endsWith("Ver 4.980 - 日语交流用画蛇添足版CH20260326 "), "save00 版本尾巴（含尾空格，实测）: ${d0.text}")
-        val d1000 = SaveFormat.read(samplesDir.resolve("save1000.sav").readBytes())
+        val d1000 = SaveFormat.read(requireSamples().resolve("save1000.sav").readBytes())
         assertTrue(
             d1000.text.endsWith("Ver 4.980 - 日语交流用画蛇添足版CH20260326 *自动存档*"),
             "save1000.sav 描述尾巴（实测）: ${d1000.text}",
@@ -103,7 +111,7 @@ class SaveFormatTest {
     /** global.sav 是 Global 类别（FileType=1），没有角色块。spec: VariableEvaluator.cs:2483-2493 */
     @Test
     fun `global 存档类别为 Global`() {
-        val g = samplesDir.resolve("global.sav")
+        val g = requireSamples().resolve("global.sav")
         assertTrue(g.isFile, "缺少 global.sav")
         val d = SaveFormat.read(g.readBytes())
         assertEquals(SaveFileKind.GLOBAL, d.fileType, "global.sav 类别")
@@ -225,8 +233,8 @@ class SaveFormatTest {
     private fun sampleFiles(): List<File> {
         val names = listOf("save00.sav", "save01.sav", "save02.sav", "save03.sav", "save1000.sav", "global.sav")
         return names.map {
-            val f = samplesDir.resolve(it)
-            assertTrue(f.isFile, "缺少样本 $it（目录 ${samplesDir.absolutePath}）")
+            val f = requireSamples().resolve(it)
+            assertTrue(f.isFile, "缺少样本 $it（目录 ${samplesDir?.absolutePath}）")
             f
         }
     }
