@@ -13,8 +13,10 @@
 
 **A pure-JVM ERA engine, rewritten in Kotlin.**
 
-A faithful, line-by-line behavioral reimplementation of Emuera.
-No game data, no Android dependency: builds and runs standalone on desktop, server, and CI.
+Built for a native Android port: [eratw-pocket](https://github.com/Poboking/eratw-pocket)
+is the first native-Android EraTW client powered by this engine (upstream: the EraTW
+fork 画蛇添足版 4.980), staying smoother than the PC emulator even on some low-end devices.
+The engine ships no game data and still builds and runs standalone on desktop, server, and CI.
 
 </div>
 
@@ -56,11 +58,6 @@ eraKcore (this repo, MIT)      eratw-pocket (GPL-3.0)
 ├── render    ←────────────    ├── platform
 └── erbcc                      └── app (Compose shell)
 ```
-
-[eratw-pocket](https://github.com/Poboking/eratw-pocket) consumes this repo via a Gradle
-composite build and expects a sibling checkout. [kojo-editor](https://github.com/Poboking/kojo-editor),
-by the same author, is a standalone editor for era script writers — no build dependency on this
-engine, but a shared understanding of era semantics.
 
 ## Corpus & Copyright
 

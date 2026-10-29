@@ -13,8 +13,10 @@
 
 **Kotlin で書き直した、純 JVM の ERA エンジン。**
 
-Emuera の観測可能な挙動を一項目ずつ差分検証しながら再実装しています。
-ゲームデータを含まず、Android にも依存しない――デスクトップ・サーバー・CI で独立してビルド・実行できます。
+Android ネイティブ移植のために作りました。[eratw-pocket](https://github.com/Poboking/eratw-pocket)
+は本エンジンを使った最初の Android ネイティブ版 EraTW（上流：画蛇添足版 4.980）で、
+一部のローエンド端末でもエミュレータより快適なプレイ体感を保てています。
+エンジン自体はゲームデータを含まず、デスクトップ・サーバー・CI でも独立してビルド・実行できます。
 
 </div>
 
@@ -56,11 +58,6 @@ eraKcore（本リポジトリ、MIT）     eratw-pocket（GPL-3.0）
 ├── render    ←─────────────     ├── platform
 └── erbcc                        └── app（Compose シェル）
 ```
-
-[eratw-pocket](https://github.com/Poboking/eratw-pocket) は Gradle composite build で本リポジトリに
-依存するため、兄弟ディレクトリとしてチェックアウトしてください。同じ作者による
-[kojo-editor](https://github.com/Poboking/kojo-editor) は口上作者向けの独立エディタで、
-本エンジンへのビルド依存はありませんが、era の意味論については同じ認識を共有しています。
 
 ## コーパスと著作権
 

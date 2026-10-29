@@ -13,8 +13,10 @@
 
 **Kotlin 重写的纯 JVM ERA 引擎。**
 
-对 Emuera 的可观察行为逐条对拍复刻。
-不含游戏数据，不依赖 Android——在桌面、服务端、CI 上都能独立构建与测试。
+为安卓原生移植而生：[eratw-pocket](https://github.com/Poboking/eratw-pocket)
+是用本引擎做出的第一个安卓原生版 EraTW（上游：画蛇添足版 4.980），
+在部分低端机上能保持优于模拟器的游玩体感。
+引擎本身不含游戏数据，在桌面、服务端、CI 上同样能独立构建与测试。
 
 </div>
 
@@ -54,10 +56,6 @@ eraKcore（本仓库，MIT）        eratw-pocket（GPL-3.0）
 ├── render    ←────────────  ├── platform
 └── erbcc                    └── app（Compose 壳层）
 ```
-
-[eratw-pocket](https://github.com/Poboking/eratw-pocket) 以 Gradle composite build
-依赖本仓库，要求与本仓同级检出。同作者的 [kojo-editor](https://github.com/Poboking/kojo-editor)
-是面向口上作者的独立编辑器，与本引擎无构建依赖，但共享同一套 era 语义认知。
 
 ## 语料与版权
 
