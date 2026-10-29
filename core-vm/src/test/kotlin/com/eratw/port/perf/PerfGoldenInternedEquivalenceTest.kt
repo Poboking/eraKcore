@@ -30,6 +30,7 @@ class PerfGoldenInternedEquivalenceTest {
 
     @Test
     fun `规范化去重后全量执行与 PC 基准逐字节一致`() {
+        GoldenPipeline.requireGameCsvDir()
         val m = GoldenPipeline.build(fixtureDir)
         // 生产路径：装载后、运行前一次性规范化（幂等；这里显式跑一次，等价于 ProgramLoader/GameSession）
         val stats = m.program.internStatementArgs()

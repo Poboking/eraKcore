@@ -132,6 +132,18 @@ object GoldenPipeline {
     }
 
     /**
+     * 金标执行类用例的语料硬门控：`ADDCHARA NO 0` 等语句要求角色 CSV 定义了对应 NO，
+     * 无语料环境（CI / 公开仓检出）必然报 `ADDCHARA 失败：未定义的角色 NO 0`。
+     * 这是**数据依赖**，不是回归——用 [org.opentest4j.TestAbortedException] 判跳过，
+     * 而不是把 CI 染红。要启用这批用例，设 `ERATW_GAMEDIR` 指向游戏根即可。
+     */
+    fun requireGameCsvDir(): Path =
+        gameCsvDir().takeIf { Files.isDirectory(it) }
+            ?: throw org.opentest4j.TestAbortedException(
+                "跳过：金标执行类用例需要角色 CSV（设 ERATW_GAMEDIR 指向游戏根可启用）",
+            )
+
+    /**
      * 开机历史行文本 = `Config.LoadLabel`：读 `CSV/_Replace.csv` 的 `起動時簡略表示`
      * （键注册 ConfigData.cs:161，缺省 `Now Loading...`；赋值 Config.cs:722 SetReplace）。
      * 键缺失/文件缺失 → 缺省值。行口径复用 [CsvLoader]（同 `;` 注释、BOM、逗号切分）。

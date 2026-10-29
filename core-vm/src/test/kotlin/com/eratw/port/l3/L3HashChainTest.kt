@@ -212,6 +212,7 @@ class L3HashChainTest {
      */
     @Test
     fun `三轮逐节链值与逐簇摘要全量相同`() {
+        GoldenPipeline.requireGameCsvDir()
         val a = runA
         val b = runB
         val f = runFork
@@ -307,6 +308,7 @@ class L3HashChainTest {
      */
     @Test
     fun `链头与链尾等于登记常量`() {
+        GoldenPipeline.requireGameCsvDir()
         val run = runA
         val head = run.head()
         val tail = run.tail()

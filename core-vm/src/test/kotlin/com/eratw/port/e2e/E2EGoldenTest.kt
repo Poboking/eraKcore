@@ -199,6 +199,7 @@ class E2EGoldenTest {
 
     @Test
     fun `全量执行与基准对拍`() {
+        GoldenPipeline.requireGameCsvDir()
         val m = model
         val console = GoldenPipeline.newConsole()
         val rt = GoldenPipeline.newRuntime(m, console, stepCap = 20_000_000)

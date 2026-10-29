@@ -31,6 +31,7 @@ class InternedArgsE2ETest {
 
     @Test
     fun `去重前后全量执行输出逐字节相同`() {
+        GoldenPipeline.requireGameCsvDir()
         val model = GoldenPipeline.build(fixtureDir)
         assertEquals(0, model.compileFailures.size, "切片编译失败: ${model.compileFailures}")
 
