@@ -1,6 +1,6 @@
 # eraKcore — Kotlin 重写的 ERA 运行时
 
-[EraTW Pocket（安卓移植版）](https://github.com/OWNER/eratw-pocket) 所依赖的纯 JVM ERA 引擎：把 Emuera 的 ERB 语义逐条对拍复刻成 Kotlin，官方 bug 原样保留（ADR-005）。
+[EraTW Pocket（安卓移植版）](https://github.com/Poboking/eratw-pocket) 所依赖的纯 JVM ERA 引擎：把 Emuera 的 ERB 语义逐条对拍复刻成 Kotlin，官方 bug 原样保留（ADR-005）。
 
 ## 模块
 
@@ -37,5 +37,6 @@
 
 ## 许可
 
-TODO：LICENSE 待定（需先确认与 Emuera 原许可的兼容性）。在 LICENSE 落地前，本仓库内容按默认版权保留。
-内置字体均为开源许可，见 `render/src/main/resources/fonts/LICENSE-*.txt`。
+- 本仓库以 [MIT](LICENSE) 发布。
+- eraKcore 对 Emuera 的语义复刻遵循其原许可条款：出处与修改声明见 [NOTICE.md](NOTICE.md)。
+- 内置字体均为开源许可，见 `render/src/main/resources/fonts/LICENSE-*.txt` 与 [NOTICE.md](NOTICE.md) 的字体表。
