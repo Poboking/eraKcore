@@ -1,0 +1,67 @@
+devices:
+  - id: iqoo-neo6se
+    model: iQOO Neo6 SE (vivo V2199A)
+    class: mainstream-fhd
+    diagonalIn: 6.62
+    widthPx: 1080
+    heightPx: 2400
+    aspect: "20:9"
+    ppi: 398
+    densityDpi: 400          # TODO(verify): DevToolsHost 实测覆盖（出厂可能 400/480）
+    insetYPx: 96             # TODO(verify): 实测覆盖
+    status: reference
+  - id: zenfone-10
+    model: ASUS Zenfone 10
+    class: compact-flagship
+    diagonalIn: 5.9
+    widthPx: 1080
+    heightPx: 2400
+    aspect: "20:9"
+    ppi: 445
+    densityDpi: 440
+    insetYPx: 100
+    status: crawled
+  - id: pixel-8
+    model: Google Pixel 8
+    class: compact-mainstream
+    diagonalIn: 6.2
+    widthPx: 1080
+    heightPx: 2400
+    aspect: "20:9"
+    ppi: 428
+    densityDpi: 420
+    insetYPx: 100
+    status: crawled
+  - id: galaxy-s24-ultra
+    model: Samsung Galaxy S24 Ultra
+    class: qhd-large
+    diagonalIn: 6.8
+    widthPx: 1440
+    heightPx: 3120
+    aspect: "19.5:9"
+    ppi: 505
+    densityDpi: 500
+    insetYPx: 110
+    status: crawled
+  - id: redmi-13c
+    model: Xiaomi Redmi 13C
+    class: budget-hd
+    diagonalIn: 6.74
+    widthPx: 720
+    heightPx: 1600
+    aspect: "20:9"
+    ppi: 260
+    densityDpi: 260
+    insetYPx: 64
+    status: crawled
+  - id: zfold5-inner
+    model: Samsung Galaxy Z Fold 5 (inner)
+    class: foldable-square
+    diagonalIn: 7.6
+    widthPx: 1812
+    heightPx: 2176
+    aspect: "21.6:18"
+    ppi: 374
+    densityDpi: 360
+    insetYPx: 100
+    status: crawled

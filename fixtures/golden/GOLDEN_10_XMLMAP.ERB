@@ -1,0 +1,213 @@
+; ============================================================================
+; GOLDEN_10_XMLMAP.ERB - XML / MAP / DataTable container functions
+; builtin-functions.yaml: XML_* MAP_* DT_* ENUMVAR* ENUMMACRO* GETVAR GETVARS
+;   SETVAR VARSETEX EXISTVAR ISDEFINED GETNUM GETNUMB GETPALAMLV GETEXPLV
+;   ERDNAME ARRAYMSORT ARRAYMSORTEX
+; NOTE: DT row ids are timestamp-based, so raw ids / DT_TOXML output are NOT
+;   printed; rows are addressed by row number instead. MAP_TOXML has no
+;   timestamps and is printed.
+; NOTE: the non-BYNAME XML_GET / XML_SET / XML_ADDNODE / XML_ADDATTRIBUTE /
+;   XML_REMOVENODE / XML_REMOVEATTRIBUTE / XML_REPLACE resolve arg0 as:
+;     - INTEGER handle -> key lookup in DataXmlDocument (XmlGetMethod/
+;       XmlSetMethod/XmlAddNodeMethod.GetIntValue, FunctionMethodCreator.cs:163,1225,1502);
+;     - STRING VARIABLE -> its VALUE is parsed as raw XML source text and, for
+;       XML_SET/XML_ADDNODE, written back into that variable (same lines).
+;   A plain STRING EXPRESSION holding a document *name* is NOT a lookup:
+;   XML_GET(GDOCV,...) with GDOCV="GDOC" throws "XML_GET函数:""GDOC""的解析错误".
+;   Name lookup for the non-BYNAME family therefore requires an INTEGER doc id
+;   (handle 7 below); XML_DOCUMENT / XML_EXIST / XML_TOSTR accept either an
+;   int handle or a name string (XmlDocumentMethod.cs:1111). The *_BYNAME
+;   variants take the doc name as a plain STRING expression; attribute
+;   removal addresses the attribute through the xpath (@attr), not a trailing
+;   name argument.
+;   VARSETEX(name, value [, clear [, begin [, end]]]) first arg is a STRING.
+;   SPLIT/ENCODETOUNI/DT_SELECT fill the RESULT array (engine field
+;   VEvaluator.RESULT_ARRAY == DataIntegerArray[RESULT]), so read RESULT:0..
+; ============================================================================
+@GOLDEN_XMLMAP
+	#DIMS XBUF, 20
+	#DIMS MAPSTR
+	#DIMS XSCHEMA
+	#DIMS XDATA
+	#DIMS GDOCV
+	#DIM KA, 5
+	#DIM KB, 5
+	PRINTL === SECTION:VAR-UTILS ===
+	FLAG:10 = 123
+	PRINTFORML GETVAR={GETVAR("FLAG:10")} GETVARS=[%GETVARS("GAMEBASE_TITLE")%]
+	PRINTFORML SETVAR={SETVAR("FLAG:10", 456)} NOW={FLAG:10}
+	VARSETEX "FLAG", 9, 0, 100, 103
+	PRINTFORML VARSETEX={FLAG:100},{FLAG:101},{FLAG:102}
+	PRINTFORML EXISTVAR={EXISTVAR("FLAG")},{EXISTVAR("GAMEBASE_TITLE")},{EXISTVAR("NO_SUCH_VAR_XYZ")}
+	PRINTFORML ISDEFINED={ISDEFINED("GOLDEN_NO_MACRO_XYZ")}
+	PRINTFORML GETPALAMLV={GETPALAMLV(500, 10)} GETEXPLV={GETEXPLV(50, 10)}
+	PRINTL === SECTION:ENUMVAR ===
+	PRINTFORML ENUMVARBEGINSWITH={ENUMVARBEGINSWITH("RESULT")}
+	PRINTFORML ENUMVARENDSWITH={ENUMVARENDSWITH("NAME")}
+	PRINTFORML ENUMVARWITH={ENUMVARWITH("LOCAL")}
+	PRINTFORML ENUMMACROBEGINSWITH={ENUMMACROBEGINSWITH("ZZZ_NO_")}
+	PRINTL === SECTION:ARRAYMSORT ===
+	KA = 3, 1, 2, 1, 3
+	KB = 30, 10, 20, 11, 33
+	ARRAYMSORT KA, KB
+	PRINTFORML MSORT_KA={KA:0},{KA:1},{KA:2},{KA:3},{KA:4}
+	PRINTFORML MSORT_KB={KB:0},{KB:1},{KB:2},{KB:3},{KB:4}
+	PRINTL === SECTION:MAP ===
+	PRINTFORML MAP_CREATE={MAP_CREATE("GM")} AGAIN={MAP_CREATE("GM")} EXIST={MAP_EXIST("GM")}
+	PRINTFORML MAP_SET={MAP_SET("GM", "K1", "V1")} SET2={MAP_SET("GM", "K2", "V2")}
+	PRINTFORML MAP_HAS={MAP_HAS("GM", "K1")}/{MAP_HAS("GM", "KX")}
+	PRINTFORML MAP_GET=%MAP_GET("GM", "K1")%/%MAP_GET("GM", "KX")%
+	PRINTFORML MAP_SIZE={MAP_SIZE("GM")}
+	PRINTFORML MAP_KEYS=%MAP_GETKEYS("GM")%
+	MAPSTR '= MAP_TOXML("GM")
+	PRINTFORML MAP_TOXML=%MAPSTR%
+	; MAP_FROMXML only imports into an EXISTING map: it returns 0 before
+	; parsing when the name is not in DataStringMaps
+	; (FunctionMethodCreator.cs:3046-3051). Create the destination first.
+	MAP_CREATE "GM2"
+	PRINTFORML MAP_FROMXML={MAP_FROMXML("GM2", MAPSTR)}
+	PRINTFORML GM2=%MAP_GET("GM2", "K1")%/%MAP_GET("GM2", "K2")% SIZE={MAP_SIZE("GM2")}
+	PRINTFORML MAP_REMOVE={MAP_REMOVE("GM", "K1")} SIZE={MAP_SIZE("GM")}
+	PRINTFORML MAP_CLEAR={MAP_CLEAR("GM")} SIZE={MAP_SIZE("GM")}
+	PRINTFORML MAP_RELEASE={MAP_RELEASE("GM")}/{MAP_RELEASE("GM2")}
+	PRINTL === SECTION:XML ===
+	PRINTFORML XML_DOCUMENT={XML_DOCUMENT(7, "<root><a id='1'>A1</a><a id='2'>A2</a></root>")}
+	PRINTFORML XML_EXIST={XML_EXIST(7)}
+	PRINTFORML XML_GET={XML_GET(7, "/root/a/@id", XBUF)} X0=%XBUF:0% X1=%XBUF:1%
+	PRINTFORML XML_GET_TEXT={XML_GET(7, "/root/a[1]", XBUF, 1)} T=%XBUF:0%
+; ENGINE-FAULT ORACLE (observed 2026-10-18): XML_SET with the default style=0
+;   runs SetNode's `node.Value = val` on an Element node, which .NET rejects
+;   with InvalidOperationException "Cannot set a value on node type 'Element'";
+;   XmlSetMethod has no catch for it, so the engine aborts the script. Setting
+;   element text therefore needs style=1 (InnerText), passed as the 5th arg.
+	PRINTFORML XML_SET={XML_SET(7, "/root/a[1]", "B1", 0, 1)}
+	PRINTFORML XML_GET_AFTER={XML_GET(7, "/root/a[1]", XBUF, 1)} T=%XBUF:0%
+	PRINTFORML XML_ADDNODE={XML_ADDNODE(7, "/root", "<c>CC</c>")}
+	PRINTFORML XML_ADDATTRIBUTE={XML_ADDATTRIBUTE(7, "/root/c", "attr", "V")}
+	PRINTFORML XML_TOSTR=%XML_TOSTR(7)%
+	PRINTFORML XML_REMOVENODE={XML_REMOVENODE(7, "/root/c")}
+	PRINTFORML XML_REMOVEATTRIBUTE={XML_REMOVEATTRIBUTE(7, "/root/a[1]/@id")}
+	PRINTFORML XML_REPLACE={XML_REPLACE(7, "/root/a[2]", "<b id='9'>B9</b>")}
+	PRINTFORML XML_TOSTR2=%XML_TOSTR(7)%
+	PRINTL === SECTION:XML-SRC ===
+; ENGINE-FAULT ORACLE (observed 2026-10-18): XML_GET(arg0 = a string
+;   VARIABLE holding raw XML) throws CodeEE "XML_GET函数:"<root><x>10</x></root>"
+;   的解析错误:Data at the root level is invalid. Line 1, position 1." even
+;   though the same text works as a literal in XML_DOCUMENT and XML_GET.
+;   The variable-held-source path is probed manually via @GOLDEN_XML_PROBE
+;   after the suite so a fault cannot truncate the baseline.
+	PRINTFORML XML_SRC_GET={XML_GET("<root><x>10</x></root>", "/root/x", XBUF, 1)} V=%XBUF:0%
+	PRINTL === SECTION:XML-BYNAME ===
+	PRINTFORML XML_DOCUMENT={XML_DOCUMENT("GDOC2", "<r><n v='1'>X</n></r>")}
+	PRINTFORML XML_GET_BYNAME={XML_GET_BYNAME("GDOC2", "/r/n/@v", XBUF)} X=%XBUF:0%
+	PRINTFORML XML_SET_BYNAME={XML_SET_BYNAME("GDOC2", "/r/n", "Y", 0, 1)}
+	PRINTFORML XML_ADDNODE_BYNAME={XML_ADDNODE_BYNAME("GDOC2", "/r", "<m>M</m>")}
+	PRINTFORML XML_ADDATTRIBUTE_BYNAME={XML_ADDATTRIBUTE_BYNAME("GDOC2", "/r/m", "k", "1")}
+	PRINTFORML XML_REMOVENODE_BYNAME={XML_REMOVENODE_BYNAME("GDOC2", "/r/m")}
+	PRINTFORML XML_REMOVEATTRIBUTE_BYNAME={XML_REMOVEATTRIBUTE_BYNAME("GDOC2", "/r/n/@v")}
+	PRINTFORML XML_REPLACE_BYNAME={XML_REPLACE_BYNAME("GDOC2", "/r/n", "<z>7</z>")}
+	PRINTFORML XML_TOSTR3=%XML_TOSTR("GDOC2")%
+	PRINTFORML XML_RELEASE2={XML_RELEASE("GDOC2")}
+	PRINTFORML XML_RELEASE={XML_RELEASE(7)}
+	PRINTL === SECTION:DT ===
+	PRINTFORML DT_CREATE={DT_CREATE("GT")} AGAIN={DT_CREATE("GT")}
+; Column type ids are 1..5 = int8/int16/int32/int64/string (Utils.cs:116-123,
+; IntToType); 0 is rejected with CodeEE "指定了不支持的类型" (observed).
+	PRINTFORML DT_COLUMN_ADD={DT_COLUMN_ADD("GT", "NAME")} ADD2={DT_COLUMN_ADD("GT", "VAL", 4)}
+	PRINTFORML DT_COLNAMES={DT_COLUMN_NAMES("GT")}
+	PRINTFORML DT_COLUMN_EXIST={DT_COLUMN_EXIST("GT", "NAME")}/{DT_COLUMN_EXIST("GT", "NOPE")}
+	DT_COLUMN_OPTIONS "GT", "NAME", DEFAULT, "NONAME"
+	PRINTFORML DT_COLUMN_OPTIONS={RESULT}
+; DT_ROW_ADD returns the timestamp row id (DataTableRowSetMethod:2276-2319),
+; so the return value is discarded and only lengths are printed.
+	DT_ROW_ADD "GT", "NAME", "R1", "VAL", 10
+	PRINTFORML DT_ROW_ADD1_LEN={DT_ROW_LENGTH("GT")}
+	DT_ROW_ADD "GT", "NAME", "R2", "VAL", 20
+	PRINTFORML DT_ROW_ADD2_LEN={DT_ROW_LENGTH("GT")}
+	PRINTFORML DT_ROW_LENGTH={DT_ROW_LENGTH("GT")} DT_COLUMN_LENGTH={DT_COLUMN_LENGTH("GT")}
+	PRINTFORML DT_CELL_GETS0=%DT_CELL_GETS("GT", 0, "NAME")% V0={DT_CELL_GET("GT", 0, "VAL")}
+	PRINTFORML DT_CELL_GETS1=%DT_CELL_GETS("GT", 1, "NAME")% V1={DT_CELL_GET("GT", 1, "VAL")}
+	PRINTFORML DT_CELL_SET={DT_CELL_SET("GT", 0, "VAL", 99)}
+	PRINTFORML DT_CELL_GET_AFTER={DT_CELL_GET("GT", 0, "VAL")}
+	PRINTFORML DT_CELL_ISNULL={DT_CELL_ISNULL("GT", 0, "VAL")}
+	PRINTFORML DT_SELECT={DT_SELECT("GT")}
+	PRINTFORML DT_SELECT_HITS={RESULT:0}
+	PRINTFORML DT_ROW_SET={DT_ROW_SET("GT", 0, "NAME", "R1X", "VAL", 55)}
+	; `%...%` accepts STRING-typed expressions only: a non-string term inside
+	; raises CodeEE IsNotStringPer (Lv2 warn text "%-expression result is not a string"),
+	; StrForm.cs:330-334; `{...}` requires long, StrForm.cs:311-315.
+	; Adjacent `%A%%B%` segment pairing itself is fine (each `%` closes at the
+	; next `%`, LexicalAnalyzer.cs:1113-1121; only truly empty `%''%` throws).
+	; DT_CELL_GET returns INTEGER -> must use `{...}`, not `%...%` (same
+	; pattern as the DT_CELL_GETS0/V0 lines above).
+	; A11c re-audit (2026-10-18): every remaining %...%/{...} pair in this
+	; file was checked term-by-term against the `returns:` field of
+	; specs/builtin-functions.yaml - all {} carry int (GETVAR/ENUM*/MAP_*/
+	; XML_*/DT_* handles+counts/STRLENSU/EXIST*/GETNUM*/GETMETH) and all %...%
+	; carry string (GETVARS/MAP_GET/MAP_GETKEYS/MAP_TOXML/XML_TOSTR/XBUF
+	; slots/DT_CELL_GETS/ERDNAME/GETMETHS/GETDOINGFUNCTION). The old snapshot
+	; that showed 2 same-family lines (DT_CELL_GETS0/GETS1, warn-log :87/:88,
+	; one of them under-recorded) is fixed at lines 100/101/115; no residual
+	; int-in-%/string-in-{} line remains.
+	PRINTFORML DT_ROW_SET_AFTER=%DT_CELL_GETS("GT", 0, "NAME")%/{DT_CELL_GET("GT", 0, "VAL")}
+	PRINTFORML DT_ROW_REMOVE={DT_ROW_REMOVE("GT", 1)}
+	PRINTFORML DT_ROW_REMOVE_AFTER={DT_ROW_LENGTH("GT")}
+	PRINTFORML DT_COLUMN_REMOVE={DT_COLUMN_REMOVE("GT", "VAL")}
+	PRINTFORML DT_COLNAMES2={DT_COLUMN_NAMES("GT")}
+	XDATA '= DT_TOXML("GT", XSCHEMA)
+	PRINTFORML DT_TOXML_SCHEMA_LEN={STRLENSU(XSCHEMA)} DATA_LEN={STRLENSU(XDATA)}
+	; DataTable.ReadXmlSchema matches the schema's table name against the
+	; instance name; a different destination name throws
+	; "DataTable 'GT2' does not match to any DataTable in source" and the
+	; engine's catch-all returns 0 (verified with .NET 9 locally 2026-10-18).
+	; Import back into the same name (the export was taken after VAL was
+	; dropped, so the restored table has 1 row / 1 column).
+	PRINTFORML DT_FROMXML={DT_FROMXML("GT", XSCHEMA, XDATA)} ROWS={DT_ROW_LENGTH("GT")} COLS={DT_COLUMN_LENGTH("GT")}
+	PRINTFORML DT_NOCASE={DT_NOCASE("GT", 1)}
+	PRINTFORML DT_CLEAR={DT_CLEAR("GT")} ROWS={DT_ROW_LENGTH("GT")}
+	PRINTFORML DT_RELEASE={DT_RELEASE("GT")} EXIST={DT_EXIST("GT")}
+	PRINTL === SECTION:ERD-GETNUM ===
+	PRINTFORML GETNUM={GETNUM(ABLNAME, "NO_SUCH_KEY_XYZ")}
+	PRINTFORML GETNUMB={GETNUMB("ABLNAME", "NO_SUCH_KEY_XYZ")}
+	PRINTFORML ERDNAME=[%ERDNAME(ABLNAME, 0)%]
+	PRINTL === SECTION:FUNC-ENUM ===
+; GETMETH/GETMETHS/EXISTMETH resolve USER-DEFINED methods only (userDefinedOnly=true,
+; FunctionMethodCreator.cs:8558/8600/8632); builtins like MAX/ABS always miss.
+	PRINTFORML EXISTFUNCTION={EXISTFUNCTION("GOLDEN_M_INT")}/{EXISTFUNCTION("GOLDEN_M_STR")}/{EXISTFUNCTION("GOLDEN_XML_PROBE")}/{EXISTFUNCTION("NO_SUCH_FUNC_XYZ")}
+	PRINTFORML EXISTMETH={EXISTMETH("GOLDEN_M_INT")}/{EXISTMETH("GOLDEN_M_STR")}/{EXISTMETH("NO_SUCH_METH_XYZ")}
+	PRINTFORML GETMETH={GETMETH("GOLDEN_M_INT", 0, 41)} GETMETH_DEF={GETMETH("NO_SUCH_METH_XYZ", -7)}
+	PRINTFORML GETMETHS=%GETMETHS("GOLDEN_M_STR", "DEF", "z")% GETMETHS_DEF=%GETMETHS("NO_SUCH_METH_XYZ", "DEF")%
+	PRINTFORML GETDOINGFUNCTION=%GETDOINGFUNCTION()%
+	PRINTFORML ENUMFUNCBEGINSWITH={ENUMFUNCBEGINSWITH("PRINTDATA")}
+	PRINTFORML ENUMFUNCENDSWITH={ENUMFUNCENDSWITH("FORMW")}
+	PRINTFORML ENUMFUNCWITH={ENUMFUNCWITH("TRYCALL")}
+	PRINTFORML ENUMMACROENDSWITH={ENUMMACROENDSWITH("ZZZ_NO_")}
+	PRINTFORML ENUMMACROWITH={ENUMMACROWITH("ZZZ_NO_")}
+	PRINTFORML END-XMLMAP
+
+; Probe for the variable-source path. GOLDEN_ROOT CALLs it AFTER writing the
+; main OUTPUTLOG, so even a fault here cannot truncate the baseline; the width
+; result is also persisted to GOLDEN_PROBE.txt. STRLENS counts display width
+; (ASCII=1, full-width=2), so 8/8 means PV holds ASCII `<a>1</a>`.
+@GOLDEN_XML_PROBE
+	#DIMS PBUF, 4
+	#DIMS PV
+	#DIMS POUT
+	PV:0 '= "<a>1</a>"
+	POUT '= "PROBE_WIDTH=" + TOSTR(STRLENS(PV)) + "/" + TOSTR(STRLENSU(PV))
+	SAVETEXT POUT, "GOLDEN_PROBE.txt"
+	PRINTFORML PROBE_WIDTH={STRLENS(PV)}/{STRLENSU(PV)}
+	PRINTFORML PROBE_LIT={XML_GET("<a>1</a>", "/a", PBUF, 1)} V=%PBUF:0%
+	PRINTFORML PROBE_VAR={XML_GET(PV:0, "/a", PBUF, 1)} V=%PBUF:0%
+	PRINTFORML PROBE_END
+
+; User-defined methods probed by the FUNC-ENUM section: GETMETH sees only these.
+; Emuera types method parameters by name: ARG is the int argument, ARGS the
+; string argument (corpus: COMMON.ERB @LIST_IN_STRING_CN(ARGS, ...)).
+@GOLDEN_M_INT(ARG)
+	#FUNCTION
+	RETURNF ARG + 1
+
+@GOLDEN_M_STR(ARGS)
+	#FUNCTIONS
+	RETURNF ARGS + "S"

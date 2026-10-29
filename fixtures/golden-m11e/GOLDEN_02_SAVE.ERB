@@ -1,0 +1,35 @@
+; ============================================================================
+; GOLDEN_02_SAVE.ERB - SAVE-14 / SAVE-13
+; ----------------------------------------------------------------------------
+; SAVE-14 CHKDATA 的 ETC_ERROR(4)（spec: VariableEvaluator.cs:2219-2228）
+;   槽位文件存在但读不出可解析的存档头 -> EraDataState 第 5 项（码 4）。
+;   移植侧两个入口：readFileBytes 回 null -> "加载时发生错误"；
+;   读到字节但头解析失败 -> "存档数据已损坏"（SaveDataProbe.check / checkBytes）。
+;   本节的坏档由装置在开跑前落字节（GoldenPipeline.newRuntime 的 seedIoRoot），
+;   走的是「字节在、头坏」那条 => 期望 4 / 存档数据已损坏。
+; SAVE-13 坏 GZip 正文判非容器（spec: EraBinaryDataReader.cs:810/:826-828）
+;   容器头完好但正文解压失败时 CreateReader 返回 null，调用方走「不是容器」分支：
+;   LOADCHARA 静默不动角色表（VariableEvaluator.cs:2299-2303），不得冒 CodeEE 打死整局。
+; ============================================================================
+@M11E_SAVE14
+	PRINTL === SECTION:M11E-SAVE14 ===
+	CHKDATA 5
+	PRINTFORML CHKDATA_CORRUPT={RESULT} DESC=%RESULTS:0%
+	CHKDATA 6
+	PRINTFORML CHKDATA_MISSING={RESULT} DESC=%RESULTS:0%
+	SAVEDATA 7, "M11E SEVEN"
+	CHKDATA 7
+	PRINTFORML CHKDATA_MEMORY={RESULT} DESC=%RESULTS:0%
+
+@M11E_SAVE13
+	PRINTL === SECTION:M11E-SAVE13 ===
+	DELALLCHARA
+	ADDVOIDCHARA
+	SAVECHARA "M11E_GOOD.dat", "m11e good", 0
+	PRINTFORML SAVECHARA_FILE={EXISTFILE("dat/chara_M11E_GOOD.dat.dat")} NUM={CHARANUM}
+	DELALLCHARA
+	PRINTFORML BEFORE_LOAD_NUM={CHARANUM}
+	LOADCHARA "M11E_GOOD.dat"
+	PRINTFORML AFTER_GOOD_NUM={CHARANUM}
+	LOADCHARA "M11E_BAD.dat"
+	PRINTFORML AFTER_BAD_NUM={CHARANUM} BAD_FILE={EXISTFILE("dat/chara_M11E_BAD.dat.dat")}

@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>eratw uipreview</title>
+<style>
+  /* CONTRACT-UP1 §4.7：手机比例外框 = --screen 宽高，canvas 内部分辨率固定为 /state 的值，
+     CSS 等比缩放（不改变布局）；点击坐标按缩放比换算回画布像素再回传 /tap。纯原生 JS+Canvas。 */
+  html, body { margin: 0; height: 100%; background: #1b1b22; color: #cfcfd6;
+               font: 13px/1.5 system-ui, sans-serif; }
+  #wrap { display: flex; height: 100%; }
+  #stage { flex: 1; display: flex; align-items: center; justify-content: center; min-width: 0; }
+  /* 外框：宽高比由 JS 按 --screen 设置；高度撑满、宽度按比例。 */
+  #phone { position: relative; background: #000; border: 1px solid #3a3a46;
+           border-radius: 12px; overflow: hidden; }
+  #frame { display: block; width: 100%; height: 100%; image-rendering: pixelated; cursor: crosshair; }
+  #bar { width: 300px; padding: 12px; box-sizing: border-box; background: #23232c;
+         display: flex; flex-direction: column; gap: 8px; }
+  #bar h1 { font-size: 14px; margin: 0 0 4px; }
+  #input { width: 100%; box-sizing: border-box; background: #14141a; color: #eee;
+           border: 1px solid #3a3a46; border-radius: 6px; padding: 6px 8px; }
+  #send { width: 100%; background: #3947d2; color: #fff; border: 0; border-radius: 6px;
+          padding: 6px 8px; cursor: pointer; }
+  #status { white-space: pre-wrap; word-break: break-all; color: #8f8fa2; max-height: 60vh;
+            overflow: auto; }
+  .err { color: #ff7b72; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage"><div id="phone"><canvas id="frame"></canvas></div></div>
+  <div id="bar">
+    <h1>eratw uipreview</h1>
+    <input id="input" placeholder="输入文本后回车 / 点发送 → POST /submit" autocomplete="off">
+    <button id="send">发送（submit）</button>
+    <div id="status">连接中…</div>
+  </div>
+</div>
+<script>
+"use strict";
+var lastRev = -1;          // 已贴到画布的帧序号（X-Frame-Rev）
+var geom = null;           // /state 里的 width/height（canvas 内部分辨率）
+var screenW = 0, screenH = 0; // 外框 CSS 尺寸基准（--screen，从外框像素比取）
+var canvas = document.getElementById("frame");
+var ctx = canvas.getContext("2d");
+var phone = document.getElementById("phone");
+// 不命名成 `status`：window.status 是遗留字符串属性，赋值会被强制字符串化，
+// 后续 note() 在严格模式下对字符串设 textContent 直接 TypeError，截断整条启动链。
+var statusEl = document.getElementById("status");
+
+function note(s, isErr) { statusEl.textContent = s; statusEl.className = isErr ? "err" : ""; }
+
+function fitPhone() {
+  // 外框保持 --screen 的宽高比（geom 里没有的话退画布比），高度撑满可视区。
+  var ratio = (screenW > 0 && screenH > 0) ? screenW / screenH
+            : (geom ? geom.width / geom.height : 9 / 20);
+  var h = window.innerHeight - 24;
+  var w = h * ratio;
+  phone.style.height = h + "px";
+  phone.style.width = w + "px";
+}
+window.addEventListener("resize", fitPhone);
+
+// 300ms 轮询贴帧：rev 未变 → 304（服务端判），变了 → 200 画一帧。
+function poll() {
+  fetch("/frame.png?rev=" + lastRev, { cache: "no-store" }).then(function (r) {
+    if (r.status === 304) return null;
+    if (r.status !== 200) throw new Error("frame HTTP " + r.status);
+    lastRev = Number(r.headers.get("X-Frame-Rev"));
+    return r.blob();
+  }).then(function (blob) {
+    if (!blob) return;
+    return createImageBitmap(blob).then(function (bmp) {
+      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      bmp.close();
+    });
+  }).catch(function (e) { note("贴帧失败：" + e.message, true); });
+}
+
+function refreshState() {
+  return fetch("/state", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (s) {
+    if (!geom) {
+      geom = s;
+      canvas.width = s.width;    // 内部分辨率固定 = 服务端画布（不随窗口变）
+      canvas.height = s.height;
+      fitPhone();
+      note("列数 " + s.columns + "，画布 " + s.width + "x" + s.height +
+           "，行高 " + s.lineHeight + "px，按钮 " + (s.buttons ? s.buttons.length : 0) + " 颗");
+      poll();
+      setInterval(poll, 300);
+      setInterval(refreshState, 1000);
+    }
+    if (s.failure) note("会话终局失败：\n" + s.failure, true);
+    else if (s.vmEnded) note("会话已结束（QUIT）。可 Ctrl+C 服务进程。");
+  }).catch(function (e) { note("state 失败：" + e.message, true); });
+}
+
+function canvasPos(ev) {
+  // 点击坐标 ÷ CSS 缩放比 → 画布像素（CONTRACT-UP1 §4.7）。
+  var rect = canvas.getBoundingClientRect();
+  var sx = canvas.width / rect.width, sy = canvas.height / rect.height;
+  return { x: Math.round((ev.clientX - rect.left) * sx),
+           y: Math.round((ev.clientY - rect.top) * sy) };
+}
+
+canvas.addEventListener("mousedown", function (ev) {
+  var p = canvasPos(ev);
+  fetch("/tap", { method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ x: p.x, y: p.y }) })
+    .then(function (r) { return r.json(); })
+    .then(function (j) { note("tap " + p.x + "," + p.y + (j.queued ? " 已受理" : " 被拒"), !j.queued); })
+    .catch(function (e) { note("tap 失败：" + e.message, true); });
+});
+
+canvas.addEventListener("wheel", function (ev) {
+  ev.preventDefault();
+  // 滚轮向下 = 向下翻（贴底方向），按行给 ±1；快速滚动按 deltaY 取整累加，此处简化为定步长。
+  var rows = ev.deltaY > 0 ? 1 : -1;
+  fetch("/scroll", { method: "POST", headers: { "Content-Type": "application/json" },
+                     body: JSON.stringify({ rows: rows }) });
+}, { passive: false });
+
+function submitText() {
+  var el = document.getElementById("input");
+  var text = el.value;
+  fetch("/submit", { method: "POST", headers: { "Content-Type": "application/json" },
+                     body: JSON.stringify({ text: text }) })
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      note(j.queued ? "已提交：" + JSON.stringify(text) : "提交被拒（队列已关闭）", !j.queued);
+      if (j.queued) el.value = "";
+    })
+    .catch(function (e) { note("submit 失败：" + e.message, true); });
+}
+document.getElementById("send").addEventListener("click", submitText);
+document.getElementById("input").addEventListener("keydown", function (ev) {
+  if (ev.key === "Enter") submitText();
+});
+
+refreshState();
+</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+NN45NSFN46FSN47 
+AFTER-PRINTN
+BTN
+[X]
+                       BC
+BLC                      
+PLAIN
+PF7

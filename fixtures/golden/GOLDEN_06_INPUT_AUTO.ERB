@@ -1,0 +1,71 @@
+; ============================================================================
+; GOLDEN_06_INPUT_AUTO.ERB - fully automatic input statements (unattended)
+; isa.yaml: INPUT INPUTS TINPUT TINPUTS BINPUT BINPUTS ONEBINPUT ONEBINPUTS
+;   TONEINPUT TONEINPUTS INPUTMOUSEKEY
+; ----------------------------------------------------------------------------
+; Mechanism (verified in decompiled source):
+;   - SKIPLOG 1 sets Console.MesSkip (Process.cs SKIPLOG -> EmueraConsole.MesSkip).
+;   - INPUT-family takes positional args: INPUT def [, mouse [, canskip]]
+;     (SP_INPUT_ArgumentBuilder); with canskip != null and MesSkip=true the
+;     default value is taken immediately without waiting
+;     (FunctionIdentifier.cs INPUT_Instruction.DoInstruction).
+;   - Command lines must NOT have a comma directly after the command name;
+;     args follow a space: `INPUT 42, 0, 1` (NOT `INPUT, 42, 0, 1`).
+;   - TINPUT/TINPUTS args: time, def [, disp [, timeout-mes [, mouse [,
+;     canskip]]]] (SP_TINPUT_ArgumentBuilder: arg4 is the timeout message
+;     STRING, args 5/6 are ints).
+;   - TINPUT/TONEINPUT time out and take the default value (no output emitted
+;     when the countdown display flag is 0).
+;   - INPUTMOUSEKEY with a timeout returns 0 input after the timeout.
+;   - PRINT output is NOT suppressed (that is SKIPDISP, a different flag).
+;   - Every input statement is preceded by SKIPLOG 1 because MesSkip is reset
+;     after each submitted input (EmueraConsole.cs:1456).
+; ============================================================================
+@GOLDEN_INPUT_AUTO
+	PRINTL === SECTION:INPUT-AUTO ===
+	SKIPLOG 1
+	INPUT 42, 0, 1
+	PRINTFORML INPUT={RESULT}
+	SKIPLOG 1
+	INPUTS "ANS", 0, 1
+	PRINTFORML INPUTS=%RESULTS:0%
+	SKIPLOG 1
+	PRINTL === SECTION:TINPUT-AUTO ===
+	TINPUT 500, 111, 0, "TU-M", 0, 1
+	PRINTFORML TINPUT={RESULT}
+	TINPUTS 500, "TDEF", 0, "TU-MS", 0, 1
+	PRINTFORML TINPUTS=%RESULTS:0%
+; TONEINPUT* timeout paths are interaction-dependent (a key arriving inside the
+; time window changes the result), so the automatic run takes the canskip
+; default: args are time, def, disp, timeout-mes, mouse, canskip. mouse must be
+; present because the skip path dereferences it unconditionally
+; (FunctionIdentifier.cs:1040/1088).
+	TONEINPUT 500, 9, 0, "", 0, 1
+	PRINTFORML TONEINPUT={RESULT}
+	TONEINPUTS 500, "TS", 0, "", 0, 1
+	PRINTFORML TONEINPUTS=%RESULTS:0%
+	PRINTL === SECTION:BINPUT-AUTO ===
+; Macros depend on MesSkip being true at the statement itself; re-arm it because
+; an Enter arriving during TONEINPUT* clears MesSkip (EmueraConsole.cs:1456).
+	SKIPLOG 1
+	BINPUT 55, 0, 1
+	PRINTFORML BINPUT={RESULT}
+	SKIPLOG 1
+	BINPUTS "BS", 0, 1
+	PRINTFORML BINPUTS=%RESULTS:0%
+	SKIPLOG 1
+	ONEBINPUT 66, 0, 1
+	PRINTFORML ONEBINPUT={RESULT}
+	; ONEBINPUTS uses SP_INPUTS (FunctionIdentifier.cs:2429/430).
+	; 3rd int is bound as CanSkip even though SP_INPUTS warns TooManyArg
+	; (ArgumentParser.cs:1155-1163); without it ONEBINPUTS scans the console
+	; for buttons and the title-screen buttons (generation 0 always counts,
+	; FunctionIdentifier.cs:2477) would force WaitInput.
+	SKIPLOG 1
+	ONEBINPUTS "OBS", 0, 1
+	PRINTFORML ONEBINPUTS=%RESULTS:0%
+	SKIPLOG 0
+	; INPUTMOUSEKEY / ISTIMEOUT are real-time input state (a stray Enter changes
+	; both) and are covered by the manual suite, not the deterministic run.
+	PRINTL === SECTION:INPUT-STATE ===
+	PRINTFORML END-INPUT-AUTO

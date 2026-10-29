@@ -1,0 +1,91 @@
+== msgothic [0] msgothic.ttc
+  name0   © 2017 data:RICOH Co.,Ltd. typeface:RYOBI IMAGIX CO.
+  name1   MS Gothic
+  name2   Regular
+  name6   MS-Gothic
+  name13  Microsoft supplied font. You may use this font to create, display, and print content as permitted by the license terms or terms of use, of the Microsoft product, service, or content in which this font was included. You may only (i) embed this font in content as permitted by the embedding restriction
+  numGlyphs=22291 unitsPerEm=256
+== msgothic [1] msgothic.ttc
+  name0   © 2017 data:RICOH Co.,Ltd. typeface:RYOBI IMAGIX CO.
+  name1   MS UI Gothic
+  name2   Regular
+  name6   MS-UIGothic
+  name13  Microsoft supplied font. You may use this font to create, display, and print content as permitted by the license terms or terms of use, of the Microsoft product, service, or content in which this font was included. You may only (i) embed this font in content as permitted by the embedding restriction
+  numGlyphs=22291 unitsPerEm=256
+== msmincho [0] msmincho.ttc
+  name0   © 2017 data:RICOH Co.,Ltd. typeface:RYOBI IMAGIX CO.
+  name1   MS Mincho
+  name2   Regular
+  name6   MS-Mincho
+  name13  Microsoft supplied font. You may use this font to create, display, and print content as permitted by the license terms or terms of use, of the Microsoft product, service, or content in which this font was included. You may only (i) embed this font in content as permitted by the embedding restriction
+  name14  http://www.microsoft.com/typography/fonts
+  numGlyphs=19399 unitsPerEm=256
+== simhei [0] simhei.ttf
+  name0   © Beijing ZhongYi Electronics Co., 1995-2005, All rights reserved
+  name1   SimHei
+  name2   Regular
+  name6   SimHei
+  name13  Microsoft supplied font. You may use this font to create, display, and print content as permitted by the license terms or terms of use, of the Microsoft product, service, or content in which this font was included. You may only (i) embed this font in content as permitted by the embedding restriction
+  numGlyphs=28562 unitsPerEm=256
+== Saitamaar [0] Saitamaar.ttf
+  name0   Created by keage with FontForge 2.0 (http://fontforge.sf.net)
+  name1   Saitamaar
+  name2   Normal
+  name6   Saitamaar
+  numGlyphs=9793 unitsPerEm=1280
+
+== 2026-10-20 · f-license 授权定案复核（一次来源 + 本机字段实测）==
+
+[方法] python 3.14.3 + fontTools 4.67.0；源＝语料只读原件（一字节未改）；成品＝本机复跑
+  `python build_subset.py --out-dir <临时目录>`（不写仓内资产）。读数：verify GREEN，
+  coverage hit 5268 / miss 2808，sidecar 5269 行，subset sha256 cb279cdd8f40031e35660763fb3ede8fb61ce5f682342be21e59fe6570f4b260
+  ＝ `render/src/main/resources/fonts/subset-build-manifest.txt:14` ⇒ 判据⑤（逐字节可复现）在 f-license 机上再次成立。
+
+[源字体 Saitamaar.ttf] 语料 font/Saitamaar.ttf，2015340 字节，sha256 19570b8605954669772f533e1a5f04b0f560c371114e33be179ea91ea9085cc9
+  tables    FFTM, GlyphOrder, OS/2, cmap, cvt , gasp, glyf, head, hhea, hmtx, loca, maxp, name, post
+  name 记录 14 条，覆盖 nameID 集合 {0,1,2,3,4,5,6}（plat1 与 plat3 各一份）；
+            ID13（许可说明）/ ID14（许可 URL）/ ID7（trademark）/ ID8（制造商）**均不存在**
+  OS/2      version 4，fsType 0x0000 —— bit0 RestrictedLicense / bit2 Preview&Print / bit3 Editable /
+            bit4 NoSubsetting / bit5 BitmapEmbeddingOnly / bit8 NoEmbedding 全为 0
+            ⇒ 文件自身不主张任何嵌入或子集限制，允许随 App 分发
+  head      flags 671（0x29F；OpenType 现口径除 bit11 外这些位均已弃用，不构成限制），unitsPerEm 1280
+  gasp      {65535: 2}    achVendID 'PfEd'（FontForge 默认值，非厂商限制字段）
+
+[成品 saitamaar-subset.ttf] 1135100 字节，sha256 cb279cdd8f40031e35660763fb3ede8fb61ce5f682342be21e59fe6570f4b260
+  name 记录 7 条，nameID 集合 {0,1,2,3,4,5,6}（build_subset.py 的 name_IDs 闸只裁 ID 集合不裁内容）：
+            name0 'Created by keage with FontForge 2.0 (http://fontforge.sf.net)'、
+            name1/4/6 'Saitamaar'、name3 'FontForge 2.0 : Saitamaar : 20-3-2013' —— keage 署名原样保留
+  OS/2 fsType 0 / head flags 671 / gasp {65535: 2} —— 与源同值；13/14 同样不存在
+
+[上游授权取证] 全部 2026-10-20 本机可达、原文逐字引
+  U1  https://github.com/keage/Saitamaar README.md「Licence」节原文：
+          ### Saitamaar
+          * Saitamaar is in the public domain.
+        同节另记 Saitamaar.js 为 MIT，署名 `&copy; YAMASINA Keage - http://keage.sakura.ne.jp`
+  U2  https://github.com/keage/Saitamaar/commit/9a67316c （2023-06-04T11:36:41Z，author login `keage`；
+        `gh api repos/keage/Saitamaar/contributors` = keage 7/7 全部提交）
+        该 commit 的 diff 逐字就是 U1 的两行 ⇒ PD 声明出自作者本人，不是二手转述
+  U3  署名同一性：U1 的 YAMASINA Keage ＝ 源字体 name0 里的 "keage" ＝ GitHub profile name "Keage"
+  U4  交叉佐证 https://github.com/asciiart-development/SaitamaarFont README_ja.md「ライセンス」节原文：
+        このフォントはパブリックドメインで提供されており、自由に使用、改変、再配布が可能です。
+        AUTHORS.txt 记 `Keage <keagecko@gmail.com>` 为版权作者，CONTRIBUTORS.txt 记 scrpgil
+  U5  Reserved Font Name 判定：同仓 OFL.txt 版权声明行原文
+        Copyright 2023 The Saitamaarfont Project Authors (https://github.com/googlefonts/googlefonts-project-template)
+        其后**没有** "with Reserved Font Name" 名字列表；OFL 1.1 的 RFN 只能由版权声明后的名字产生
+        （同文件 DEFINITIONS 原文："Reserved Font Name" refers to any names specified as such after the
+        copyright statement(s)）⇒ 该下游 OFL 未保留任何字体名 ⇒ 即便按 OFL 口径子集也无需改名
+  U6  反例排除：Saitamaar 未进 Google Fonts（`gh api repos/google/fonts/contents/ofl/saitamaar` → HTTP 404；
+        `search/code?q=Saitamaar+repo:google/fonts` → 0 命中）⇒ 不得把本字体写成「OFL 认证件」，
+        准确标签是 public domain；OFL 只存在于 U4/U5 那个重建仓对自身 2023 产物的授权里
+
+[结论] 三选一取 ①：**可以随包再分发，成品可入仓，族名保持 `Saitamaar`（不必改名）**。
+  PD 不主张署名/不限制子集/无 RFN；源与成品的 fsType=0 与缺失 ID13/14 与该结论无冲突。
+  附带口径修正：本仓 `tools/fontsubset/build_subset.py:15-16`、`core/.../font/PortFonts.kt`（c-glyphmetrics 路）、
+  `.workbuddy/CONTRACT-M4-C.md:73` 把授权写成「OFL」，应改为 public domain（这三处不属本路文件面，未改）。
+
+[遗留 TODO(verify)] 作者原站 http://keage.sakura.ne.jp 本机 DNS 不可解析（curl: Could not resolve host），
+  web.archive.org 本机 80/443 均连接超时（curl exit 28）⇒ 未做「语料件 vs 原站分发件」的逐字节比对，
+  jsdelivr 镜像（含 U4 仓 fonts/ttf/Saitamaar-Regular.ttf）亦不可达（curl 000）。
+  卡点：本机网络只能到 github.com / api.github.com / blog 类站点。
+  该缺口只影响「原件是否被中转方改过」这一条，不影响授权结论（授权声明出自作者本人 U1/U2，
+  且源字体内部署名与生成时间串与 U3 一致）。

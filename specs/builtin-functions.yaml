@@ -1,0 +1,2193 @@
+meta:
+  source_assembly: Emuera.dll 1.824.0.0
+  source_sha256: afa5143782d39cb7b6ceacd6f2271f8d322cab0e3f0c9b730a7ac0d3a6bba74e
+  primary_source: reference/emuera-cs/MinorShift.Emuera.GameData.Function/FunctionMethodCreator.cs
+notes:
+- 全部内建函数在 FunctionMethodCreator 的静态构造函数（9037-9318 行）一次性注册到 methodList 字典（9042-9312 行），无其他注册点；GetMethodList()（9320 行）是唯一出口。
+- 实际注册条目为 271 个函数名，对应 188 个 FunctionMethod 私有/公有类；任务简报中的 442 疑似为整个 GameData.Function 命名空间的成员统计口径（含非函数成员），以本表 271 为准。
+- 多个函数名共享同一实现类（如 TOUPPER/TOLOWER/TOHALF/TOFULL 共用 StrChangeStyleMethod），source 字段为类定义行号范围。
+- 参数形态中 [ ] 表示可省略参数，省略起点依据构造函数 ArgTypeList.OmitStart 或 argumentTypeArray；部分旧式类的可选参数边界标注 medium 待复核。
+- ERB 用户函数（#FUNCTION）不在本表，其注册位于 Process.LabelDictionary（Runtime.Script 侧），需另立规约。
+summary:
+  total: 271
+  by_category:
+    character: 19
+    debug: 6
+    input: 13
+    load: 3
+    math: 29
+    other: 17
+    save: 7
+    string: 33
+    variable: 71
+    view: 73
+  low_confidence: 45
+functions:
+- name: GETCHARA
+  category: character
+  args: charaID[, isSp]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 按角色登陆编号返回该角色在 CHARA 列表中的索引，不存在返回 -1。第二参数非 0 且开启 CompatiSPChara 时先找非 SP 再回退 SP 角色。
+  source: FunctionMethodCreator.cs:3110-3154
+  confidence: high
+- name: GETSPCHARA
+  category: character
+  args: charaID
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 返回指定编号的 SP 角色在角色列表中的索引，不存在返回 -1；未开启 CompatiSPChara 时抛错。
+  source: FunctionMethodCreator.cs:3155-3174
+  confidence: high
+- name: CSVNAME
+  category: character
+  args: charaID[, isSp]
+  returns: string
+  side_effects: 读取角色数据
+  semantics: 从角色 CSV 模板中读取指定登陆编号角色的 NAME 字段字符串。
+  source: FunctionMethodCreator.cs:3175-3229
+  confidence: high
+- name: CSVCALLNAME
+  category: character
+  args: charaID[, isSp]
+  returns: string
+  side_effects: 读取角色数据
+  semantics: 从角色 CSV 模板中读取指定登陆编号角色的 CALLNAME 字段字符串。
+  source: FunctionMethodCreator.cs:3175-3229
+  confidence: high
+- name: CSVNICKNAME
+  category: character
+  args: charaID[, isSp]
+  returns: string
+  side_effects: 读取角色数据
+  semantics: 从角色 CSV 模板中读取指定登陆编号角色的 NICKNAME 字段字符串。
+  source: FunctionMethodCreator.cs:3175-3229
+  confidence: high
+- name: CSVMASTERNAME
+  category: character
+  args: charaID[, isSp]
+  returns: string
+  side_effects: 读取角色数据
+  semantics: 从角色 CSV 模板中读取指定登陆编号角色的 MASTERNAME 字段字符串。
+  source: FunctionMethodCreator.cs:3175-3229
+  confidence: high
+- name: CSVCSTR
+  category: character
+  args: charaID, index[, isSp]
+  returns: string
+  side_effects: 读取角色数据
+  semantics: 读取角色 CSV 模板中指定登陆编号角色的 CSTR[index] 字符串。
+  source: FunctionMethodCreator.cs:3230-3263
+  confidence: high
+- name: CSVBASE
+  category: character
+  args: charaID, index[, isSp]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 读取角色 CSV 模板中指定登陆编号角色的 BASE[index] 数值。
+  source: FunctionMethodCreator.cs:3264-3320
+  confidence: high
+- name: CSVABL
+  category: character
+  args: charaID, index[, isSp]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 读取角色 CSV 模板中指定登陆编号角色的 ABL[index] 数值。
+  source: FunctionMethodCreator.cs:3264-3320
+  confidence: high
+- name: CSVMARK
+  category: character
+  args: charaID, index[, isSp]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 读取角色 CSV 模板中指定登陆编号角色的 MARK[index] 数值。
+  source: FunctionMethodCreator.cs:3264-3320
+  confidence: high
+- name: CSVEXP
+  category: character
+  args: charaID, index[, isSp]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 读取角色 CSV 模板中指定登陆编号角色的 EXP[index] 数值。
+  source: FunctionMethodCreator.cs:3264-3320
+  confidence: high
+- name: CSVRELATION
+  category: character
+  args: charaID, index[, isSp]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 读取角色 CSV 模板中指定登陆编号角色的 RELATION[index] 数值。
+  source: FunctionMethodCreator.cs:3264-3320
+  confidence: high
+- name: CSVTALENT
+  category: character
+  args: charaID, index[, isSp]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 读取角色 CSV 模板中指定登陆编号角色的 TALENT[index] 数值。
+  source: FunctionMethodCreator.cs:3264-3320
+  confidence: high
+- name: CSVCFLAG
+  category: character
+  args: charaID, index[, isSp]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 读取角色 CSV 模板中指定登陆编号角色的 CFLAG[index] 数值。
+  source: FunctionMethodCreator.cs:3264-3320
+  confidence: high
+- name: CSVEQUIP
+  category: character
+  args: charaID, index[, isSp]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 读取角色 CSV 模板中指定登陆编号角色的 EQUIP[index] 数值。
+  source: FunctionMethodCreator.cs:3264-3320
+  confidence: high
+- name: CSVJUEL
+  category: character
+  args: charaID, index[, isSp]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 读取角色 CSV 模板中指定登陆编号角色的 JUEL[index] 数值。
+  source: FunctionMethodCreator.cs:3264-3320
+  confidence: high
+- name: FINDCHARA
+  category: character
+  args: var, value[, start[, end]]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 在角色变量数组中从头查找等于 value 的元素，返回对应角色编号，找不到返回 -1。
+  source: FunctionMethodCreator.cs:3321-3387
+  confidence: high
+- name: FINDLASTCHARA
+  category: character
+  args: var, value[, start[, end]]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 在角色变量数组中从末尾向前查找等于 value 的元素，返回对应角色编号，找不到返回 -1。
+  source: FunctionMethodCreator.cs:3321-3387
+  confidence: high
+- name: EXISTCSV
+  category: character
+  args: charaID[, isSp]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 判断指定登陆编号的角色 CSV 是否已加载（1/0）。
+  source: FunctionMethodCreator.cs:3388-3419
+  confidence: medium
+- name: RAND
+  category: math
+  args: min, max (min 可省略)
+  returns: int
+  side_effects: 使用随机数
+  semantics: 返回 [min, max) 范围内的随机整数；只给 max 时范围为 [0, max)。max 不大于 min 时抛错。
+  source: FunctionMethodCreator.cs:4027-4074
+  confidence: high
+- name: MIN
+  category: math
+  args: value, ...
+  returns: int
+  side_effects: ''
+  semantics: 返回所有参数中的最小值。
+  source: FunctionMethodCreator.cs:4075-4138
+  confidence: high
+- name: MAX
+  category: math
+  args: value, ...
+  returns: int
+  side_effects: ''
+  semantics: 返回所有参数中的最大值。
+  source: FunctionMethodCreator.cs:4075-4138
+  confidence: high
+- name: ABS
+  category: math
+  args: value
+  returns: int
+  side_effects: ''
+  semantics: 返回整数的绝对值；参数为 Int64 最小值时抛错。
+  source: FunctionMethodCreator.cs:4139-4158
+  confidence: high
+- name: POWER
+  category: math
+  args: base, exponent
+  returns: int
+  side_effects: ''
+  semantics: 返回 base 的 exponent 次幂的整数部分；结果为 NaN/无穷大或超出 Int64 范围时抛错。
+  source: FunctionMethodCreator.cs:4159-4192
+  confidence: high
+- name: SQRT
+  category: math
+  args: value
+  returns: int
+  side_effects: ''
+  semantics: 返回整数平方根（向下取整）；负数抛错。
+  source: FunctionMethodCreator.cs:4193-4212
+  confidence: high
+- name: CBRT
+  category: math
+  args: value
+  returns: int
+  side_effects: ''
+  semantics: 返回整数立方根（向下取整）；负数抛错。
+  source: FunctionMethodCreator.cs:4213-4232
+  confidence: high
+- name: LOG
+  category: math
+  args: value
+  returns: int
+  side_effects: ''
+  semantics: 返回自然对数 e^x 的整数部分。
+  source: FunctionMethodCreator.cs:4233-4277
+  confidence: high
+- name: LOG10
+  category: math
+  args: value
+  returns: int
+  side_effects: ''
+  semantics: 返回以 10 为底指数运算 10^x 的整数部分。
+  source: FunctionMethodCreator.cs:4233-4277
+  confidence: high
+- name: EXPONENT
+  category: math
+  args: value
+  returns: int
+  side_effects: ''
+  semantics: 返回 e 的 value 次幂（e^value）的整数部分。
+  source: FunctionMethodCreator.cs:4278-4305
+  confidence: high
+- name: SIGN
+  category: math
+  args: value
+  returns: int
+  side_effects: ''
+  semantics: 返回 value 的符号：-1、0 或 1。
+  source: FunctionMethodCreator.cs:4306-4320
+  confidence: high
+- name: LIMIT
+  category: math
+  args: value, low, high
+  returns: int
+  side_effects: ''
+  semantics: 将 value 限制到 [low, high] 区间并返回；小于 low 返回 low，大于 high 返回 high。
+  source: FunctionMethodCreator.cs:4321-4351
+  confidence: high
+- name: GETBIT
+  category: math
+  args: value, bitIndex
+  returns: int
+  side_effects: ''
+  semantics: 返回 value 第 bitIndex 位（0-63）的值（0/1）；位序号越界抛错。
+  source: FunctionMethodCreator.cs:4766-4791
+  confidence: high
+- name: SUMARRAY
+  category: math
+  args: varName[, start[, end]]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 对一维数组变量指定区间的元素求和并返回。
+  source: FunctionMethodCreator.cs:4352-4415
+  confidence: high
+- name: SUMCARRAY
+  category: math
+  args: varName[, start[, end]]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 对角色变量在所有角色上的指定区间元素求和并返回。
+  source: FunctionMethodCreator.cs:4352-4415
+  confidence: high
+- name: MATCH
+  category: math
+  args: var, value[, start[, end]]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 统计数组变量中等于 value 的元素个数（可限定区间）。
+  source: FunctionMethodCreator.cs:4416-4508
+  confidence: high
+- name: CMATCH
+  category: math
+  args: var, value[, start[, end]]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 统计角色变量在所有角色中等于 value 的元素个数（可限定区间）。
+  source: FunctionMethodCreator.cs:4416-4508
+  confidence: high
+- name: GROUPMATCH
+  category: math
+  args: value, candidate, ...
+  returns: int
+  side_effects: ''
+  semantics: 返回候选参数中与 value 相等的个数。
+  source: FunctionMethodCreator.cs:4509-4556
+  confidence: high
+- name: NOSAMES
+  category: math
+  args: value, ...
+  returns: int
+  side_effects: ''
+  semantics: 所有参数互不相同时返回 1，否则返回 0。
+  source: FunctionMethodCreator.cs:4557-4605
+  confidence: high
+- name: ALLSAMES
+  category: math
+  args: value, ...
+  returns: int
+  side_effects: ''
+  semantics: 所有参数全部相同时返回 1，否则返回 0。
+  source: FunctionMethodCreator.cs:4606-4652
+  confidence: high
+- name: MAXARRAY
+  category: math
+  args: varName[, start[, end]]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 返回一维数组变量指定区间的最大元素值。
+  source: FunctionMethodCreator.cs:4653-4765
+  confidence: high
+- name: MAXCARRAY
+  category: math
+  args: varName[, start[, end]]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 返回角色变量在所有角色上指定区间的最大元素值。
+  source: FunctionMethodCreator.cs:4653-4765
+  confidence: high
+- name: MINARRAY
+  category: math
+  args: varName[, start[, end]]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 返回一维数组变量指定区间的最小元素值。
+  source: FunctionMethodCreator.cs:4653-4765
+  confidence: high
+- name: MINCARRAY
+  category: math
+  args: varName[, start[, end]]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 返回角色变量在所有角色上指定区间的最小元素值。
+  source: FunctionMethodCreator.cs:4653-4765
+  confidence: high
+- name: FINDELEMENT
+  category: math
+  args: var, value[, start[, end[, isExact]]]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 在数组变量中查找等于 value 的元素索引（从头开始），找不到返回 -1。
+  source: FunctionMethodCreator.cs:4906-4983
+  confidence: high
+- name: FINDLASTELEMENT
+  category: math
+  args: var, value[, start[, end[, isExact]]]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 在数组变量中从末尾向前查找等于 value 的元素索引，找不到返回 -1。
+  source: FunctionMethodCreator.cs:4906-4983
+  confidence: high
+- name: INRANGE
+  category: math
+  args: value, low, high
+  returns: int
+  side_effects: ''
+  semantics: value 落在 [low, high] 区间内返回 1，否则返回 0。
+  source: FunctionMethodCreator.cs:4984-5010
+  confidence: high
+- name: INRANGEARRAY
+  category: math
+  args: varName, low, high[, start[, end]]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 统计一维数组变量中落在半开区间 [low, high) 内的元素个数（`intValue >= low && intValue < high`，VariableEvaluator.cs:685、:699；与三参纯函数 INRANGE 的闭区间口径不同），可指定起始下标。
+  source: FunctionMethodCreator.cs:5011-5079
+  confidence: medium
+- name: INRANGECARRAY
+  category: math
+  args: varName, low, high[, start[, end]]
+  returns: int
+  side_effects: 读取角色数据
+  semantics: 统计角色变量在所有角色上落在 [low, high] 区间内的元素个数。
+  source: FunctionMethodCreator.cs:5011-5079
+  confidence: medium
+- name: STRLENS
+  category: string
+  args: str
+  returns: int
+  side_effects: ''
+  semantics: 按显示宽度计算字符串长度（半角 1、全角 2）。
+  source: FunctionMethodCreator.cs:5260-5274
+  confidence: high
+- name: STRLENSU
+  category: string
+  args: str
+  returns: int
+  side_effects: ''
+  semantics: 按 Unicode 字符数计算字符串长度。
+  source: FunctionMethodCreator.cs:5275-5289
+  confidence: high
+- name: SUBSTRING
+  category: string
+  args: str[, start[, length]]
+  returns: string
+  side_effects: ''
+  semantics: 按显示宽度从 start 位置截取子串（全角按 2 计）；length 可省略取到末尾。
+  source: FunctionMethodCreator.cs:5290-5327
+  confidence: high
+- name: SUBSTRINGU
+  category: string
+  args: str[, start[, length]]
+  returns: string
+  side_effects: ''
+  semantics: 按 Unicode 字符位置截取子串。
+  source: FunctionMethodCreator.cs:5328-5385
+  confidence: high
+- name: STRFIND
+  category: string
+  args: str, search[, start]
+  returns: int
+  side_effects: ''
+  semantics: 按显示宽度位置查找子串首次出现位置，找不到返回 -1。
+  source: FunctionMethodCreator.cs:5386-5432
+  confidence: high
+- name: STRFINDU
+  category: string
+  args: str, search[, start]
+  returns: int
+  side_effects: ''
+  semantics: 按 Unicode 字符位置查找子串首次出现位置，找不到返回 -1。
+  source: FunctionMethodCreator.cs:5386-5432
+  confidence: high
+- name: STRCOUNT
+  category: string
+  args: str, search
+  returns: int
+  side_effects: ''
+  semantics: 统计子串 search 在 str 中出现的次数。
+  source: FunctionMethodCreator.cs:5433-5460
+  confidence: high
+- name: TOSTR
+  category: string
+  args: value[, format]
+  returns: string
+  side_effects: ''
+  semantics: 整数转字符串；可指定 .NET 数字格式串（如 D5、X8），格式非法抛错。
+  source: FunctionMethodCreator.cs:5461-5499
+  confidence: high
+- name: TOINT
+  category: string
+  args: str
+  returns: int
+  side_effects: ''
+  semantics: 把字符串解析为整数（支持表达式），失败抛错。
+  source: FunctionMethodCreator.cs:5500-5557
+  confidence: high
+- name: TOUPPER
+  category: string
+  args: str
+  returns: string
+  side_effects: ''
+  semantics: 把字符串中的字母转为大写。
+  source: FunctionMethodCreator.cs:5558-5595
+  confidence: high
+- name: TOLOWER
+  category: string
+  args: str
+  returns: string
+  side_effects: ''
+  semantics: 把字符串中的字母转为小写。
+  source: FunctionMethodCreator.cs:5558-5595
+  confidence: high
+- name: TOHALF
+  category: string
+  args: str
+  returns: string
+  side_effects: ''
+  semantics: 把字符串中的全角字符转为半角。
+  source: FunctionMethodCreator.cs:5558-5595
+  confidence: high
+- name: TOFULL
+  category: string
+  args: str
+  returns: string
+  side_effects: ''
+  semantics: 把字符串中的半角字符转为全角。
+  source: FunctionMethodCreator.cs:5558-5595
+  confidence: high
+- name: LINEISEMPTY
+  category: string
+  args: ''
+  returns: int
+  side_effects: 读控制台显示状态
+  semantics: 判断当前显示行是否为空（1/0）。
+  source: FunctionMethodCreator.cs:5596-5610
+  confidence: medium
+- name: REPLACE
+  category: string
+  args: str, from, to[, n]
+  returns: string
+  side_effects: ''
+  semantics: 把 str 中出现的 from 子串替换为 to 并返回结果；第 4 个数值参数含义待移植复核。
+  source: FunctionMethodCreator.cs:5611-5690
+  confidence: medium
+- name: UNICODE
+  category: string
+  args: code
+  returns: string
+  side_effects: 触控制台(警告)
+  semantics: 返回码点 code（0-65535）对应的字符；控制字符等无效码点会向控制台输出警告并返回空串。
+  source: FunctionMethodCreator.cs:5691-5722
+  confidence: high
+- name: UNICODEBYTE
+  category: string
+  args: str
+  returns: int
+  side_effects: ''
+  semantics: 返回字符串首字符的 UTF-32 码点整数。
+  source: FunctionMethodCreator.cs:5723-5740
+  confidence: high
+- name: CONVERT
+  category: string
+  args: value, radix
+  returns: string
+  side_effects: ''
+  semantics: 把整数按 radix（2/8/10/16）进制转为字符串；radix 取其它值抛错。
+  source: FunctionMethodCreator.cs:5741-5764
+  confidence: high
+- name: ISNUMERIC
+  category: string
+  args: str
+  returns: int
+  side_effects: ''
+  semantics: 判断字符串是否为合法数值（可带正负号与小数点），是返回 1 否则 0。
+  source: FunctionMethodCreator.cs:5765-5813
+  confidence: high
+- name: ESCAPE
+  category: string
+  args: str
+  returns: string
+  side_effects: ''
+  semantics: 把字符串转义为正则表达式字面量。
+  source: FunctionMethodCreator.cs:5814-5828
+  confidence: high
+- name: ENCODETOUNI
+  category: string
+  args: str[, index]
+  returns: int
+  side_effects: ''
+  semantics: 返回 str 中第 index（默认 0）个字符的 UTF-32 码点；空串返回 -1，index 越界抛错。
+  source: FunctionMethodCreator.cs:5829-5868
+  confidence: high
+- name: CHARATU
+  category: string
+  args: str, index
+  returns: string
+  side_effects: ''
+  semantics: 返回 str 中第 index 个字符；越界返回空串。
+  source: FunctionMethodCreator.cs:5869-5893
+  confidence: high
+- name: GETLINESTR
+  category: string
+  args: lineKey
+  returns: string
+  side_effects: 读控制台显示状态
+  semantics: 调用控制台 getStBar 按参数（行标识字符串）读取对应行内容；空串参数抛错。
+  source: FunctionMethodCreator.cs:5894-5913
+  confidence: medium
+- name: STRFORM
+  category: string
+  args: formatStr
+  returns: string
+  side_effects: ''
+  semantics: 解析含 {} 表达式的格式串并求值返回结果字符串，语法错误抛错。
+  source: FunctionMethodCreator.cs:5914-5967
+  confidence: high
+- name: STRJOIN
+  category: string
+  args: array[, delimiter[, start[, count]]]
+  returns: string
+  side_effects: 读取变量数据
+  semantics: 把字符串数组元素从 start 起连接 count 个（默认到末尾），以 delimiter（默认逗号）分隔返回。
+  source: FunctionMethodCreator.cs:5968-6020
+  confidence: high
+- name: BARSTR
+  category: string
+  args: value, max, length
+  returns: string
+  side_effects: ''
+  semantics: 按 value/max 比例生成 length 宽度的条形图字符串。
+  source: FunctionMethodCreator.cs:3747-3769
+  confidence: high
+- name: MONEYSTR
+  category: string
+  args: value[, format]
+  returns: string
+  side_effects: ''
+  semantics: 按配置的货币单位与前后位置格式化金额字符串；可指定 .NET 数字格式串。
+  source: FunctionMethodCreator.cs:3873-3921
+  confidence: high
+- name: REGEXPMATCH
+  category: string
+  args: str, pattern[, flagOrGroupCount[, resultArray]]
+  returns: int
+  side_effects: ''
+  semantics: 用正则判断 str 是否匹配 pattern，返回命中次数；3 实参时第 3 位是 Int 开关（非 0 把分组数写入 RESULT_ARRAY[1]、命中写入 RESULTS_ARRAY），4 实参时第 3 位接收分组数的 RefInt、第 4 位接收命中的 RefString1D；正则非法时抛错（FunctionMethodCreator.cs:989-1011 / :1047-1062）。
+  source: FunctionMethodCreator.cs:984-1066
+  confidence: medium
+- name: HTML_STRINGLEN
+  category: string
+  args: htmlStr[, flag]
+  returns: int
+  side_effects: ''
+  semantics: 计算去掉 HTML 标签后的显示宽度；第二参非 0 时返回纯字符长度。
+  source: FunctionMethodCreator.cs:34-68
+  confidence: medium
+- name: HTML_SUBSTRING
+  category: string
+  args: htmlStr, length
+  returns: string
+  side_effects: 触控制台(RESULT)
+  semantics: 按显示长度对含 HTML 标签的字符串截取，结果同时写入 RESULTS 数组并返回第一段。
+  source: FunctionMethodCreator.cs:930-952
+  confidence: medium
+- name: HTML_STRINGLINES
+  category: string
+  args: htmlStr, length
+  returns: int
+  side_effects: ''
+  semantics: 计算 htmlStr 按 length 宽度折行后的行数。
+  source: FunctionMethodCreator.cs:953-983
+  confidence: high
+- name: HTML_TOPLAINTEXT
+  category: string
+  args: htmlStr
+  returns: string
+  side_effects: ''
+  semantics: 去除 HTML 标签后返回纯文本字符串。
+  source: FunctionMethodCreator.cs:6132-6146
+  confidence: medium
+- name: HTML_ESCAPE
+  category: string
+  args: str
+  returns: string
+  side_effects: ''
+  semantics: 转义字符串中的 HTML 特殊字符。
+  source: FunctionMethodCreator.cs:6147-6161
+  confidence: medium
+- name: VARSIZE
+  category: variable
+  args: varName[, dim]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 返回变量指定维度（默认 0）的元素个数。
+  source: FunctionMethodCreator.cs:3420-3475
+  confidence: high
+- name: GETVAR
+  category: variable
+  args: exprStr
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 动态解析变量表达式字符串并返回其整数值；非整数变量或非法表达式抛错。
+  source: FunctionMethodCreator.cs:377-406
+  confidence: high
+- name: GETVARS
+  category: variable
+  args: exprStr
+  returns: string
+  side_effects: 读取变量数据
+  semantics: 动态解析变量表达式字符串并返回其字符串值；非字符串变量或非法表达式抛错。
+  source: FunctionMethodCreator.cs:407-436
+  confidence: high
+- name: SETVAR
+  category: variable
+  args: varName, value
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 动态解析并设置变量值，成功返回 1；目标不是变量或类型不匹配抛错。
+  source: FunctionMethodCreator.cs:736-785
+  confidence: high
+- name: VARSETEX
+  category: variable
+  args: varName, value[, start[, end[, allFlag]]]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 把数组变量（1D/2D/3D）从 start 到 end 的元素批量设置为 value；2D/3D 时第 5 参非 0 表示对所有前导维度生效。
+  source: FunctionMethodCreator.cs:786-929
+  confidence: high
+- name: EXISTVAR
+  category: variable
+  args: varName[, parseFlag]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 返回变量存在性位标志：1=整数、2=字符串、4=常量、8=二维、16=三维；不存在返回 0。第二参非 0 时改为按表达式解析判断。
+  source: FunctionMethodCreator.cs:437-500
+  confidence: high
+- name: ISDEFINED
+  category: variable
+  args: macroName
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 判断指定宏（#DEFINE）是否已定义（1/0）。
+  source: FunctionMethodCreator.cs:218-232
+  confidence: high
+- name: ENUMVARBEGINSWITH
+  category: variable
+  args: prefix[, resultArray]
+  returns: int
+  side_effects: 修改变量数据(RESULT)
+  semantics: 枚举所有以 prefix 开头的变量名写入字符串数组（默认 RESULTS），返回数量。
+  source: FunctionMethodCreator.cs:233-329
+  confidence: high
+- name: ENUMVARENDSWITH
+  category: variable
+  args: suffix[, resultArray]
+  returns: int
+  side_effects: 修改变量数据(RESULT)
+  semantics: 枚举所有以 suffix 结尾的变量名写入字符串数组，返回数量。
+  source: FunctionMethodCreator.cs:233-329
+  confidence: high
+- name: ENUMVARWITH
+  category: variable
+  args: text[, resultArray]
+  returns: int
+  side_effects: 修改变量数据(RESULT)
+  semantics: 枚举所有包含 text 的变量名写入字符串数组，返回数量。
+  source: FunctionMethodCreator.cs:233-329
+  confidence: high
+- name: ENUMMACROBEGINSWITH
+  category: variable
+  args: prefix[, resultArray]
+  returns: int
+  side_effects: 修改变量数据(RESULT)
+  semantics: 枚举所有以 prefix 开头的宏名写入字符串数组，返回数量。
+  source: FunctionMethodCreator.cs:233-329
+  confidence: high
+- name: ENUMMACROENDSWITH
+  category: variable
+  args: suffix[, resultArray]
+  returns: int
+  side_effects: 修改变量数据(RESULT)
+  semantics: 枚举所有以 suffix 结尾的宏名写入字符串数组，返回数量。
+  source: FunctionMethodCreator.cs:233-329
+  confidence: high
+- name: ENUMMACROWITH
+  category: variable
+  args: text[, resultArray]
+  returns: int
+  side_effects: 修改变量数据(RESULT)
+  semantics: 枚举所有包含 text 的宏名写入字符串数组，返回数量。
+  source: FunctionMethodCreator.cs:233-329
+  confidence: high
+- name: GETNUM
+  category: variable
+  args: var, keyword[, charaIdx]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 返回变量对应关键词的数值（如 ERD 名称→编号的反查表），找不到返回 -1。
+  source: FunctionMethodCreator.cs:4792-4834
+  confidence: high
+- name: GETNUMB
+  category: variable
+  args: varName, keyword
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 同 GETNUM，但第一参数直接为变量名字符串；变量名无效抛错。
+  source: FunctionMethodCreator.cs:4835-4863
+  confidence: high
+- name: GETPALAMLV
+  category: variable
+  args: value, maxLv
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 按 PALAMLV 设置表返回 value 对应的等级（0 到 maxLv）。
+  source: FunctionMethodCreator.cs:4864-4884
+  confidence: high
+- name: GETEXPLV
+  category: variable
+  args: value, maxLv
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 按 EXPLV 设置表返回 value 对应的等级（0 到 maxLv）。
+  source: FunctionMethodCreator.cs:4885-4905
+  confidence: high
+- name: ERDNAME
+  category: variable
+  args: var, index[, charaIdx]
+  returns: string
+  side_effects: 读取变量数据
+  semantics: 返回变量第 index 个元素对应的 ERD 关键词名（GETNUM 的反查），无对应名称返回空串。
+  source: FunctionMethodCreator.cs:8373-8414
+  confidence: high
+- name: ARRAYMSORT
+  category: variable
+  args: array, sortKeys...
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 以第一个数组为键对其余数组同步升序排序（键数组遇 0/空串即停止），成功返回 1。
+  source: FunctionMethodCreator.cs:5080-5259
+  confidence: high
+- name: ARRAYMSORTEX
+  category: variable
+  args: var, names[, order[, limit]]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: ARRAYMSORT 扩展版：支持指定升降序与元素上限，可按变量名列表指定参与排序的数组；失败返回 0。
+  source: FunctionMethodCreator.cs:501-735
+  confidence: medium
+- name: XML_DOCUMENT
+  category: variable
+  args: key, xmlText
+  returns: int
+  side_effects: 修改变量数据(文档池)
+  semantics: 解析 XML 文本并以 key 存入命名文档池，成功返回 1；key 已存在返回 0，XML 非法抛错。
+  source: FunctionMethodCreator.cs:1067-1146
+  confidence: high
+- name: XML_RELEASE
+  category: variable
+  args: key
+  returns: int
+  side_effects: 修改变量数据(文档池)
+  semantics: 从文档池释放指定 key 的 XML 文档：key 存在则移除并返回 1（FunctionMethodCreator.cs:1140-1142），key 不存在返回 0（:1131-1136）。
+  source: FunctionMethodCreator.cs:1067-1146
+  confidence: high
+- name: XML_EXIST
+  category: variable
+  args: key
+  returns: int
+  side_effects: 读取变量数据(文档池)
+  semantics: 判断指定 key 的 XML 文档是否存在（1/0）。
+  source: FunctionMethodCreator.cs:1067-1146
+  confidence: high
+- name: XML_GET
+  category: variable
+  args: doc, xpath[, resultArray][, style]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 对命名文档或 XML 文本执行 XPath 查询，返回命中数；可将结果写入字符串数组，style 指定取值（0=值 1=InnerText 2=InnerXml 3=OuterXml 4=名称）。
+  source: FunctionMethodCreator.cs:69-217
+  confidence: high
+- name: XML_GET_BYNAME
+  category: variable
+  args: docName, xpath[, resultArray][, style]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 同 XML_GET，但第一参数强制按文档池名称取文档。
+  source: FunctionMethodCreator.cs:69-217
+  confidence: high
+- name: XML_SET
+  category: variable
+  args: doc, xpath, value[, allMatched[, style]]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 把字符串设置为文档中 XPath 命中节点（可按 index 选定第几个命中）的 InnerText，成功返回 1。
+  source: FunctionMethodCreator.cs:1147-1290
+  confidence: medium
+- name: XML_SET_BYNAME
+  category: variable
+  args: docName, xpath, value[, allMatched[, style]]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 同 XML_SET，但第一参数强制按文档池名称取文档。
+  source: FunctionMethodCreator.cs:1147-1290
+  confidence: medium
+- name: XML_TOSTR
+  category: variable
+  args: doc
+  returns: string
+  side_effects: 读取变量数据
+  semantics: 返回指定文档的 OuterXml 字符串。
+  source: FunctionMethodCreator.cs:1291-1317
+  confidence: high
+- name: XML_ADDNODE
+  category: variable
+  args: doc, xpath, name[, value][, index]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 在 XPath 命中节点下添加子节点（可选设置文本值），成功返回 1。
+  source: FunctionMethodCreator.cs:1318-1594
+  confidence: medium
+- name: XML_ADDNODE_BYNAME
+  category: variable
+  args: docName, xpath, name[, value][, index]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 同 XML_ADDNODE，但第一参数强制按文档池名称取文档。
+  source: FunctionMethodCreator.cs:1318-1594
+  confidence: medium
+- name: XML_ADDATTRIBUTE
+  category: variable
+  args: doc, xpath, name, value[, index]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 为 XPath 命中节点添加指定名称与值的属性，成功返回 1。
+  source: FunctionMethodCreator.cs:1318-1594
+  confidence: medium
+- name: XML_ADDATTRIBUTE_BYNAME
+  category: variable
+  args: docName, xpath, name, value[, index]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 同 XML_ADDATTRIBUTE，但第一参数强制按文档池名称取文档。
+  source: FunctionMethodCreator.cs:1318-1594
+  confidence: medium
+- name: XML_REMOVENODE
+  category: variable
+  args: doc, xpath[, index]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 删除 XPath 命中的子节点（可按 index 选定第几个命中），成功返回 1。
+  source: FunctionMethodCreator.cs:1595-1743
+  confidence: medium
+- name: XML_REMOVENODE_BYNAME
+  category: variable
+  args: docName, xpath[, index]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 同 XML_REMOVENODE，但第一参数强制按文档池名称取文档。
+  source: FunctionMethodCreator.cs:1595-1743
+  confidence: medium
+- name: XML_REMOVEATTRIBUTE
+  category: variable
+  args: doc, xpath[, index]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 删除 XPath 命中节点的属性，成功返回 1。
+  source: FunctionMethodCreator.cs:1595-1743
+  confidence: medium
+- name: XML_REMOVEATTRIBUTE_BYNAME
+  category: variable
+  args: docName, xpath[, index]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 同 XML_REMOVEATTRIBUTE，但第一参数强制按文档池名称取文档。
+  source: FunctionMethodCreator.cs:1595-1743
+  confidence: medium
+- name: XML_REPLACE
+  category: variable
+  args: doc, xpath[, xmlFragment[, index]]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 用 XML 片段替换 XPath 命中节点，成功返回 1。2 实参是官方特例：第 2 位同时充当 XML 片段与 XPath（FunctionMethodCreator.cs:1820 / :1860），且当第 1 位是文档池名字时整篇替换并直接返回 1（:1840-1844）；3 实参起才是 doc, xpath, xmlFragment 的常规形态（:1751-1783 / :1882）。
+  source: FunctionMethodCreator.cs:1744-1905
+  confidence: medium
+- name: XML_REPLACE_BYNAME
+  category: variable
+  args: docName, xpath, xmlFragment[, index]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 同 XML_REPLACE，但第一参数强制按文档池名称取文档。
+  source: FunctionMethodCreator.cs:1744-1905
+  confidence: medium
+- name: MAP_CREATE
+  category: variable
+  args: name
+  returns: int
+  side_effects: 修改变量数据(映射池)
+  semantics: 创建指定名称的字符串映射（键、值均为字符串），已存在返回 0，成功返回 1。
+  source: FunctionMethodCreator.cs:2765-2809
+  confidence: high
+- name: MAP_EXIST
+  category: variable
+  args: name
+  returns: int
+  side_effects: 读取变量数据(映射池)
+  semantics: 判断指定名称的映射是否存在（1/0）。
+  source: FunctionMethodCreator.cs:2765-2809
+  confidence: high
+- name: MAP_RELEASE
+  category: variable
+  args: name
+  returns: int
+  side_effects: 修改变量数据(映射池)
+  semantics: 删除指定名称的映射，始终返回 1。
+  source: FunctionMethodCreator.cs:2765-2809
+  confidence: high
+- name: MAP_SET
+  category: variable
+  args: name, key, value
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 在映射中设置键值对；映射不存在返回 -1。
+  source: FunctionMethodCreator.cs:2810-2889
+  confidence: high
+- name: MAP_HAS
+  category: variable
+  args: name, key
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 判断映射中指定键是否存在（1/0）；映射不存在返回 -1。
+  source: FunctionMethodCreator.cs:2810-2889
+  confidence: high
+- name: MAP_REMOVE
+  category: variable
+  args: name, key
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 删除映射中的指定键；映射不存在返回 -1。
+  source: FunctionMethodCreator.cs:2810-2889
+  confidence: high
+- name: MAP_CLEAR
+  category: variable
+  args: name
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 清空映射的全部键值对；映射不存在返回 -1。
+  source: FunctionMethodCreator.cs:2810-2889
+  confidence: high
+- name: MAP_SIZE
+  category: variable
+  args: name
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 返回映射中的键值对数量；映射不存在返回 -1。
+  source: FunctionMethodCreator.cs:2810-2889
+  confidence: high
+- name: MAP_GET
+  category: variable
+  args: name, key
+  returns: string
+  side_effects: 读取变量数据
+  semantics: 返回映射中指定键的值；映射或键不存在返回空串。
+  source: FunctionMethodCreator.cs:2890-3030
+  confidence: high
+- name: MAP_GETKEYS
+  category: variable
+  args: name[, resultArrayOrFlag[, flag]]
+  returns: string
+  side_effects: 修改变量数据(RESULT)
+  semantics: 1 实参返回逗号连接的键串；2 实参时第 2 位是 Int 开关（非 0 把键写入 RESULTS 数组并返回 RESULTS）；3 实参时第 2 位是字符串数组、第 3 位是 Int 开关（写入给定数组、返回空串）。后两形态都把键总数写入 RESULT（FunctionMethodCreator.cs:2917-2937 / :2962-3002）。
+  source: FunctionMethodCreator.cs:2890-3030
+  confidence: high
+- name: MAP_TOXML
+  category: variable
+  args: name
+  returns: string
+  side_effects: 读取变量数据
+  semantics: 把映射序列化为 <map><p><k>键</k><v>值</v></p>…</map> 格式的 XML 字符串。
+  source: FunctionMethodCreator.cs:2890-3030
+  confidence: high
+- name: MAP_FROMXML
+  category: variable
+  args: name, xmlStr
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 解析 MAP_TOXML 格式的 XML 并把键值对合并入指定映射，成功返回 1；XML 非法抛错。
+  source: FunctionMethodCreator.cs:3031-3078
+  confidence: high
+- name: DT_CREATE
+  category: variable
+  args: name
+  returns: int
+  side_effects: 修改变量数据(表池)
+  semantics: 创建含自增 id 主键列（区分大小写）的 DataTable，成功返回 1；同名表已存在返回 0。
+  source: FunctionMethodCreator.cs:1926-2007
+  confidence: high
+- name: DT_EXIST
+  category: variable
+  args: name
+  returns: int
+  side_effects: 读取变量数据(表池)
+  semantics: 判断指定名称的 DataTable 是否存在（1/0）。
+  source: FunctionMethodCreator.cs:1926-2007
+  confidence: high
+- name: DT_RELEASE
+  category: variable
+  args: name
+  returns: int
+  side_effects: 修改变量数据(表池)
+  semantics: 删除指定名称的 DataTable，始终返回 1。
+  source: FunctionMethodCreator.cs:1926-2007
+  confidence: high
+- name: DT_CLEAR
+  category: variable
+  args: name
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 清空 DataTable 的所有行；表不存在返回 -1。
+  source: FunctionMethodCreator.cs:1926-2007
+  confidence: high
+- name: DT_NOCASE
+  category: variable
+  args: name, flag
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 设置 DataTable 列名/比较是否不区分大小写（flag 非 0 为不区分）；表不存在返回 -1。
+  source: FunctionMethodCreator.cs:1926-2007
+  confidence: high
+- name: DT_COLUMN_ADD
+  category: variable
+  args: name, colName[, type][, allowNull]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 向 DataTable 添加列；type 可为类型编号或类型名（缺省字符串），allowNull 指定是否允许 DBNull（默认允许）。
+  source: FunctionMethodCreator.cs:2008-2125
+  confidence: high
+- name: DT_COLUMN_NAMES
+  category: variable
+  args: name[, resultArray]
+  returns: int
+  side_effects: 修改变量数据(RESULT)
+  semantics: 把 DataTable 的所有列名写入字符串数组（默认 RESULTS），返回列数。
+  source: FunctionMethodCreator.cs:2008-2125
+  confidence: high
+- name: DT_COLUMN_EXIST
+  category: variable
+  args: name, colName
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 判断列是否存在；存在返回列类型编号，不存在返回 0；表不存在返回 -1。
+  source: FunctionMethodCreator.cs:2008-2125
+  confidence: high
+- name: DT_COLUMN_REMOVE
+  category: variable
+  args: name, colName
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 删除指定列（id 列不可删），成功返回 1；列不存在或为 id 列返回 0。
+  source: FunctionMethodCreator.cs:2008-2125
+  confidence: high
+- name: DT_ROW_ADD
+  category: variable
+  args: name, colName, value, ...
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 以可变参数「列名, 值」成对添加新行（id 自动按时间戳生成），成功返回 1；表不存在返回 -1。
+  source: FunctionMethodCreator.cs:2126-2324
+  confidence: high
+- name: DT_ROW_SET
+  category: variable
+  args: name, id, colName, value, ...
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 更新指定 id 行的内容，参数形式同 DT_ROW_ADD；行不存在返回 -2。
+  source: FunctionMethodCreator.cs:2126-2324
+  confidence: high
+- name: DT_ROW_REMOVE
+  category: variable
+  args: name, idOrIdArray[, count]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 删除指定 id 的行（2 实参），或删除数组中前 count 个 id 对应的行（3 实参，count 必填）。两形态为互斥重载，靠实参个数区分（FunctionMethodCreator.cs:2360-2379 / :2393-2422）。
+  source: FunctionMethodCreator.cs:2355-2431
+  confidence: medium
+- name: DT_COLUMN_LENGTH
+  category: variable
+  args: name
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 返回 DataTable 的列数。
+  source: FunctionMethodCreator.cs:2325-2354
+  confidence: high
+- name: DT_ROW_LENGTH
+  category: variable
+  args: name
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 返回 DataTable 的行数。
+  source: FunctionMethodCreator.cs:2325-2354
+  confidence: high
+- name: DT_CELL_GET
+  category: variable
+  args: name, row, colName[, byId]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 读取单元格整数值；第 4 参非 0 时 row 按 id 定位，否则按行号。表缺失返回 0，行/列定位失败返回 0。
+  source: FunctionMethodCreator.cs:2432-2544
+  confidence: high
+- name: DT_CELL_ISNULL
+  category: variable
+  args: name, row, colName[, byId]
+  returns: int
+  side_effects: 读取变量数据
+  semantics: 判断单元格是否为 DBNull（1/0）；表缺失返回 -1，行/列定位失败返回 -2。
+  source: FunctionMethodCreator.cs:2432-2544
+  confidence: high
+- name: DT_CELL_GETS
+  category: variable
+  args: name, row, colName[, byId]
+  returns: string
+  side_effects: 读取变量数据
+  semantics: 读取单元格字符串值；定位失败或值为 DBNull 返回空串。
+  source: FunctionMethodCreator.cs:2432-2544
+  confidence: high
+- name: DT_CELL_SET
+  category: variable
+  args: name, row, colName[, value[, byId]]
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 设置单元格值（类型需与列类型匹配）；id 列不可写，类型不符返回 -2，定位失败返回 -3，成功返回 1。
+  source: FunctionMethodCreator.cs:2545-2621
+  confidence: high
+- name: DT_SELECT
+  category: variable
+  args: name[, filter[, sort]][, resultArray]
+  returns: int
+  side_effects: 修改变量数据(RESULT)
+  semantics: 按 .NET DataTable.Select 语法过滤并排序行，把命中行的 id 写入整数数组（默认 RESULT_ARRAY，首元素存总数），返回命中行数。
+  source: FunctionMethodCreator.cs:2622-2678
+  confidence: high
+- name: DT_TOXML
+  category: variable
+  args: name[, schemaRef]
+  returns: string
+  side_effects: 修改变量数据(引用)
+  semantics: 把 DataTable 序列化为 XML 字符串返回；XML Schema 写入引用字符串参数（默认 RESULTS）。
+  source: FunctionMethodCreator.cs:2679-2719
+  confidence: high
+- name: DT_FROMXML
+  category: variable
+  args: name, schemaXml, dataXml
+  returns: int
+  side_effects: 修改变量数据
+  semantics: 用 schema 与数据两段 XML 重建 DataTable 并替换（或注册）同名表，成功返回 1，解析失败返回 0。
+  source: FunctionMethodCreator.cs:2720-2764
+  confidence: high
+- name: EXISTFILE
+  category: load
+  args: path
+  returns: int
+  side_effects: 读文件系统
+  semantics: 判断指定路径的文件是否存在（1/0）。
+  source: FunctionMethodCreator.cs:1906-1925
+  confidence: high
+- name: ENUMFILES
+  category: load
+  args: dir[, pattern[, recursive[, resultArray]]]
+  returns: int
+  side_effects: 读文件系统
+  semantics: 枚举目录下匹配 pattern（默认 *）的文件写入字符串数组（默认 RESULTS），返回数量；目录无效返回 -1。第三参非 0 时递归子目录。
+  source: FunctionMethodCreator.cs:330-376
+  confidence: high
+- name: LOADTEXT
+  category: load
+  args: file[, forceSavDir[, evalOnly]]
+  returns: string
+  side_effects: 读文件系统
+  semantics: 读取文本文件全部内容（去除 \r）并返回；file 可为存档目录序号或路径（限白名单扩展名），文件不存在返回空串。
+  source: FunctionMethodCreator.cs:8020-8091
+  confidence: high
+- name: CHKDATA
+  category: save
+  args: saveIndex
+  returns: int
+  side_effects: 读存档、写 RESULTS
+  semantics: 检查指定编号存档的完整性，返回状态码，并把说明文字写入 RESULTS。
+  source: FunctionMethodCreator.cs:3512-3540
+  confidence: high
+- name: CHKCHARADATA
+  category: save
+  args: filename
+  returns: int
+  side_effects: 读存档、写 RESULTS
+  semantics: 检查角色存档文件的有效性，返回状态码并把说明文字写入 RESULTS。
+  source: FunctionMethodCreator.cs:3541-3561
+  confidence: high
+- name: FIND_CHARADATA
+  category: save
+  args: '[pattern]'
+  returns: int
+  side_effects: 读文件系统、写变量数组
+  semantics: 枚举角色存档文件名（可带通配符）写入字符串数组并返回数量。
+  source: FunctionMethodCreator.cs:3562-3601
+  confidence: high
+- name: SAVETEXT
+  category: save
+  args: text, file[, forceSavDir[, evalOnly]]
+  returns: int
+  side_effects: 写文件系统
+  semantics: 把字符串写入文本文件；file 可为存档目录序号或路径（非白名单扩展名自动改为 .txt），成功返回 1，失败返回 0。
+  source: FunctionMethodCreator.cs:7936-8019
+  confidence: high
+- name: SAVENOS
+  category: save
+  args: ''
+  returns: int
+  side_effects: 读配置
+  semantics: 返回配置的存档槽（SAVEDataNos）数量。
+  source: FunctionMethodCreator.cs:3952-3966
+  confidence: high
+- name: GSAVE
+  category: save
+  args: gId, saveIndex
+  returns: int
+  side_effects: 写文件系统
+  semantics: 把图形缓冲区保存为存档目录下的位图文件，成功返回 1。
+  source: FunctionMethodCreator.cs:8092-8134
+  confidence: high
+- name: GLOAD
+  category: save
+  args: gId, saveIndex
+  returns: int
+  side_effects: 读文件系统
+  semantics: 从存档目录读取位图文件创建图形缓冲区（尺寸上限 8192），成功返回 1。
+  source: FunctionMethodCreator.cs:8135-8201
+  confidence: high
+- name: CHKFONT
+  category: view
+  args: fontName
+  returns: int
+  side_effects: 读取系统字体
+  semantics: 检查指定字体是否可用于绘制并返回状态值。
+  source: FunctionMethodCreator.cs:3476-3511
+  confidence: medium
+- name: GETCOLOR
+  category: view
+  args: ''
+  returns: int
+  side_effects: 读控制台显示状态
+  semantics: 返回当前文字前景色（0xRRGGBB）。
+  source: FunctionMethodCreator.cs:3648-3665
+  confidence: high
+- name: GETDEFCOLOR
+  category: view
+  args: ''
+  returns: int
+  side_effects: 读配置
+  semantics: 返回默认文字前景色（0xRRGGBB）。
+  source: FunctionMethodCreator.cs:3648-3665
+  confidence: high
+- name: GETFOCUSCOLOR
+  category: view
+  args: ''
+  returns: int
+  side_effects: 读配置
+  semantics: 返回选择项（focus）文字颜色（0xRRGGBB）。
+  source: FunctionMethodCreator.cs:3666-3680
+  confidence: high
+- name: GETBGCOLOR
+  category: view
+  args: ''
+  returns: int
+  side_effects: 读控制台显示状态
+  semantics: 返回当前文字背景色（0xRRGGBB）。
+  source: FunctionMethodCreator.cs:3681-3698
+  confidence: high
+- name: GETDEFBGCOLOR
+  category: view
+  args: ''
+  returns: int
+  side_effects: 读配置
+  semantics: 返回默认文字背景色（0xRRGGBB）。
+  source: FunctionMethodCreator.cs:3681-3698
+  confidence: high
+- name: GETSTYLE
+  category: view
+  args: ''
+  returns: int
+  side_effects: 读控制台显示状态
+  semantics: 返回当前文字样式的位标志（粗体/斜体/删除线/下划线）。
+  source: FunctionMethodCreator.cs:3699-3731
+  confidence: high
+- name: GETFONT
+  category: view
+  args: ''
+  returns: string
+  side_effects: 读控制台显示状态
+  semantics: 返回当前使用的字体名称。
+  source: FunctionMethodCreator.cs:3732-3746
+  confidence: high
+- name: CURRENTALIGN
+  category: view
+  args: ''
+  returns: string
+  side_effects: 读控制台显示状态
+  semantics: 返回当前行对齐方式：LEFT、CENTER 或 RIGHT（作为字符串返回）。
+  source: FunctionMethodCreator.cs:3770-3792
+  confidence: high
+- name: CURRENTREDRAW
+  category: view
+  args: ''
+  returns: int
+  side_effects: 读控制台显示状态
+  semantics: 返回当前重绘是否开启（1/0）。
+  source: FunctionMethodCreator.cs:3793-3807
+  confidence: high
+- name: COLOR_FROMNAME
+  category: view
+  args: name
+  returns: int
+  side_effects: ''
+  semantics: 把 .NET 颜色名转换为 0xRRGGBB 整数；未知颜色名返回 -1，transparent 抛错。
+  source: FunctionMethodCreator.cs:3808-3837
+  confidence: high
+- name: COLOR_FROMRGB
+  category: view
+  args: r, g, b
+  returns: int
+  side_effects: ''
+  semantics: 把 RGB 分量（各 0-255）组合为 0xRRGGBB 整数；分量越界抛错。
+  source: FunctionMethodCreator.cs:3838-3872
+  confidence: high
+- name: PRINTCPERLINE
+  category: view
+  args: ''
+  returns: int
+  side_effects: 读配置
+  semantics: 返回每行 PRINTC 的个数配置。
+  source: FunctionMethodCreator.cs:3922-3936
+  confidence: high
+- name: PRINTCLENGTH
+  category: view
+  args: ''
+  returns: int
+  side_effects: 读配置
+  semantics: 返回单个 PRINTC 单元的显示宽度配置。
+  source: FunctionMethodCreator.cs:3937-3951
+  confidence: high
+- name: GETDISPLAYLINE
+  category: view
+  args: lineIndex
+  returns: string
+  side_effects: 读控制台显示状态
+  semantics: 返回指定序号显示行的文本内容，越界返回空串。
+  source: FunctionMethodCreator.cs:8415-8440
+  confidence: high
+- name: CLIENTWIDTH
+  category: view
+  args: ''
+  returns: int
+  side_effects: 读窗口状态
+  semantics: 返回主窗口客户区宽度。
+  source: FunctionMethodCreator.cs:6777-6800
+  confidence: high
+- name: CLIENTHEIGHT
+  category: view
+  args: ''
+  returns: int
+  side_effects: 读窗口状态
+  semantics: 返回主窗口客户区高度。
+  source: FunctionMethodCreator.cs:6777-6800
+  confidence: high
+- name: GETTEXTBOX
+  category: view
+  args: ''
+  returns: string
+  side_effects: 读窗口状态
+  semantics: 返回输入框当前的文本内容。
+  source: FunctionMethodCreator.cs:8342-8356
+  confidence: high
+- name: SETTEXTBOX
+  category: view
+  args: text
+  returns: int
+  side_effects: 修改窗口输入框
+  semantics: 设置输入框的文本内容，始终返回 1。
+  source: FunctionMethodCreator.cs:8357-8372
+  confidence: high
+- name: MOVETEXTBOX
+  category: view
+  args: x, y, width
+  returns: int
+  side_effects: 修改窗口输入框
+  semantics: 设置输入框的位置与宽度。
+  source: FunctionMethodCreator.cs:3079-3109
+  confidence: high
+- name: RESUMETEXTBOX
+  category: view
+  args: x, y, width
+  returns: int
+  side_effects: 修改窗口输入框
+  semantics: 复位输入框到默认位置；实参整组丢弃，但装载期仍按 MOVE_TEXTBOX 的三实参表校验（FunctionMethodCreator.cs:3086-3091 声明、:3098-3101 丢弃）。
+  source: FunctionMethodCreator.cs:3079-3109
+  confidence: high
+- name: BITMAP_CACHE_ENABLE
+  category: view
+  args: flag
+  returns: int
+  side_effects: 修改渲染状态
+  semantics: 设置下一行绘制是否启用位图缓存，始终返回 0。
+  source: FunctionMethodCreator.cs:8655-8678
+  confidence: high
+- name: GCREATED
+  category: view
+  args: gId
+  returns: int
+  side_effects: 读图形状态
+  semantics: 判断指定编号的图形缓冲区是否已创建（1/0）。
+  source: FunctionMethodCreator.cs:6162-6196
+  confidence: high
+- name: GWIDTH
+  category: view
+  args: gId
+  returns: int
+  side_effects: 读图形状态
+  semantics: 返回图形缓冲区宽度（未创建返回 0）。
+  source: FunctionMethodCreator.cs:6162-6196
+  confidence: high
+- name: GHEIGHT
+  category: view
+  args: gId
+  returns: int
+  side_effects: 读图形状态
+  semantics: 返回图形缓冲区高度（未创建返回 0）。
+  source: FunctionMethodCreator.cs:6162-6196
+  confidence: high
+- name: GGETCOLOR
+  category: view
+  args: gId, x, y
+  returns: int
+  side_effects: 读图形状态
+  semantics: 返回图形缓冲区指定像素的颜色（0xRRGGBB）。
+  source: FunctionMethodCreator.cs:6225-6258
+  confidence: high
+- name: GGETFONT
+  category: view
+  args: gId
+  returns: string
+  side_effects: 读图形状态
+  semantics: 返回图形缓冲区当前设置的字体名。
+  source: FunctionMethodCreator.cs:6197-6224
+  confidence: high
+- name: GGETFONTSIZE
+  category: view
+  args: gId
+  returns: int
+  side_effects: 读图形状态
+  semantics: 返回图形缓冲区当前设置的字号。
+  source: FunctionMethodCreator.cs:6162-6196
+  confidence: high
+- name: GGETFONTSTYLE
+  category: view
+  args: gId
+  returns: int
+  side_effects: 读图形状态
+  semantics: 返回图形缓冲区当前设置的文字样式位标志。
+  source: FunctionMethodCreator.cs:6162-6196
+  confidence: high
+- name: GGETTEXTSIZE
+  category: view
+  args: str, fontName, fontSize[, fontStyle]
+  returns: int
+  side_effects: 读图形状态
+  semantics: 计算文本在图形字体设置下的绘制尺寸（经引用/RESULT 返回），参数细节待移植复核。
+  source: FunctionMethodCreator.cs:6532-6590
+  confidence: medium
+- name: GGETBRUSH
+  category: view
+  args: gId
+  returns: int
+  side_effects: 读图形状态
+  semantics: 返回图形缓冲区当前画刷颜色。
+  source: FunctionMethodCreator.cs:6162-6196
+  confidence: high
+- name: GGETPEN
+  category: view
+  args: gId
+  returns: int
+  side_effects: 读图形状态
+  semantics: 返回图形缓冲区当前画笔颜色。
+  source: FunctionMethodCreator.cs:6162-6196
+  confidence: high
+- name: GGETPENWIDTH
+  category: view
+  args: gId
+  returns: int
+  side_effects: 读图形状态
+  semantics: 返回图形缓冲区当前画笔宽度。
+  source: FunctionMethodCreator.cs:6162-6196
+  confidence: high
+- name: GCREATE
+  category: view
+  args: gId, width, height
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 创建指定尺寸的图形缓冲区，成功返回 1（尺寸上限 8192）。
+  source: FunctionMethodCreator.cs:6801-6849
+  confidence: high
+- name: GCREATEFROMFILE
+  category: view
+  args: gId, path[, flag]
+  returns: int
+  side_effects: 读文件系统、修改图形缓冲区
+  semantics: 从文件读取图像创建图形缓冲区；第 3 参含义待移植复核。
+  source: FunctionMethodCreator.cs:6850-6929
+  confidence: medium
+- name: GDISPOSE
+  category: view
+  args: gId
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 释放指定图形缓冲区；成功返回 1，未创建返回 0。
+  source: FunctionMethodCreator.cs:6930-6954
+  confidence: high
+- name: GCLEAR
+  category: view
+  args: gId, color[, x, y, width, height]
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 用指定颜色清空（或填充指定矩形区域）图形缓冲区。
+  source: FunctionMethodCreator.cs:7111-7166
+  confidence: high
+- name: GFILLRECTANGLE
+  category: view
+  args: gId, x, y, width, height
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 在图形缓冲区上用指定颜色填充矩形。
+  source: FunctionMethodCreator.cs:7167-7199
+  confidence: high
+- name: GSETCOLOR
+  category: view
+  args: gId, x, y, color
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 设置图形缓冲区指定像素的颜色。
+  source: FunctionMethodCreator.cs:6259-6295
+  confidence: high
+- name: GDRAWG
+  category: view
+  args: gId, srcId, destX, destY, destW, destH, srcX, srcY, srcW, srcH[, colormatrix]
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 把另一图形缓冲区的内容绘制到目标缓冲区，可指定目标/源矩形；第 11 位是可选颜色矩阵（FunctionMethodCreator.cs:7205-7242 的 11 槽 OmitStart=10；:7264-7271 读 dest=2..5、src=6..9、colormatrix=10）。
+  source: FunctionMethodCreator.cs:7200-7295
+  confidence: medium
+- name: GDRAWGWITHMASK
+  category: view
+  args: gId, srcId, maskId, x, y
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 以掩码图形对源图形做透明合成后绘制到目标缓冲区。
+  source: FunctionMethodCreator.cs:7296-7346
+  confidence: medium
+- name: GDRAWSPRITE
+  category: view
+  args: gId, spriteName[, x, y[, width, height[, colormatrix]]]
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 把命名精灵绘制到图形缓冲区，可指定目标位置与尺寸；第 7 位是可选颜色矩阵。实参个数只允许 2/4/6/7（FunctionMethodCreator.cs:7352-7399 四份 ArgTypeList；:7422-7443 按 Count 分支）。
+  source: FunctionMethodCreator.cs:7347-7466
+  confidence: high
+- name: GSETBRUSH
+  category: view
+  args: gId, color
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 设置图形缓冲区的画刷颜色。
+  source: FunctionMethodCreator.cs:6296-6325
+  confidence: high
+- name: GSETFONT
+  category: view
+  args: gId, fontName[, size[, style]]
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 设置图形缓冲区绘制文字所用字体名、字号与样式。
+  source: FunctionMethodCreator.cs:6326-6412
+  confidence: high
+- name: GSETPEN
+  category: view
+  args: gId, color, width
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 设置图形缓冲区的画笔颜色与宽度。
+  source: FunctionMethodCreator.cs:6413-6444
+  confidence: high
+- name: GDRAWGWITHROTATE
+  category: view
+  args: gId, srcId, angle[, destX[, destY]]
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 把源图形旋转指定角度后绘制到目标缓冲区。
+  source: FunctionMethodCreator.cs:6591-6643
+  confidence: medium
+- name: GDRAWTEXT
+  category: view
+  args: gId, str[, x[, y]]
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 在图形缓冲区上以当前字体绘制文本，成功返回 1。
+  source: FunctionMethodCreator.cs:6475-6531
+  confidence: medium
+- name: GDRAWLINE
+  category: view
+  args: gId, x1, y1, x2, y2
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 用当前画笔在图形缓冲区上绘制直线。
+  source: FunctionMethodCreator.cs:6644-6677
+  confidence: medium
+- name: GDASHSTYLE
+  category: view
+  args: gId, style, ...
+  returns: int
+  side_effects: 修改图形缓冲区
+  semantics: 设置图形缓冲区画笔的虚线样式。
+  source: FunctionMethodCreator.cs:6445-6474
+  confidence: medium
+- name: SPRITECREATED
+  category: view
+  args: name
+  returns: int
+  side_effects: 读精灵状态
+  semantics: 判断指定名称的精灵是否存在且已创建（1/0）。
+  source: FunctionMethodCreator.cs:6678-6705
+  confidence: high
+- name: SPRITEWIDTH
+  category: view
+  args: name
+  returns: int
+  side_effects: 读精灵状态
+  semantics: 返回精灵基准显示宽度（未创建返回 0）。
+  source: FunctionMethodCreator.cs:6678-6705
+  confidence: high
+- name: SPRITEHEIGHT
+  category: view
+  args: name
+  returns: int
+  side_effects: 读精灵状态
+  semantics: 返回精灵基准显示高度（未创建返回 0）。
+  source: FunctionMethodCreator.cs:6678-6705
+  confidence: high
+- name: SPRITEPOSX
+  category: view
+  args: name
+  returns: int
+  side_effects: 读精灵状态
+  semantics: 返回精灵基准显示位置 X（未创建返回 0）。
+  source: FunctionMethodCreator.cs:6678-6705
+  confidence: high
+- name: SPRITEPOSY
+  category: view
+  args: name
+  returns: int
+  side_effects: 读精灵状态
+  semantics: 返回精灵基准显示位置 Y（未创建返回 0）。
+  source: FunctionMethodCreator.cs:6678-6705
+  confidence: high
+- name: SPRITEMOVE
+  category: view
+  args: name, dx, dy
+  returns: int
+  side_effects: 修改精灵状态
+  semantics: 把精灵基准显示位置相对偏移 (dx, dy)，成功返回 1。
+  source: FunctionMethodCreator.cs:6706-6742
+  confidence: high
+- name: SPRITESETPOS
+  category: view
+  args: name, x, y
+  returns: int
+  side_effects: 修改精灵状态
+  semantics: 设置精灵基准显示位置，成功返回 1。
+  source: FunctionMethodCreator.cs:6706-6742
+  confidence: high
+- name: SPRITEGETCOLOR
+  category: view
+  args: name, x, y
+  returns: int
+  side_effects: 读精灵状态
+  semantics: 返回精灵指定像素的颜色（ARGB）；精灵未创建或坐标越界返回 -1。
+  source: FunctionMethodCreator.cs:6743-6776
+  confidence: high
+- name: SPRITECREATE
+  category: view
+  args: name, gId[, srcX, srcY, srcW, srcH[, destX, destY[, destW, destH]]]
+  returns: int
+  side_effects: 修改精灵状态
+  semantics: 从图形缓冲区创建命名精灵，可指定源矩形、显示位置与显示尺寸（2/6/8/10 参数四种形态）；重名或源无效返回 0。
+  source: FunctionMethodCreator.cs:6955-7073
+  confidence: high
+- name: SPRITEDISPOSE
+  category: view
+  args: name
+  returns: int
+  side_effects: 修改精灵状态
+  semantics: 释放指定名称的精灵；成功返回 1，不存在返回 0。
+  source: FunctionMethodCreator.cs:7074-7095
+  confidence: high
+- name: SPRITEDISPOSEALL
+  category: view
+  args: flag
+  returns: int
+  side_effects: 修改精灵状态
+  semantics: 释放全部精灵（参数决定是否连同动画精灵），返回释放数量。
+  source: FunctionMethodCreator.cs:7096-7110
+  confidence: medium
+- name: SPRITEANIMECREATE
+  category: view
+  args: name, width, height
+  returns: int
+  side_effects: 修改精灵状态
+  semantics: 创建指定尺寸的动画精灵容器，成功返回 1；重名返回 0。
+  source: FunctionMethodCreator.cs:7467-7518
+  confidence: high
+- name: SPRITEANIMEADDFRAME
+  category: view
+  args: name, gId, srcX, srcY, srcW, srcH, posX, posY, delay
+  returns: int
+  side_effects: 修改精灵状态
+  semantics: 向动画精灵添加一帧：源图形矩形、显示位置与停留时长；失败返回 0。
+  source: FunctionMethodCreator.cs:7519-7579
+  confidence: high
+- name: SETANIMETIMER
+  category: view
+  args: interval
+  returns: int
+  side_effects: 修改渲染状态
+  semantics: 设置动画重绘定时器间隔（毫秒，≤32767），始终返回 1。
+  source: FunctionMethodCreator.cs:7915-7935
+  confidence: high
+- name: CBGSETG
+  category: view
+  args: gId, x, y, style
+  returns: int
+  side_effects: 修改控制台背景
+  semantics: 把图形缓冲区设置为控制台背景图像（style 指定对齐/拉伸方式），成功返回 1。
+  source: FunctionMethodCreator.cs:7650-7686
+  confidence: high
+- name: CBGSETSPRITE
+  category: view
+  args: spriteName, x, y, style
+  returns: int
+  side_effects: 修改控制台背景
+  semantics: 把精灵设置为控制台背景图像，成功返回 1。
+  source: FunctionMethodCreator.cs:7712-7747
+  confidence: high
+- name: CBGCLEAR
+  category: view
+  args: ''
+  returns: int
+  side_effects: 修改控制台背景
+  semantics: 清空全部控制台背景设置，始终返回 1。
+  source: FunctionMethodCreator.cs:7580-7595
+  confidence: high
+- name: CBGCLEARBUTTON
+  category: view
+  args: ''
+  returns: int
+  side_effects: 修改控制台背景
+  semantics: 清除全部按钮背景设置，始终返回 1。
+  source: FunctionMethodCreator.cs:7618-7633
+  confidence: high
+- name: CBGREMOVERANGE
+  category: view
+  args: begin, end
+  returns: int
+  side_effects: 修改控制台背景
+  semantics: 删除指定序号范围的控制台背景设置，始终返回 1。
+  source: FunctionMethodCreator.cs:7596-7617
+  confidence: high
+- name: CBGREMOVEBMAP
+  category: view
+  args: ''
+  returns: int
+  side_effects: 修改控制台背景
+  semantics: 清除按钮判定用位图（按钮映射），始终返回 1。
+  source: FunctionMethodCreator.cs:7634-7649
+  confidence: high
+- name: CBGSETBMAPG
+  category: view
+  args: gId
+  returns: int
+  side_effects: 修改控制台背景
+  semantics: 用图形缓冲区生成按钮判定位图，成功返回 1。
+  source: FunctionMethodCreator.cs:7687-7711
+  confidence: high
+- name: CBGSETBUTTONSPRITE
+  category: view
+  args: buttonId, sprite1, sprite2, x, y, style[, tooltip]
+  returns: int
+  side_effects: 修改控制台背景
+  semantics: 为指定编号按钮设置普通/悬停两张精灵背景与点击值，可附提示文本；失败返回 0。
+  source: FunctionMethodCreator.cs:7748-7804
+  confidence: high
+- name: HTML_GETPRINTEDSTR
+  category: view
+  args: '[lineIndex]'
+  returns: string
+  side_effects: 读控制台显示状态
+  semantics: 返回指定行已打印内容的 HTML 文本。
+  source: FunctionMethodCreator.cs:6076-6111
+  confidence: medium
+- name: HTML_POPPRINTINGSTR
+  category: view
+  args: ''
+  returns: string
+  side_effects: 读控制台显示状态
+  semantics: 取出并返回当前正在打印中的 HTML 字符串。
+  source: FunctionMethodCreator.cs:6112-6131
+  confidence: medium
+- name: GETKEY
+  category: input
+  args: keyCode
+  returns: int
+  side_effects: 读键盘状态
+  semantics: 窗口激活时返回指定虚拟键码（0-255）当前是否被按下（1/0）；窗口未激活或键码越界返回 0。
+  source: FunctionMethodCreator.cs:7805-7840
+  confidence: high
+- name: GETKEYTRIGGERED
+  category: input
+  args: keyCode
+  returns: int
+  side_effects: 读键盘状态
+  semantics: 返回指定键是否在本次检查周期刚被按下（按下沿，1/0）；依赖 GETKEY 系共享的按键状态表。
+  source: FunctionMethodCreator.cs:7805-7840
+  confidence: high
+- name: MOUSEX
+  category: input
+  args: ''
+  returns: int
+  side_effects: 读鼠标状态
+  semantics: 返回鼠标在客户区的 X 坐标。
+  source: FunctionMethodCreator.cs:7841-7864
+  confidence: high
+- name: MOUSEY
+  category: input
+  args: ''
+  returns: int
+  side_effects: 读鼠标状态
+  semantics: 返回鼠标在客户区的 Y 坐标。
+  source: FunctionMethodCreator.cs:7841-7864
+  confidence: high
+- name: MOUSEB
+  category: input
+  args: ''
+  returns: string
+  side_effects: 读鼠标状态
+  semantics: 返回鼠标当前指向的按钮对象的值字符串（非按钮对象返回空串）。
+  source: FunctionMethodCreator.cs:7865-7899
+  confidence: medium
+- name: ISACTIVE
+  category: input
+  args: ''
+  returns: int
+  side_effects: 读窗口状态
+  semantics: 返回主窗口是否处于激活状态（1/0）。
+  source: FunctionMethodCreator.cs:7900-7914
+  confidence: high
+- name: ISSKIP
+  category: input
+  args: ''
+  returns: int
+  side_effects: 读打印状态
+  semantics: 返回当前是否处于快速跳过打印的状态（1/0）。
+  source: FunctionMethodCreator.cs:3602-3616
+  confidence: high
+- name: MOUSESKIP
+  category: input
+  args: ''
+  returns: int
+  side_effects: 读鼠标状态
+  semantics: 以鼠标连点为依据判断是否处于跳过状态（1/0），可能伴随警告。
+  source: FunctionMethodCreator.cs:3617-3647
+  confidence: medium
+- name: MESSKIP
+  category: input
+  args: ''
+  returns: int
+  side_effects: 读打印状态
+  semantics: 返回消息跳过（快速跳过）是否生效（1/0）。
+  source: FunctionMethodCreator.cs:3617-3647
+  confidence: medium
+- name: FLOWINPUT
+  category: input
+  args: def[, input[, canSkip[, forceSkip]]]
+  returns: int
+  side_effects: 修改进程输入状态
+  semantics: 设置流式输入（FLOWINPUT）的默认值、是否可跳过、是否强制跳过等进程标志，返回 0。
+  source: FunctionMethodCreator.cs:8461-8501
+  confidence: medium
+- name: FLOWINPUTS
+  category: input
+  args: flag[, defStr]
+  returns: int
+  side_effects: 修改进程输入状态
+  semantics: 设置流式输入为字符串输入模式，并可指定默认字符串，返回 0。
+  source: FunctionMethodCreator.cs:8502-8532
+  confidence: medium
+- name: HOTKEY_STATE
+  category: input
+  args: key[, state]
+  returns: int
+  side_effects: 修改热键状态
+  semantics: 设置指定热键的状态值，返回 0。
+  source: FunctionMethodCreator.cs:8679-8707
+  confidence: medium
+- name: HOTKEY_STATE_INIT
+  category: input
+  args: key
+  returns: int
+  side_effects: 修改热键状态
+  semantics: 初始化（复位）热键状态，返回 0。
+  source: FunctionMethodCreator.cs:8708-8731
+  confidence: medium
+- name: OUTPUTLOG
+  category: debug
+  args: '[filename[, hideInfo]]'
+  returns: int
+  side_effects: 写文件
+  semantics: 把控制台日志输出到文件；hideInfo 为 1 时不包含附加信息，返回 1。
+  source: FunctionMethodCreator.cs:8732-8768
+  confidence: high
+- name: GETMEMORYUSAGE
+  category: debug
+  args: ''
+  returns: int
+  side_effects: 读进程状态
+  semantics: 返回当前进程工作集内存字节数。
+  source: FunctionMethodCreator.cs:8307-8322
+  confidence: high
+- name: CLEARMEMORY
+  category: debug
+  args: ''
+  returns: int
+  side_effects: 触发 GC
+  semantics: 强制垃圾回收并返回回收前后工作集内存的差值（字节数）。
+  source: FunctionMethodCreator.cs:8323-8341
+  confidence: high
+- name: GETDOINGFUNCTION
+  category: debug
+  args: ''
+  returns: string
+  side_effects: 读进程状态
+  semantics: 返回当前正在执行的函数（标签）名；空闲时返回空串。
+  source: FunctionMethodCreator.cs:8441-8460
+  confidence: high
+- name: GETCONFIG
+  category: debug
+  args: key
+  returns: int
+  side_effects: 读配置
+  semantics: 按名称读取整数型配置项的值。
+  source: FunctionMethodCreator.cs:6021-6075
+  confidence: high
+- name: GETCONFIGS
+  category: debug
+  args: key
+  returns: string
+  side_effects: 读配置
+  semantics: 按名称读取字符串型配置项的值。
+  source: FunctionMethodCreator.cs:6021-6075
+  confidence: high
+- name: GETTIME
+  category: other
+  args: ''
+  returns: int
+  side_effects: 读系统时钟
+  semantics: 返回形如 yyyymmddhhmmssmmm 的当前时刻整数（年月日时分秒毫秒拼接）。
+  source: FunctionMethodCreator.cs:3967-3981
+  confidence: high
+- name: GETTIMES
+  category: other
+  args: ''
+  returns: string
+  side_effects: 读系统时钟
+  semantics: 返回 yyyy/MM/dd HH:mm:ss 格式的当前时间字符串。
+  source: FunctionMethodCreator.cs:3982-3996
+  confidence: high
+- name: GETMILLISECOND
+  category: other
+  args: ''
+  returns: int
+  side_effects: 读系统时钟
+  semantics: 返回自公元 1 年 1 月 1 日起经过的毫秒数（DateTime.Now.Ticks / 10000）。
+  source: FunctionMethodCreator.cs:3997-4011
+  confidence: high
+- name: GETSECOND
+  category: other
+  args: ''
+  returns: int
+  side_effects: 读系统时钟
+  semantics: 返回自公元 1 年 1 月 1 日起经过的秒数（DateTime.Now.Ticks / 10^7）。
+  source: FunctionMethodCreator.cs:4012-4026
+  confidence: high
+- name: ENUMFUNCBEGINSWITH
+  category: other
+  args: prefix[, resultArray]
+  returns: int
+  side_effects: 修改变量数据(RESULT)
+  semantics: 枚举所有以 prefix 开头的非事件函数名写入字符串数组（默认 RESULTS），返回数量。
+  source: FunctionMethodCreator.cs:233-329
+  confidence: high
+- name: ENUMFUNCENDSWITH
+  category: other
+  args: suffix[, resultArray]
+  returns: int
+  side_effects: 修改变量数据(RESULT)
+  semantics: 枚举所有以 suffix 结尾的非事件函数名写入字符串数组，返回数量。
+  source: FunctionMethodCreator.cs:233-329
+  confidence: high
+- name: ENUMFUNCWITH
+  category: other
+  args: text[, resultArray]
+  returns: int
+  side_effects: 修改变量数据(RESULT)
+  semantics: 枚举所有包含 text 的非事件函数名写入字符串数组，返回数量。
+  source: FunctionMethodCreator.cs:233-329
+  confidence: high
+- name: EXISTSOUND
+  category: other
+  args: file
+  returns: int
+  side_effects: 读文件系统
+  semantics: 判断 sound 目录下是否存在指定音频文件（1/0）。
+  source: FunctionMethodCreator.cs:8202-8221
+  confidence: high
+- name: EXISTFUNCTION
+  category: other
+  args: funcName[, allFlag]
+  returns: int
+  side_effects: 读函数表
+  semantics: 查询用户函数是否已定义：0=未定义、1=普通函数、2=整数返回型方法、3=字符串返回型方法；需要时触发 ERB 懒加载。
+  source: FunctionMethodCreator.cs:8222-8306
+  confidence: high
+- name: GETMETH
+  category: other
+  args: funcName, default, args...
+  returns: int
+  side_effects: 调用用户函数
+  semantics: 以参数调用用户定义的整数返回型函数并返回其值；未定义时返回第 2 参默认值。
+  source: FunctionMethodCreator.cs:8533-8574
+  confidence: high
+- name: GETMETHS
+  category: other
+  args: funcName, default, args...
+  returns: string
+  side_effects: 调用用户函数
+  semantics: 以参数调用用户定义的字符串返回型函数并返回其值；未定义时返回第 2 参默认值。
+  source: FunctionMethodCreator.cs:8575-8616
+  confidence: high
+- name: EXISTMETH
+  category: other
+  args: funcName
+  returns: int
+  side_effects: 读函数表
+  semantics: 返回用户函数存在性位标志：1=整数返回型、2=字符串返回型、0=未定义。
+  source: FunctionMethodCreator.cs:8617-8654
+  confidence: high
+- name: GETSOUNDORBGMINFO
+  category: other
+  args: channel[, infoType]
+  returns: int
+  side_effects: 查询/初始化音频
+  semantics: 查询音频信息：infoType 缺省时把总时长/当前进度/播放状态/音量/速度写入 RESULT_ARRAY 并返回总时长；1-5 逐项返回对应值。channel=-1 表示 BGM。
+  source: FunctionMethodCreator.cs:8769-8829
+  confidence: high
+- name: ISPLAYINGSOUND
+  category: other
+  args: '[channel]'
+  returns: int
+  side_effects: 查询音频状态
+  semantics: 返回指定声道是否正在播放（1/-1 表示未播放或无效）；channel 越界返回 -1。
+  source: FunctionMethodCreator.cs:8830-8873
+  confidence: medium
+- name: SOUNDCONTROL
+  category: other
+  args: channel, op[, speed[, preservePitch]]
+  returns: int
+  side_effects: 控制音频播放
+  semantics: 控制指定声道：op 0=暂停 1=恢复 2=停止；op=3 时按 speed（百分比）设置播放速度，第 4 参非 0 表示不变调。失败返回 -1/-2。
+  source: FunctionMethodCreator.cs:8874-8948
+  confidence: high
+- name: ISPLAYINGBGM
+  category: other
+  args: ''
+  returns: int
+  side_effects: 查询音频状态
+  semantics: 返回 BGM 是否正在播放（1/0）。
+  source: FunctionMethodCreator.cs:8949-8967
+  confidence: high
+- name: BGMCONTROL
+  category: other
+  args: op[, speed[, preservePitch]]
+  returns: int
+  side_effects: 控制音频播放
+  semantics: 控制 BGM：op 0=暂停 1=恢复 2=停止；op=3 时按 speed（百分比）设置播放速度，第 3 参非 0 表示不变调。失败返回 -2。
+  source: FunctionMethodCreator.cs:8968-9031
+  confidence: high

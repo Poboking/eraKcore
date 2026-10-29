@@ -1,0 +1,70 @@
+; ============================================================================
+; GOLDEN_08_IO.ERB - file / save data statements (writes confined to sav/)
+; isa.yaml: SAVEDATA SAVEDATA_TEXT(via PUTFORM) DELDATA SAVEGLOBAL LOADGLOBAL
+;   RESETGLOBAL SAVECHARA LOADCHARA PUTFORM SAVENOS
+; builtin-functions: SAVETEXT LOADTEXT EXISTFILE ENUMFILES CHKDATA
+;   CHKCHARADATA FIND_CHARADATA SAVENOS
+; NOTE: SAVEGAME/LOADGAME/SAVEDATA-text UI flows, LOADDATA (clears the call
+;   stack) and SAVEVAR/LOADVAR (NotImpl placeholders) are NOT exercised;
+;   see golden-runbook.md.
+; NOTE: ENUMFILES is an EXPRESSION function, not a statement:
+;   ENUMFILES(path [, pattern [, recursive [, destStrArrayVar]]])
+;   (FunctionMethodCreator.cs EnumFilesMethod; corpus form:
+;   ResourceManager.ERB:46 `LOCAL = ENUMFILES("resources", "*.xml", 1)`).
+;   SAVECHARA form per corpus (COMF444:94): SAVECHARA "file", desc, charaNO.
+; All files are written into the sav/ folder with FIXED names so the run is
+; idempotent (re-running overwrites, ENUMFILES output stays stable).
+; ============================================================================
+@GOLDEN_IO
+	#DIMS FTXT
+	#DIM FNUM1
+	#DIM FNUM2
+	PRINTL === SECTION:IO-TEXTFILE ===
+	SAVETEXT "GOLDEN-IO-TEST", "GOLDEN_TEST.txt"
+	PRINTFORML SAVETEXT={RESULT}
+	FTXT '= LOADTEXT("GOLDEN_TEST.txt")
+	PRINTFORML LOADTEXT=[%FTXT%]
+	PRINTFORML EXISTFILE={EXISTFILE("GOLDEN_TEST.txt")} MISS={EXISTFILE("NO_SUCH_FILE_XYZ.txt")}
+	PRINTL === SECTION:IO-SAVEDATA ===
+	MONEY:0 = 12345
+	PUTFORM GOLDEN-DESC-{1+1}
+	PRINTFORML SAVEDATA_TEXT=[%SAVEDATA_TEXT%]
+	SAVEDATA 88, "GOLDEN TEST SAVE"
+	CHKDATA 88
+	PRINTFORML CHKDATA={RESULT} DESC=%RESULTS:0%
+	PRINTL === SECTION:IO-GLOBAL ===
+	GLOBAL:0 = 777
+	GLOBALS:0 '= "GSTR"
+	SAVEGLOBAL
+	; SAVEGLOBAL sets no RESULT (FunctionIdentifier.cs:1801-1812), so the old
+	; `SAVEGLOBAL={RESULT}` printed stale state; probe the written file instead.
+	PRINTFORML SAVEGLOBAL_EXIST={EXISTFILE("sav/global.sav")}
+	GLOBAL:0 = 0
+	GLOBALS:0 '= "CLEARED"
+	LOADGLOBAL
+	PRINTFORML LOADGLOBAL={RESULT} G={GLOBAL:0} GS=%GLOBALS:0%
+	RESETGLOBAL
+	PRINTFORML RESETGLOBAL G={GLOBAL:0} GS=%GLOBALS:0%
+	PRINTL === SECTION:IO-CHARAFILE ===
+	DELALLCHARA
+	ADDVOIDCHARA
+	CSTR:0:0 '= "CDATA"
+	SAVECHARA "GOLDEN_CHARA.dat", "golden chara", 0
+	FIND_CHARADATA "GOLDEN_*"
+	PRINTFORML FIND_CHARADATA={RESULT} F0=%RESULTS:0%
+	CHKCHARADATA "GOLDEN_CHARA.dat"
+	PRINTFORML CHKCHARADATA={RESULT}
+	DELALLCHARA
+	PRINTFORML BEFORE-LOAD NUM={CHARANUM}
+	LOADCHARA "GOLDEN_CHARA.dat"
+	PRINTFORML AFTER-LOAD NUM={CHARANUM} CSTR=%CSTR:0:0%
+	PRINTL === SECTION:IO-ENUMFILES ===
+; SAVECHARA writes dat/chara_<name>.dat (not sav/), so the old
+; ENUMFILES("sav", "GOLDEN_*") was always 0; enumerate the file just written.
+	FNUM1 = ENUMFILES("dat", "chara_GOLDEN_*")
+	PRINTFORML ENUM_DAT={FNUM1}
+	FNUM2 = ENUMFILES("ERB", "GOLDEN_*", 0)
+	PRINTFORML ENUM_ERB={FNUM2}
+	PRINTL === SECTION:IO-CLEANUP ===
+	DELDATA 88
+	PRINTFORML END-IO

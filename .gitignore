@@ -1,0 +1,21 @@
+# 构建
+.gradle/
+build/
+.kotlin/
+*.class
+target/
+
+# JVM 崩溃日志
+hs_err_pid*.log
+replay_pid*.log
+
+# 本机工具链/IDE
+local.properties
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# 产物（erbc 容器等派生文件不入库）
+*.erbc
+erbc-out/

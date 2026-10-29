@@ -1,0 +1,6 @@
+# 子集产物与中间构建一律不入库：字体二进制由有 fonttools + SIL OFL 原件的机器生成，
+# 审计凭据是 subset-build-manifest.txt 里的三元组 sha256（原件 / 清单 / 产物）。
+build/
+*.ttf
+*.otf
+*.ttc

@@ -1,0 +1,22 @@
+# 由 build_subset.py 生成，禁手改（复现凭据，审计时三样齐才算可复现）
+source-font        : D:/DSH/eratw-安卓移植计划/eratw-画蛇添足版eratw4.980/font/Saitamaar.ttf
+source-sha256      : 19570b8605954669772f533e1a5f04b0f560c371114e33be179ea91ea9085cc9
+source-size        : 2015340
+required-manifest  : required-codepoints.txt
+required-sha256    : 249b31702d49afeda0a7fd2336a0ce4126b6d58829ca11c3a28ab35da10aca25
+required-count     : 8076
+fonttools-version  : 4.67.0
+python-version     : 3.14.3 (AMD64)
+family-name        : Saitamaar
+unitsPerEm         : 1280
+sidecar-size-px    : 16
+subset-output      : saitamaar-subset.ttf
+subset-sha256      : cb279cdd8f40031e35660763fb3ede8fb61ce5f682342be21e59fe6570f4b260
+subset-size        : 1135100
+subset-numGlyphs   : 5270
+sidecar-output     : saitamaar-advance.txt
+sidecar-sha256     : 71dff2622ef0fcc86c4513325ca3ce942d39d78d4ad51d4c8f8600bc624df89d
+sidecar-rows       : 5269
+coverage-hit       : 5268
+coverage-miss      : 2808
+head-modified      : 3512211716

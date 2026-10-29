@@ -1,0 +1,110 @@
+# LICENSE-Saitamaar —— 随仓字体资产的授权逐条核验（c-fontsub / M4-FONT 后半起，2026-10-19；
+# 2026-10-20 f-license 路补齐上游取证并定案，见 §1.1.1）
+
+本目录三个资产文件的唯一来源是语料字体 `Saitamaar.ttf`：
+- `saitamaar-subset.ttf`（子集 TTF，sha256 见 `subset-build-manifest.txt`）
+- `saitamaar-advance.txt`（契约 §3 sidecar，由 `tools/fontsubset/build_subset.py` 生成，禁手改）
+- `subset-build-manifest.txt`（复现凭据）
+
+原始文件与工具证据：`eratw-android/tools/fontsubset/name-table-audit.txt`（各字体 name 表 dump）。
+
+## 1 逐条核授权
+
+### 1.1 Saitamaar.ttf（唯一入库来源）—— **2026-10-20 定案：public domain，可随包再分发，族名不必改**
+
+- 源文件：`eratw-画蛇添足版eratw4.980/font/Saitamaar.ttf`（2015340 字节，
+  sha256=19570b8605954669772f533e1a5f04b0f560c371114e33be179ea91ea9085cc9；语料一字节未改，只读）。
+- name 表实测（p3/p1 两份，内容相同）：
+  name0 "Created by keage with FontForge 2.0 (http://fontforge.sf.net)"、
+  name1/4/6 "Saitamaar"、name2 "Normal"、name3 "FontForge 2.0 : Saitamaar : 20-3-2013"、
+  name5 "Version 1.0"；nameID 集合只有 {0,1,2,3,4,5,6}，
+  **ID 13（许可证说明）/ ID 14（许可 URL）/ ID 7（trademark）/ ID 8（制造商）均不存在**。
+- OS/2 version 4、fsType = 0x0000（bit0 Restricted / bit2 Preview&Print / bit3 Editable /
+  bit4 NoSubsetting / bit5 BitmapEmbeddingOnly / bit8 NoEmbedding 全 0）；成品子集同值
+  （复跑实测见 `tools/fontsubset/name-table-audit.txt` 的 2026-10-20 段）。
+  → 源与成品都不主张任何嵌入/子集限制，支持随 App 分发。
+
+#### 1.1.1 定案依据（一次来源，2026-10-20 f-license 取证；字段级细节在 name-table-audit.txt）
+
+- **作者本人的声明**：https://github.com/keage/Saitamaar 的 README.md「Licence」节原文
+  `### Saitamaar` / `* Saitamaar is in the public domain.`
+  该两行由 login `keage` 在 commit 9a67316c（2023-06-04）加入：
+  https://github.com/keage/Saitamaar/commit/9a67316c（该仓 7 个 commit 全部由 keage 提交）。
+  同节署名 `&copy; YAMASINA Keage - http://keage.sakura.ne.jp`，与源字体 name0 的 "keage" 同一人。
+- **交叉佐证**：https://github.com/asciiart-development/SaitamaarFont README_ja.md「ライセンス」节
+  「このフォントはパブリックドメインで提供されており、自由に使用、改変、再配布が可能です。」；
+  该仓 AUTHORS.txt 把 `Keage <keagecko@gmail.com>` 列为版权作者（CONTRIBUTORS.txt 是 scrpgil）。
+- **RFN 结论：不存在保留字体名。** public domain 本身没有 RFN 概念；即便是上面那个重建仓
+  给它自己 2023 产物套的 OFL-1.1，其 OFL.txt 版权声明是
+  `Copyright 2023 The Saitamaarfont Project Authors (https://github.com/googlefonts/googlefonts-project-template)`，
+  其后没有 "with Reserved Font Name" 的名字列表——而 OFL 1.1 的 DEFINITIONS 明确
+  RFN 只能来自版权声明之后逐个列出的名字，故该授权文本未保留任何字体名。
+  → 子集属「可自由改作并再分发」，**族名保持 `Saitamaar`，不必改名重发**（契约 §3「#family 原样」不变）。
+- **口径修正（重要）**：本仓多处把该字体写成「OFL」（`tools/fontsubset/build_subset.py:15-16`、
+  `.workbuddy/CONTRACT-M4-C.md:73`、c-glyphmetrics 路 `core/.../font/PortFonts.kt:19,46`）。
+  准确标签是 **public domain**；OFL 只出现在那个下游重建仓对其自身产物的授权里，
+  且 Saitamaar 并未进 Google Fonts（`google/fonts` 无 `ofl/saitamaar`，HTTP 404）。
+  这三处不属本路文件面，未改，已写进交付报告「需组长接线」。
+- 处置变更：既已定案可再分发，`saitamaar-subset.ttf` 与 `saitamaar-advance.txt` **可以入仓**
+  （M4 出口与 APK 随包都需要成品在场，不应停在「每台机器自跑脚本」）。解除入库的闸是根
+  `.gitignore:29-32` 那两行 `*.ttf` / `*-advance.txt`——该文件与 `build_subset.py` 属 c-fontsub 路，
+  本路不动，方案见交付报告。
+- 仍不复制 OFL 1.1 原文进本目录：PD 无许可证全文可贴，贴 OFL 原文＝伪造授权链。
+  保留本文件作为来源与结论的审计凭据；子集 name0/name3 的 keage 署名原样在档。
+- TODO(verify)：作者原站 http://keage.sakura.ne.jp 本机 DNS 不可解析、web.archive.org 与
+  jsdelivr 均不可达 ⇒ 未做「语料件 vs 原站分发件」的逐字节比对（只影响"原件有无被中转改动"，
+  不影响授权结论）。卡点：本机网络白名单。
+
+### 1.2 游戏随包事实（语料 `font/字体与显示.txt`，行号原样）
+
+- `:1` 「font中的字体都是游戏必须的；Saitamaar.ttf是字符画所需的字体，现默认搭载。」
+  → 原版游戏本身就带 Saitamaar.ttf 再分发给玩家（事实佐证；不构成许可条款本身）。
+- `:4` 「ERA需要一种等宽的编程用字体」、`:6` 「除此以外的非等宽字体都会造成制表错误」
+  → 语料作者自证 Saitamaar 一类比例字体会造成**制表（网格）错误**——与本项目口径一致：
+  布局用等宽网格（Grid.cells），本子集只提供真实度量（advance/lsb），
+  两套口径的分裂是契约 §0.5 的正式决定，不是本文件的发明。
+- `:12` 「作者的编译测试环境是字号16、行高18.」→ sidecar `#size 16` 的选取依据。
+
+### 1.3 微软字体——原件与子集一律禁入库（判据①的"禁"侧）
+
+实测 name 表（见 name-table-audit.txt）：
+- `msgothic.ttc`（i0 "MS Gothic" / i1 "MS UI Gothic"，© 2017 data:RICOH Co.,Ltd. typeface:RYOBI IMAGIX CO.）
+- `msmincho.ttc`（"MS Mincho"，同上署名）
+- `simhei.ttf`（© Beijing ZhongYi Electronics Co., 1995-2005）
+三者的 name ID 13 原文开头一致：
+  "Microsoft supplied font. You may use this font to create, display, and print content
+  as permitted by the license terms or terms of use, of the Microsoft product, service, or
+  content in which this font was included. You may only (i) embed this font in content as
+  permitted by the embedding restrictions..."
+→ 授权只覆盖「按嵌入限制嵌入内容」，**没有子集再分发权**。
+处置：`build_subset.py:guard_source` 按文件名硬性拒绝这三家（含 simhei/simfang/simkai 等
+`字体与显示.txt:9` 提到的系统字体关键字），产物不落仓；`probe_metrics.py` 允许在本机读它们
+——只产出度量文本（advance 参照），不复制二进制。
+
+## 2 设备回退路线（2808 个 Saitamaar 本就没有的码点往哪走）
+
+覆盖率实测（`python build_subset.py --verify` 读数，两套独立解析器一致）：
+required 8076 → hit 5268 / miss 2808；`missing-in-Saitamaar-subset.txt` 与
+`missing-in-Saitamaar.txt` 逐行一致（复核结论：miss 的 2808 码点**源字体 cmap 本就没有**，
+不是子集化裁掉的）。
+
+1. APK 内只随包 `saitamaar-subset.ttf`；sidecar 按 §3「缺失即缺行」，
+   消费方（c-glyphmetrics）查不到行即走缺字回退链——本路不为缺口新增任何二进制。
+2. 设备侧回退顺序：Android 系统字体栈（CJK 覆盖通常是 Noto Sans CJK / 思源系），
+   由渲染层 `Typeface` 回退完成；具体实现与缺字方框（子集已带 notdef 轮廓，
+   `notdef_outline=True`）的分工归 c-glyphmetrics。
+3. PC 开发参照口径：`字体与显示.txt:8`「目前默认加载黑体[SimHei]」，
+   故 M4 截图对齐验收的"PC 真值"是 simhei 的度量（probe-report.txt 的 simhei 段，
+   1:2 网格在其上严格成立 gridMismatch=0），Saitamaar 子集只保证字形可画、
+   数值如实——它的比例宽度（空格400/数字640/拉丁800/CJK1280，upem=1280）
+   不允许被拿去做 1:2 冒充。
+
+## 3 本文件维护约定
+
+- 三个资产文件 + 本文件同由 c-fontsub 独占；资产重新生成只走
+  `python tools/fontsubset/build_subset.py`（连跑两遍 sha 相同，判据⑤已实测）。
+- 授权链任何更新（上游许可页原文、RFN 结论、补 OFL 文本）都只更新本文件并同步 manifest，
+  不新开文档。
+- 2026-10-20 状态：授权链已在 §1.1.1 定案（public domain、无 RFN），本文件的 TODO(verify)
+  只剩「原站分发件逐字节比对」一条（本机网络不可达）。族名与 sidecar 文件名
+  `saitamaar-advance.txt` 维持现状，c-glyphmetrics 侧的 4 处消费点无需同步改动。

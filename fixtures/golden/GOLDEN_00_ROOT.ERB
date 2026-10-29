@@ -1,0 +1,147 @@
+; ============================================================================
+; GOLDEN_00_ROOT.ERB - golden run entry point
+; ----------------------------------------------------------------------------
+; Purpose : L2 spec-conformance golden fixture for eratw-android.
+;
+; LAUNCH  : AUTOMATIC. This file defines a `#PRI` `@EVENTFIRST` handler
+;           (below) and the engine dispatches it itself on NEW GAME - no game
+;           file is touched, no console command is needed (none exists, see
+;           CONSOLE block). Chain: title -> openning input 0 = new game
+;           (Process.cs endOpenning:2167-2180; the engine adds chara 0 at
+;           :2172-2176) -> beginFirst() (Process.cs:2201) ->
+;           callFunction("EVENTFIRST", force:true) (Process.cs:2207).
+;           EVENTFIRST is an engine event name (IdentifierDictionary.cs
+;           IsEventLabelName :72-89); event functions allow unlimited
+;           same-name definitions and ALL of them execute, ordered by bucket
+;           #ONLY(0) -> #PRI(1) -> normal(2) -> #LATER(3), load order inside
+;           a bucket (LabelDictionary.cs:70-105 + 185-239 bucket split,
+;           CalledFunction.cs:228-243 ShiftNext group 0..3; rule also in
+;           specs/loader.md appendix D rule 2 / D.4). `#PRI` is legal on
+;           event labels only and is parsed at LogicalLineParser.cs:81-107.
+;           Why bucket #PRI and NOT #LATER: the game's own normal-bucket
+;           @EVENTFIRST (ERB/SYSTEM.ERB:8) ends with `BEGIN SHOP`, and
+;           ProcessState.Begin() clears the whole call stack
+;           (ProcessState.cs:219-271, functionList.Clear() :258-266) - any
+;           bucket after the normal one would never run. With #PRI our
+;           handler executes BEFORE the game's init: the suite's DELALLCHARA
+;           then wipes only the engine-created starter charas, and the game's
+;           own NEWGAME (normal bucket, after us) rebuilds its roster, so the
+;           engine-side anomalies the suite provokes (if any) print AFTER
+;           `=== END ===` and are outside the golden range (runbook sec 5).
+;           Why NOT @EVENTLOAD (A11b warning upheld, not overridden):
+;           EVENTLOAD is dispatched on EVERY save load (Process.cs:2674), and
+;           the suite runs DELALLCHARA + SAVEDATA; `#LATER` cannot be proven
+;           last because bucket 3 already holds 5 game #LATER handlers
+;           ordered by load sequence among themselves (specs/loader.md D.4
+;           note: EVENTLOAD 32->84->1367->260->2->32->63->91->387), and a
+;           re-run while a real save is loaded destroys that game (the #DIM
+;           guard is per-process only). @EVENTTRAIN/@EVENTCOM/@EVENTCOMEND/
+;           @EVENTTURNEND all have game handlers touching chara state and
+;           none is guaranteed on a fresh start; EVENTFIRST is the only
+;           forced (force:true) fire-and-once event of the new-game path.
+; CONSOLE : THE SUITE CANNOT BE STARTED FROM THE EMUERA CONSOLE (A11b proof,
+;           kept for the record). `@X` -> EmueraConsole.doSystemCommand
+;           (strips the leading `@` at :1644) -> DebugCommand(:2167+); text
+;           that fails ParseLine is evaluated as an EXPRESSION (:2185-2190,
+;           hence `@GOLDEN_ROOT` -> cannot-resolve-identifier), and a parsed
+;           InstructionLine must pass all gates at :2204-2216; CALL/JUMP/
+;           GOTO/CALLEVENT/RESTART families all carry FLOW_CONTROL (flag
+;           definitions FunctionIdentifier.cs:3721/3725, ctor OR
+;           :4200-4206) and are rejected; the only console-reachable call
+;           statements CALLF/CALLFORMF/TRYCALLF/TRYCALLFORMF (flag 38,
+;           :1114/:1245) accept `#FUNCTION` methods only
+;           (IdentifierDictionary.cs:555-559) and a method body may contain
+;           only METHOD_SAFE statements (ErbLoader.cs:1032-1036), which would
+;           delete exactly the statements this suite exists to cover.
+;           Collection instead: the suite itself runs
+;           `OUTPUTLOG "GOLDEN_ROOT_LOG.txt"` right after `=== END ===`
+;           (EmueraConsole.cs:1654-1656 routes OUTPUTLOG straight to
+;           OutputSystemLog, :3484 full GetLog replay). Snapshotting from
+;           inside the suite is required: once control returns, the game's
+;           normal @EVENTFIRST reaches BEGIN SHOP and the console log is
+;           cleared, so a console-side `@OUTPUTLOG` afterwards only contains
+;           the game's own screens (observed run4). GOLDEN_09's
+;           `OUTPUTLOG "GOLDEN_LOG.txt"` remains a mid-run snapshot
+;           (sections 1-9 only) and is redundant.
+; Boot    : `@GOLDEN_BOOT` (below) is a guarded ONE-SHOT wrapper of
+;           `CALL GOLDEN_ROOT`: `#DIM GOLDEN_BOOT_DONE` right after the label
+;           line = private var of that function (proven load-safe pattern,
+;           same shape as GOLDEN_01 #DIM GIDX) and keeps its value across
+;           calls, so any repeated EVENTFIRST dispatch (e.g. a later
+;           `BEGIN FIRST`) re-enters the hook but returns without re-running
+;           the suite. For the semi-manual section, temporarily edit the
+;           hook body below to `CALL GOLDEN_BOOT_MANUAL` (fixture edit, NOT
+;           a game edit) - `@GOLDEN_BOOT_MANUAL` is the same one-shot wrapper
+;           around GOLDEN_07. Never leave these GOLDEN_*.ERB files in the
+;           game's ERB/ outside a capture session: every NEW GAME while they
+;           are present runs the suite (and deletes charas); see runbook sec 2.
+; Rules   : - deterministic only: no RAND outside the seeded RANDOMIZE
+;             section in GOLDEN_05_DATA.ERB.
+;           - every section prints "=== SECTION:xxx ===" headers.
+;           - output is ASCII except values that come from the game's
+;             own CSV data (see GOLDEN_04_CHARA.ERB).
+; Coverage map and run instructions: docs/golden-runbook.md (sec 2/3 = launch)
+; ============================================================================
+; Auto-launch hook: engine event function, #PRI bucket of @EVENTFIRST.
+; Runs BEFORE the game's normal-bucket @EVENTFIRST (ERB/SYSTEM.ERB:8, which
+; ends with BEGIN SHOP and would clear the call stack via ProcessState.Begin,
+; ProcessState.cs:258-266, killing any later bucket). Idempotency is ensured
+; by the GOLDEN_BOOT guard below. Do NOT convert this to #LATER/normal.
+@EVENTFIRST
+#PRI
+	CALL GOLDEN_BOOT
+@GOLDEN_BOOT
+	#DIM GOLDEN_BOOT_DONE
+	; One-shot bootstrap for the in-game call site (see LAUNCH above).
+	; `#DIM <var>` right after a label line = private var of that function,
+	; proven load-safe pattern (same shape as GOLDEN_01 #DIM GIDX); it keeps
+	; its value across calls, so re-entering GOLDEN_BOOT is a no-op.
+	IF GOLDEN_BOOT_DONE == 1
+		RETURN
+	ENDIF
+	GOLDEN_BOOT_DONE = 1
+	CALL GOLDEN_ROOT
+@GOLDEN_BOOT_MANUAL
+	#DIM GOLDEN_BOOT_MANUAL_DONE
+	; One-shot bootstrap for GOLDEN_07_INPUT_MANUAL (semi-manual collection).
+	IF GOLDEN_BOOT_MANUAL_DONE == 1
+		RETURN
+	ENDIF
+	GOLDEN_BOOT_MANUAL_DONE = 1
+	CALL GOLDEN_INPUT_MANUAL
+@GOLDEN_ROOT
+	PRINTL === GOLDEN RUN START ===
+	PRINTL === SECTION:ROOT-INFO ===
+	PRINTFORML EMUERA_VERSION=%EMUERA_VERSION%
+	PRINTFORML MONEYLABEL=%MONEYLABEL%
+	PRINTFORML GAMEBASE_TITLE=%GAMEBASE_TITLE%
+	PRINTFORML GAMEBASE_VERSION={GAMEBASE_VERSION}
+	PRINTFORML GAMEBASE_GAMECODE={GAMEBASE_GAMECODE}
+	PRINTFORML SAVENOS_FUNC={SAVENOS()}
+	PRINTFORML __INT_MAX__={__INT_MAX__}
+	PRINTFORML __INT_MIN__={__INT_MIN__}
+	CALL GOLDEN_BASIC
+	CALL GOLDEN_PRINT
+	CALL GOLDEN_FLOW
+	CALL GOLDEN_CHARA
+	CALL GOLDEN_DATA
+	CALL GOLDEN_RNG
+	CALL GOLDEN_INPUT_AUTO
+	CALL GOLDEN_IO
+	CALL GOLDEN_MISC
+	CALL GOLDEN_XMLMAP
+	CALL GOLDEN_GVIEW
+	CALL GOLDEN_SYMBOLS
+	PRINTL === END ===
+	; Snapshot the whole console replay before control returns to the game:
+	; the game's own @EVENTFIRST (BEGIN SHOP) clears the console log, so a
+	; console-side @OUTPUTLOG afterwards only sees the game's screens.
+	OUTPUTLOG "GOLDEN_ROOT_LOG.txt"
+	; Fault-isolated probe: if this aborts, === END === is already in the log.
+	CALL GOLDEN_XML_PROBE
+	; NOTE: GOLDEN_INPUT_MANUAL (WAIT/ONEINPUT/TWAIT/INPUTANY/PRINTDATAW...)
+	; must be executed separately from its own call site (CALL
+	; GOLDEN_INPUT_MANUAL, or one-shot CALL GOLDEN_BOOT_MANUAL) - the console
+	; cannot launch any plain label; see LAUNCH block in the header.
+	; NOTE: GOLDEN_SYMBOLS also registers 3 x @EVENTTURNEND (bucket-order test);
+	; its markers appear when a turn ends, not during this run - see runbook section 8.

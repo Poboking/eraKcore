@@ -1,0 +1,113 @@
+; ============================================================================
+; GOLDEN_01_CORE.ERB - CORE-01 / CORE-03 / CORE-02 / CORE-04
+; ----------------------------------------------------------------------------
+; CORE-01 字符串 CASE 区间（spec: CaseExpression.cs:62-70）
+;   下界不成立直接 return false；成立才判上界，两端都是 `Compare(..) <= 0` 的
+;   闭区间。修复前移植侧把它写成字符串 `>=`/`<=`（两处官方 bug 的读数），
+;   命中集合整体取反 ⇒ "b" 落 a..c 里反而不命中。
+; CORE-03 FOR 非常量步长（spec: FunctionIdentifier.cs:3005）
+;   步长只在 FOR 行求值一次（LoopStep 快照），循环体内改步长变量不影响已开循环。
+; CORE-02 TRYCALLFORM 常量名目标缺失（spec: FunctionIdentifier.cs:3577 vs :3590-3597）
+;   装载期 SetJumpTo 先绑名，执行期先判 null 再 ConvertArg ⇒ 目标缺失时实参
+;   一次都不求值。可观测面 = RAND 消费次数。
+; CORE-10 同一行的**命中**侧（:3589-3598）：目标存在 ⇒ ConvertArg 逐位求值恰好一次。
+;   两侧合起来才构成完整判据 —— 只钉缺失侧时「整条调用被跳过」也能过闸。
+; CORE-04 ALLSAMES 短路（spec: FunctionMethodCreator.cs:4630-4636 / :4641-4647）
+;   逐个求值、遇不同立即 return 0 ⇒ 余参表达式不执行。
+;   注意：编译期会把**语句位**的表达式位用户方法调用前移（lowerStatementForPool），
+;   那样短路就被求值相位吃掉了。数据节（DATAFORM 行）按契约 C2 免降级，运行期走
+;   EvalContext.callFunctionRef 的惰性通道 —— 这才是 E2E 能观测到短路的位置。
+;   （DATA 是 STR_NULLABLE 原文直出，不做展开；DATAFORM 才是 FORM 串，`{}` 内求值。）
+; ============================================================================
+@M11E_CORE01
+	#DIM HITS
+	PRINTL === SECTION:M11E-CORE01 ===
+	SELECTCASE "b"
+	CASE "a" TO "c"
+		HITS = HITS + 1
+	CASE "m" TO "z"
+		HITS = HITS + 100
+	ENDSELECT
+	SELECTCASE "a"
+	CASE "a" TO "c"
+		HITS = HITS + 10
+	CASE "m" TO "z"
+		HITS = HITS + 1000
+	ENDSELECT
+	SELECTCASE "z"
+	CASE "m" TO "z"
+		HITS = HITS + 100
+	ENDSELECT
+	SELECTCASE "zz"
+	CASE "m" TO "z"
+		HITS = HITS + 10000
+	ENDSELECT
+	PRINTFORML CASE_TO_HITS={HITS}
+
+@M11E_CORE03
+	#DIM STEPS
+	#DIM ACC
+	PRINTL === SECTION:M11E-CORE03 ===
+	STEPS = 1
+	FOR COUNT, 0, 10, STEPS
+		ACC = ACC * 10 + COUNT
+		STEPS = 100
+	NEXT
+	PRINTFORML FOR_STEP_SNAPSHOT={ACC} STEP_END={STEPS}
+
+; 观察面 = RAND 消费序列（与单测 `StmtFamilyAuditTest` 的 counting randProvider 同源）：
+; 先取 3 个参考抽（R0/R1/R2），每次 RANDOMIZE 重播种后走一遍 TRYCALLFORM 再取 2 个抽。
+; 目标缺失 ⇒ 0 抽被消费（M0/M1 == R0/R1）；目标命中 ⇒ 恰好 1 抽被消费（H0/H1 == R1/R2）。
+; 比「单抽相等」稳：任一侧撞车都要两项同时成立才误判。
+@M11E_CORE02
+	#DIM R0
+	#DIM R1
+	#DIM R2
+	#DIM M0
+	#DIM M1
+	#DIM H0
+	#DIM H1
+	PRINTL === SECTION:M11E-CORE02 ===
+	RANDOMIZE 424242
+	R0 = RAND:100
+	R1 = RAND:100
+	R2 = RAND:100
+	RANDOMIZE 424242
+	TRYCALLFORM "M11E_NO_SUCH_FUNC", RAND:100
+	M0 = RAND:100
+	M1 = RAND:100
+	RANDOMIZE 424242
+	TRYCALLFORM "M11E_CORE02_HIT", RAND:100
+	H0 = RAND:100
+	H1 = RAND:100
+	; 缺失侧（CORE-02 的判据）：目标解析不到 ⇒ 实参一次都不求值 ⇒ 后续两次抽与参考抽相同。
+	PRINTFORML TRYFORM_MISS_ARG_FREE={M0 == R0 && M1 == R1}
+	; 命中侧（CORE-10 的判据）：目标解析得到 ⇒ 实参求值一次 ⇒ 后续两次抽整体后移一格。
+	PRINTFORML TRYFORM_HIT_ARG_USED={H0 == R1 && H1 == R2} H0={H0} H1={H1} R1={R1} R2={R2}
+
+; 命中侧不靠跨函数变量取证（函数内 #DIM 是函数私有，文件级 #DIM 在本管线里
+; 不注册成全局）：被调函数自己打一行，与 RAND 消费读数互为独立证据。
+; 形参只能写**可赋值变量**（spec: ErbLoader.cs:651-652 + 680-684 ArgCanOnlyAssignableVar），
+; 而 `DUMMY` 这类自由名在本函数内没有 #DIM ⇒ 解析期就被拒（装载器把整条标签置错）。
+; 语料里的常规写法是把实参绑到内建局部数组 `ARG`/`ARGS`（ProcessState.cs:435-449
+; 按 TopLabel.Arg[i] 写回，LocalDictionary 侧 resizeLocalVars("ARG",…) 见 LabelDictionary.cs:66）。
+@M11E_CORE02_HIT(ARG)
+	PRINTL M11E_CORE02_HIT_RAN
+
+@M11E_SIDE
+	#FUNCTION
+	Z = Z + 1
+	RETURNF 1
+
+@M11E_CORE04
+	PRINTL === SECTION:M11E-CORE04 ===
+	Z = 0
+	PRINTDATAL
+		DATAFORM {ALLSAMES(1, 2, M11E_SIDE())}
+	ENDDATA
+	PRINTFORML ALLSAMES_SHORT_SIDE={Z}
+	Z = 0
+	PRINTDATAL
+		DATAFORM {ALLSAMES(1, 1, M11E_SIDE())}
+	ENDDATA
+	PRINTFORML ALLSAMES_FULL_SIDE={Z}

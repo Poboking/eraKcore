@@ -1,0 +1,45 @@
+# 随包像素字体包 —— 复现凭据（build_font_pack.py 生成，勿手改）
+# fonttools 4.67.0
+# required-codepoints.txt sha256 249b31702d49afeda0a7fd2336a0ce4126b6d58829ca11c3a28ab35da10aca25
+
+[fusion]
+family = Fusion Pixel 12px
+source = npm @fontpkg/fusion-pixel 20220405.0.0 → package/fusion-pixel.ttf（OFL-1.1）
+source-sha256 = d358eb41c1df2bc8bb517cad8e7cec8216ee0ec6939a742e046899f56f2b0a32
+unitsPerEm = 1200
+coverage = 7262/8076 (89.92%), miss 814
+subset = fusion-pixel-12px-subset.ttf
+subset-sha256 = a92112d0546ce6b842b77f358e67795d632f5f4fe6d3ec83fce23bccef1a4e96
+subset-bytes = 1378016
+sidecar = fusion-pixel-12px-advance.txt
+sidecar-sha256 = 0f0e04e281b06cc4902f87dbdc22b684c0611a422001b55830e90c9da1ae4e15
+occurrence-coverage = 99.916% (95756818/95837334 次), miss 80516
+advance-top = [(1200, 6974), (600, 283), (1800, 2), (900, 1), (400, 1), (300, 1)]
+
+[ark]
+family = Ark Pixel 12px
+source = 仓内 app/src/main/res/font/ark_pixel.ttf（OFL-1.1，TakWolf/ark-pixel-font）
+source-sha256 = 56e82b4fa83e9e7bc586da288a7eb0481f8bc1f1fa8ecc6ad952781c8c0e366a
+unitsPerEm = 1200
+coverage = 7252/8076 (89.80%), miss 824
+subset = ark-pixel-12px-subset.ttf
+subset-sha256 = 86083a10b0949965263ed7c51b4f130b9b53f8389e683154d03de89ba0747029
+subset-bytes = 1349524
+sidecar = ark-pixel-12px-advance.txt
+sidecar-sha256 = 0bfa2649a83faf2b7fd9304c9318a752560c5bb81c88af3b9e2e5e3cbe91dd44
+occurrence-coverage = 99.522% (95379666/95837334 次), miss 457668
+advance-top = [(1200, 6791), (600, 458), (0, 2), (3000, 1)]
+
+[unifont]
+family = Unifont
+source = npm @fontpkg/unifont 15.0.1 → package/unifont-15.0.01.ttf（OFL-1.1 / GPLv2+FE）
+source-sha256 = 299459bc34e915b1c18dd38677739f41d0b2a6d79b93f480cd157ef24da675ab
+unitsPerEm = 1024
+coverage = 8034/8076 (99.48%), miss 42
+subset = unifont-subset.ttf
+subset-sha256 = 3ac59527b628a6224e55f8e71e9af33053dfe1bc05ae412bd556e2cca31b155e
+subset-bytes = 1870140
+sidecar = unifont-advance.txt
+sidecar-sha256 = 6a6ccef53aa9ae47f8ef9865c83ee51fadc2982aa49e29e74975f869c443336e
+occurrence-coverage = 100.000% (95837250/95837334 次), miss 84
+advance-top = [(1024, 7254), (512, 696), (0, 91)]

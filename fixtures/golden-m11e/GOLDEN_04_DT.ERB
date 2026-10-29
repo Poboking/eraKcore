@@ -1,0 +1,30 @@
+; ============================================================================
+; GOLDEN_04_DT.ERB - DT_TOXML 写侧形态（B5 / FN-07 的写侧）
+; ----------------------------------------------------------------------------
+; 原版 DT_TOXML = DataTable.WriteXmlSchema + WriteXml（FunctionMethodCreator.cs:2699-2716）。
+; 移植侧 dtSchemaXml 已复刻的两位（本节钉住，防回退）：
+;   - 声明带 standalone="yes"（.NET 探针实测**不带**，属移植侧已知分歧，见下）；
+;   - 主键列 msdata:ReadOnly/AutoIncrement + 表尾 xs:unique msdata:PrimaryKey。
+; 移植侧**尚未**复刻的一位（m11e-dttoxml 路未合流）：
+;   - msdata:CaseSensitive 写侧（.NET 探针：DataSet 级 "true"、表元素级 "True"）。
+;     现状 CASESENS=0 ⇒ 自环 round-trip 丢敏感位（DT_SELECT 的大小写口径回落到框架缺省）。
+;   TODO(verify)：矩阵/属性接线落地后 CASESENS 应变 1，本行读数随之变化。
+; ============================================================================
+@M11E_DTXML
+	#DIMS XSCHEMA
+	#DIMS XDATA
+	PRINTL === SECTION:M11E-DTXML ===
+	PRINTFORML DT_CREATE={DT_CREATE("M11E_T")}
+	PRINTFORML DT_COLUMN_ADD={DT_COLUMN_ADD("M11E_T", "NAME")}
+	DT_COLUMN_OPTIONS "M11E_T", "NAME", DEFAULT, "NONAME"
+	PRINTFORML DT_ROW_ADD={DT_ROW_ADD("M11E_T", "NAME", "R1") > 0}
+	XDATA '= DT_TOXML("M11E_T", XSCHEMA)
+	A = STRFIND(XSCHEMA, "standalone=") >= 0
+	B = STRFIND(XSCHEMA, "msdata:PrimaryKey=") >= 0
+	C = STRFIND(XSCHEMA, "msdata:AutoIncrement=") >= 0
+	D = STRFIND(XSCHEMA, "msdata:CaseSensitive") >= 0
+	PRINTFORML DT_SCHEMA_LEN={STRLENSU(XSCHEMA)} STANDALONE={A} PK={B} AUTOINC={C} CASESENS={D}
+	PRINTFORML DT_DATA_LEN={STRLENSU(XDATA)}
+	PRINTFORML DT_CLEAR={DT_CLEAR("M11E_T")}
+	PRINTFORML DT_FROMXML={DT_FROMXML("M11E_T", XSCHEMA, XDATA)} ROWS={DT_ROW_LENGTH("M11E_T")}
+	PRINTFORML DT_ROUNDTRIP=%DT_CELL_GETS("M11E_T", 0, "NAME")%

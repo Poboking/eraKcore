@@ -1,0 +1,39 @@
+; ============================================================================
+; GOLDEN_05_CHARA.ERB - DELCHARA 重载分流（M-M3）
+; ----------------------------------------------------------------------------
+; 选型在语句层（spec: FunctionIdentifier.cs:1385-1394）：实参个数 == 1 走
+; DelCharacter(long)，否则（含 0 个）走 DelCharacter(long[])。两条重载的
+; **报错文案不同**，这就是分流唯一可观测的差异：
+;   - 单参越界：:1245 传 charaNo.ToString() => 带编号；
+;   - 数组参越界：:1259 传 charaNoList.ToString() => 官方 bug，CLR 上只得到类型名
+;     "System.Int64[]"，编号丢失（ADR-005 原样复刻）。
+; 本节正常路径走三形态（单参 / 两参 / 数组元素作两参），越界两条单独成函数，
+; 由 M11eExpandE2ETest 的第二条用例在干净运行时里调用并断言文案
+; （CodeEE 不可在 ERB 侧捕获，混进主轨迹会把快照切成两段）。
+; 另：DELCHARA 的多实参按**删除前**的位置解释（:1364-1370 先整体求值收集）。
+; ============================================================================
+@M11E_DELCHARA
+	#DIM NOS, 2
+	PRINTL === SECTION:M11E-DELCHARA ===
+	DELALLCHARA
+	ADDVOIDCHARA
+	ADDVOIDCHARA
+	ADDVOIDCHARA
+	PRINTFORML DC_START={CHARANUM}
+	DELCHARA 1
+	PRINTFORML DC_SINGLE={CHARANUM}
+	DELCHARA 0, 1
+	PRINTFORML DC_MULTI={CHARANUM}
+	ADDVOIDCHARA
+	ADDVOIDCHARA
+	NOS:0 = 0
+	NOS:1 = 1
+	DELCHARA NOS:0, NOS:1
+	PRINTFORML DC_ARRAY={CHARANUM}
+
+@M11E_DELCHARA_SINGLE_OOR
+	DELCHARA 99
+
+@M11E_DELCHARA_MULTI_OOR
+	ADDVOIDCHARA
+	DELCHARA 0, 99

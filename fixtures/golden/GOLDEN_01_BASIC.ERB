@@ -1,0 +1,157 @@
+; ============================================================================
+; GOLDEN_01_BASIC.ERB - variables / assignment / arrays / strings / math
+; isa.yaml kinds covered: variable (SET SETBIT CLEARBIT INVERTBIT VARSET
+;   CVARSET SPLIT ARRAYSHIFT ARRAYREMOVE ARRAYSORT ARRAYCOPY SWAP VARSIZE
+;   POWER ENCODETOUNI TIMES STRLEN STRLENFORM STRLENU STRLENFORMU)
+; NOTE: VARI / VARS exist in the engine registry but are DISABLED in this
+;   game (setting.json UseScopedVariableInstruction=false), so this fixture
+;   uses #DIM/#DIMS + "=" assignment instead. The SET statement in Emuera is
+;   the assignment-operator form (SP_SET: "dest = v1, v2, ..."), NOT
+;   "SET dest, v"; plain "dest = value" lines compile to the same SET func.
+; builtin-functions.yaml: math + string + part of variable categories
+; ============================================================================
+@GOLDEN_BASIC
+#DIMS REPARR, 2
+	#DIM GIDX
+	#DIM GA
+	#DIMS GSB
+	#DIMS FSA
+	#DIMS FSB
+	#DIM ARR, 10
+	#DIM ARR2, 10
+	#DIMS SARR, 10
+	#DIM L0
+	#LOCALSSIZE 10
+	PRINTL === SECTION:BASIC-SCALAR ===
+	GA = 10
+	GSB '= "hello"
+	PRINTFORML A={GA} SB=%GSB%
+	GA = 20
+	GSB '= "world"
+	PRINTFORML A={GA} SB=%GSB%
+	GA = GA + 5
+	PRINTFORML A={GA}
+	PRINTL === SECTION:BASIC-FORM-ASSIGN ===
+	; `=` on a string variable is FORM-string assignment, not expression
+	; (ArgumentParser.cs:1024-1040 AnalyseFormattedString), so quotes stay
+	; literal and {} / %var% expand; `'=` is the expression form
+	; (LexicalAnalyzer.cs:566-571 + ArgumentParser.cs:1042).
+	FSA = raw{GA}and%GSB%!
+	PRINTFORML FSA=[%FSA%]
+	FSB '= "expr{literal}%notexpanded%"
+	PRINTFORML FSB=[%FSB%]
+	PRINTL === SECTION:BASIC-SETARRAY ===
+	ARR = 1, 2, 3, 4, 5
+	PRINTFORML ARR={ARR:0},{ARR:1},{ARR:2},{ARR:3},{ARR:4}
+	ARR = 100
+	PRINTFORML ARR0={ARR:0} ARR1={ARR:1}
+	PRINTL === SECTION:BASIC-BIT ===
+	SETBIT GA, 1, 3
+	PRINTFORML A={GA}
+	CLEARBIT GA, 1
+	PRINTFORML A={GA}
+	INVERTBIT GA, 2, 4
+	PRINTFORML A={GA} GETBIT2={GETBIT(GA,2)} GETBIT4={GETBIT(GA,4)}
+	PRINTL === SECTION:BASIC-VARSET ===
+	VARSET ARR, 7
+	PRINTFORML ARR={ARR:0},{ARR:5},{ARR:9}
+	VARSET ARR, 9, 1, 3
+	PRINTFORML ARR={ARR:0},{ARR:1},{ARR:2},{ARR:3}
+	VARSET ARR, 0
+	PRINTL === SECTION:BASIC-ARRAYOPS ===
+	ARR = 5, 3, 9, 1, 7
+	; ARRAYCOPY takes STRING-literal variable NAMES, not the variables
+	; themselves: builder SP_COPY_ARRAY_Arguments declares argumentType
+	; [string,string] and resolves both via GetVariableToken(SingleStrTerm.Str)
+	; (ArgumentParser.cs:2427-2442 / :2447-2489; bare `ARRAYCOPY ARR, ARR2`
+	; fails checkArgumentType -> "ARRAYCOPY command: wrong type for arg 1",
+	; PC load-warnings run 2026-10-18). Same convention as VARSIZE("ARR") below.
+	ARRAYCOPY "ARR", "ARR2"
+	; The direction argument is the IDENTIFIER FORWARD or BACK, not 0/1
+	; (ArgumentParser.cs:650-663). With a number the remaining start/count are
+	; ignored (identifierWord == null -> defaults start=0, count=whole array), so
+	; `ARRAYSORT ARR, 0, 0, 5` sorts all 10 slots and pulls the trailing zeros
+	; to the front (observed run5: SORTASC=0,0,0,0,0).
+	ARRAYSORT ARR, FORWARD, 0, 5
+	PRINTFORML SORTASC={ARR:0},{ARR:1},{ARR:2},{ARR:3},{ARR:4}
+	ARRAYSORT ARR, BACK, 0, 5
+	PRINTFORML SORTDESC={ARR:0},{ARR:1},{ARR:2},{ARR:3},{ARR:4}
+	ARRAYSHIFT ARR, 2, 1
+	PRINTFORML SHIFT={ARR:0},{ARR:1},{ARR:2},{ARR:3}
+	ARRAYREMOVE ARR, 1, 1
+	PRINTFORML REMOVE={ARR:0},{ARR:1},{ARR:2}
+	ARRAYCOPY "ARR", "ARR2"
+	PRINTL === SECTION:BASIC-SWAP-VARSIZE ===
+	SWAP ARR:0, ARR:2
+	PRINTFORML SWAP={ARR:0},{ARR:2}
+	VARSIZE ARR
+	PRINTFORML VARSIZE_STMT={RESULT}
+	PRINTFORML VARSIZE_FUNC={VARSIZE("ARR")} VARSIZE_FLAG={VARSIZE("FLAG")} VARSIZE_CFLAG={VARSIZE("CFLAG")}
+	PRINTL === SECTION:BASIC-POWER-TIMES ===
+	POWER GIDX, 2, 10
+	PRINTFORML POWER_STMT={GIDX}
+	PRINTFORML POWER_FUNC={POWER(3,4)} SQRT={SQRT(17)} CBRT={CBRT(30)}
+	PRINTFORML LOG={LOG(100)} LOG10={LOG10(1000)} EXPONENT={EXPONENT(3)}
+	; TIMES scales the variable named in its 1st operand (GA here); the
+	; original `TIMES A, 2.5` targeted the game's global A and read back 0
+	; (observed run5). 25 * 2.5 = 62.5 -> (long)62 (FunctionIdentifier.cs:1315-1338).
+	TIMES GA, 2.5
+	PRINTFORML TIMES={GA}
+	PRINTL === SECTION:BASIC-METHOD ===
+	MIN 3, 1, 2
+	PRINTFORML METHOD_MIN={RESULT}
+	MAX 3, 1, 2
+	PRINTFORML METHOD_MAX={RESULT}
+	PRINTFORML FUNC_MATH: ABS={ABS(-42)} SIGN={SIGN(-7)},{SIGN(0)},{SIGN(9)} LIMIT={LIMIT(15,0,10)} INRANGE={INRANGE(5,1,9)},{INRANGE(0,1,9)}
+	PRINTFORML GROUPMATCH={GROUPMATCH(3,1,2,3)} NOSAMES={NOSAMES(1,2,3)},{NOSAMES(1,2,1)} ALLSAMES={ALLSAMES(4,4,4)},{ALLSAMES(4,4,5)}
+	PRINTL === SECTION:BASIC-ARRAYQUERY ===
+	VARSET ARR, 0
+	ARR = 1, 2, 2, 4, 2
+	PRINTFORML MATCH={MATCH(ARR,2)} SUMARRAY={SUMARRAY(ARR,0,5)} MAXARRAY={MAXARRAY(ARR,0,5)} MINARRAY={MINARRAY(ARR,0,5)}
+	PRINTFORML FINDELEMENT={FINDELEMENT(ARR,4)} FINDLASTELEMENT={FINDLASTELEMENT(ARR,2)} INRANGEARRAY={INRANGEARRAY(ARR,1,3)}
+	PRINTL === SECTION:BASIC-STRINGLEN ===
+	STRLEN "abcd"
+	PRINTFORML STRLEN={RESULT}
+	STRLENFORM ABC{1+1}
+	PRINTFORML STRLENFORM={RESULT}
+	STRLENU "abcd"
+	PRINTFORML STRLENU={RESULT}
+	STRLENFORMU ABC{1+1}
+	PRINTFORML STRLENFORMU={RESULT}
+	PRINTFORML FUNC: STRLENS={STRLENS("abcd")} STRLENSU={STRLENSU("abcd")}
+	PRINTFORML WIDTH_FULL={STRLENS(TOFULL("ABC"))} WIDTH_HALF={STRLENS(TOHALF(TOFULL("ABC")))}
+	PRINTL === SECTION:BASIC-STRINGOPS ===
+	PRINTFORML SUBSTRING=%SUBSTRING("abcdef",2,3)% SUBSTRINGU=%SUBSTRINGU("abcdef",2,3)%
+	PRINTFORML SUBSTR_NOLEN=%SUBSTRING("abcdef",3)%
+	PRINTFORML STRFIND={STRFIND("abcdef","cd")} STRFINDU={STRFINDU("abcdef","cd")} MISS={STRFIND("abcdef","zz")}
+	PRINTFORML STRCOUNT={STRCOUNT("aXbXcX","X")}
+	PRINTFORML TOSTR=%TOSTR(42)% TOSTR_D5=%TOSTR(42,"D5")% TOSTR_X8=%TOSTR(255,"X8")%
+	PRINTFORML TOINT={TOINT("123")}/{TOINT("1+2")}
+	PRINTFORML TOUPPER=%TOUPPER("aBc")% TOLOWER=%TOLOWER("aBc")%
+	PRINTFORML TOFULL=%TOFULL("AB12")% TOHALF=%TOHALF("AB12")%
+	PRINTFORML CHARATU=%CHARATU("abcde",2)% OOR=%CHARATU("abcde",9)%
+	PRINTFORML UNICODE=%UNICODE(65)% UNICODEBYTE={UNICODEBYTE("A")}
+	PRINTFORML CONVERT=%CONVERT(255,16)%/%CONVERT(10,2)%/%CONVERT(64,8)%
+	PRINTFORML ISNUMERIC={ISNUMERIC("12.3")}/{ISNUMERIC("1a")}
+	REPARR:0 '= "X"
+	REPARR:1 '= "Y"
+	PRINTFORML REPLACE=%REPLACE("a-b-c","-","+")% REPLACE1=%REPLACE("a-b-c","-",REPARR,1)% REPLACE2=%REPLACE("a-b-c","-","+",2)%
+	PRINTFORML STRFORM=%STRFORM("V={1+2}")%
+	PRINTFORML ESCAPE=%ESCAPE("a.b")%
+	PRINTFORML REGEXPMATCH={REGEXPMATCH("abc", "a.c")}/{REGEXPMATCH("abc", "^b")}
+	PRINTL === SECTION:BASIC-ENCODETOUNI ===
+	ENCODETOUNI ABC
+	PRINTFORML UNI_STMT={RESULT:0},{RESULT:1},{RESULT:2}
+	PRINTFORML UNI_FUNC={ENCODETOUNI("AB",1)} NEG={ENCODETOUNI("",0)}
+	PRINTL === SECTION:BASIC-SPLIT-JOIN ===
+	SPLIT "a,b,c", ",", LOCALS
+	PRINTFORML SPLIT_N={RESULT} S1=%LOCALS:0% S2=%LOCALS:1% S3=%LOCALS:2%
+	PRINTFORML STRJOIN=%STRJOIN(LOCALS,"|",0,3)%
+	PRINTL === SECTION:BASIC-BARSTR-MONEYSTR ===
+	PRINTFORML BARSTR=%BARSTR(5,10,10)%
+	PRINTFORML MONEYSTR=%MONEYSTR(1234)%
+	PRINTL === SECTION:BASIC-DIMS-SCOPE ===
+	; LINECOUNT is absolute console history length (includes the game's own
+	; title/menu output), so only the DELTA caused by this fixture is portable.
+	L0 = LINECOUNT
+	PRINTFORML LINES-APPENDED={LINECOUNT-L0}

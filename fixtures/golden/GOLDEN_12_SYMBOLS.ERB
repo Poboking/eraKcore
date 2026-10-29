@@ -1,0 +1,73 @@
+; ============================================================================
+; GOLDEN_12_SYMBOLS.ERB - @label symbol table: duplicate resolution, event buckets
+; ----------------------------------------------------------------------------
+; Purpose : L2 proof for specs/loader.md Appendix D (symbol table / override rules).
+; Evidence: - per-file SortLabel overwrites: ErbLoader.cs:514-518
+;           - noneventLabelDic[name] = label (LAST definition wins): LabelDictionary.cs:60-68
+;           - event labels: all registered, run in bucket order
+;             ONLY(0) -> PRI(1) -> NORMAL(2) -> LATER(3): CalledFunction.cs:228-243
+; Rules   : ASCII only, deterministic, no RAND, no state outside RESULT.
+; Expected: SECTION:DUP-METHOD  -> DUP-METHOD=2
+;           SECTION:DUP-PLAIN   -> DUP-PLAIN=3  (via RESULT:2; plain RETURN zeroes RESULT:0)
+;           SECTION:EVENT-BUCKET-> prints a reminder only; the marker order
+;                                  (PRI, NORMAL, LATER) is observed at turn end.
+; Notes   : - Same-file duplicates do NOT abort loading. Load time emits one
+;             level-1 warning per shadowed NON-EVENT definition:
+;             G12_FUNC x1 + G12_PLAIN x2 = 3 lines, before any run output (see runbook 8).
+;             Event duplicates (EVENTTURNEND) produce NO warning
+;             (ErbLoader.cs:443 only warns when !IsEvent).
+;           - PRINTV G12_PLAIN() is deliberately NOT used: a plain @label is not a
+;             method, so expression-position use throws UsedNonMethodFunc
+;             (IdentifierDictionary.cs:566-569). CALL G12_PLAIN + RESULT is faithful.
+;           - 3 x EVENTTURNEND in one file: definition order is NORMAL, PRI,
+;             LATER while execution order is PRI, NORMAL, LATER - that reorder
+;             is the observable proof of bucket ordering.
+; ============================================================================
+@GOLDEN_SYMBOLS
+	PRINTL === SECTION:DUP-METHOD ===
+	PRINTFORML DUP-METHOD={G12_FUNC()}
+	PRINTL === SECTION:DUP-PLAIN ===
+	RESULT:2 = 0
+	CALL G12_PLAIN
+	PRINTFORML DUP-PLAIN={RESULT:2}
+	PRINTL === SECTION:EVENT-BUCKET ===
+	PRINTFORML EVENT-DEFS=3 EXPECT-ORDER=PRI,NORMAL,LATER
+	PRINTFORML EVENT-BUCKET-REMARK=collect one turn end to see markers
+	RETURN
+
+; --- 1) same-file duplicate #FUNCTION: the later definition must win ---
+@G12_FUNC
+#FUNCTION
+	RETURNF 1
+
+@G12_FUNC
+#FUNCTION
+	RETURNF 2
+
+; --- 2) same-file duplicate plain @label: the later definition must win ---
+@G12_PLAIN
+	RESULT:2 = 1
+	RETURN
+
+@G12_PLAIN
+	RESULT:2 = 2
+	RETURN
+
+@G12_PLAIN
+	RESULT:2 = 3
+	RETURN
+
+; --- 3) event bucket order: PRI(1) -> NORMAL(2) -> LATER(3) ---
+@EVENTTURNEND
+	RESULT:1 = RESULT:1 | 2
+	PRINTFORML EVENT-BUCKET-NORMAL
+
+@EVENTTURNEND
+#PRI
+	RESULT:1 = RESULT:1 | 1
+	PRINTFORML EVENT-BUCKET-PRI
+
+@EVENTTURNEND
+#LATER
+	RESULT:1 = RESULT:1 | 4
+	PRINTFORML EVENT-BUCKET-LATER

@@ -1,0 +1,115 @@
+# probe_metrics.py 产出：参照字体的 advance 度量与码点覆盖（UTF-8，禁手改）
+# 依据见脚本模块注释：PC 实际绘制字体取 emuera.config 的 FONT NAME（本包为黑体 simhei.ttf）
+# verdict 口径：advance == grid_cell(codepoint) * advance(A)，容差 max(1, 6% of advance(A))
+== saitamaar-subset.ttf  unitsPerEm=1280  numGlyphs=5270  cmapEntries=5269  advance(A)=800
+   sample               codepoint advance   adv/A    grid   verdict
+   space                U+0020    400       0.500    1      GRID-MISMATCH
+   ascii-digit          U+0030    640       0.800    1      GRID-MISMATCH
+   ascii-letter         U+0041    800       1.000    1      MATCH-GRID
+   halfwidth-kana       U+FF71    800       1.000    1      MATCH-GRID
+   halfwidth-punct      U+FF61    560       0.700    1      GRID-MISMATCH
+   fullwidth-latin      U+FF21    880       1.100    2      GRID-MISMATCH
+   hiragana             U+3042    1200      1.500    2      GRID-MISMATCH
+   katakana             U+30AB    1040      1.300    2      GRID-MISMATCH
+   cjk-ideograph        U+4E2D    1280      1.600    2      GRID-MISMATCH
+   cjk-punct            U+3001    880       1.100    2      GRID-MISMATCH
+   fullwidth-punct      U+FF1F    1280      1.600    2      GRID-MISMATCH
+   box-drawing-9250     U+2500    1280      1.600    2      GRID-MISMATCH
+   box-drawing-9253     U+2503    1280      1.600    2      GRID-MISMATCH
+   block-element        U+2589    880       1.100    2      GRID-MISMATCH
+   arrow                U+2192    1280      1.600    2      GRID-MISMATCH
+   roman-numeral        U+2160    1280      1.600    2      GRID-MISMATCH
+   greek                U+03A9    1280      1.600    2      GRID-MISMATCH
+   cyrillic             U+0410    -         -        2      NOT-IN-CMAP
+   fullwidth-yen        U+FFE5    1280      1.600    2      GRID-MISMATCH
+   yen-u00a5            U+00A5    640       0.800    2      GRID-MISMATCH
+   bar-punct            U+2015    1280      1.600    2      GRID-MISMATCH
+   misc-symbol          U+2600    -         -        2      NOT-IN-CMAP
+   braille              U+2801    -         -        2      NOT-IN-CMAP
+   bopomofo             U+3105    -         -        2      NOT-IN-CMAP
+   coverage: required=8076 hit=5268 miss=2808 (34.77%)
+   summary: grid-mismatch=18  probe-samples-not-in-cmap=4
+== Saitamaar.ttf  unitsPerEm=1280  numGlyphs=9793  cmapEntries=10115  advance(A)=800
+   sample               codepoint advance   adv/A    grid   verdict
+   space                U+0020    400       0.500    1      GRID-MISMATCH
+   ascii-digit          U+0030    640       0.800    1      GRID-MISMATCH
+   ascii-letter         U+0041    800       1.000    1      MATCH-GRID
+   halfwidth-kana       U+FF71    800       1.000    1      MATCH-GRID
+   halfwidth-punct      U+FF61    560       0.700    1      GRID-MISMATCH
+   fullwidth-latin      U+FF21    880       1.100    2      GRID-MISMATCH
+   hiragana             U+3042    1200      1.500    2      GRID-MISMATCH
+   katakana             U+30AB    1040      1.300    2      GRID-MISMATCH
+   cjk-ideograph        U+4E2D    1280      1.600    2      GRID-MISMATCH
+   cjk-punct            U+3001    880       1.100    2      GRID-MISMATCH
+   fullwidth-punct      U+FF1F    1280      1.600    2      GRID-MISMATCH
+   box-drawing-9250     U+2500    1280      1.600    2      GRID-MISMATCH
+   box-drawing-9253     U+2503    1280      1.600    2      GRID-MISMATCH
+   block-element        U+2589    880       1.100    2      GRID-MISMATCH
+   arrow                U+2192    1280      1.600    2      GRID-MISMATCH
+   roman-numeral        U+2160    1280      1.600    2      GRID-MISMATCH
+   greek                U+03A9    1280      1.600    2      GRID-MISMATCH
+   cyrillic             U+0410    1280      1.600    2      GRID-MISMATCH
+   fullwidth-yen        U+FFE5    1280      1.600    2      GRID-MISMATCH
+   yen-u00a5            U+00A5    640       0.800    2      GRID-MISMATCH
+   bar-punct            U+2015    1280      1.600    2      GRID-MISMATCH
+   misc-symbol          U+2600    -         -        2      NOT-IN-CMAP
+   braille              U+2801    -         -        2      NOT-IN-CMAP
+   bopomofo             U+3105    -         -        2      NOT-IN-CMAP
+   coverage: required=8076 hit=5268 miss=2808 (34.77%)
+   summary: grid-mismatch=19  probe-samples-not-in-cmap=3
+== simhei.ttf  unitsPerEm=256  numGlyphs=28562  cmapEntries=28522  advance(A)=128
+   sample               codepoint advance   adv/A    grid   verdict
+   space                U+0020    128       1.000    1      MATCH-GRID
+   ascii-digit          U+0030    128       1.000    1      MATCH-GRID
+   ascii-letter         U+0041    128       1.000    1      MATCH-GRID
+   halfwidth-kana       U+FF71    -         -        1      NOT-IN-CMAP
+   halfwidth-punct      U+FF61    -         -        1      NOT-IN-CMAP
+   fullwidth-latin      U+FF21    256       2.000    2      MATCH-GRID
+   hiragana             U+3042    256       2.000    2      MATCH-GRID
+   katakana             U+30AB    256       2.000    2      MATCH-GRID
+   cjk-ideograph        U+4E2D    256       2.000    2      MATCH-GRID
+   cjk-punct            U+3001    256       2.000    2      MATCH-GRID
+   fullwidth-punct      U+FF1F    256       2.000    2      MATCH-GRID
+   box-drawing-9250     U+2500    256       2.000    2      MATCH-GRID
+   box-drawing-9253     U+2503    256       2.000    2      MATCH-GRID
+   block-element        U+2589    256       2.000    2      MATCH-GRID
+   arrow                U+2192    256       2.000    2      MATCH-GRID
+   roman-numeral        U+2160    256       2.000    2      MATCH-GRID
+   greek                U+03A9    256       2.000    2      MATCH-GRID
+   cyrillic             U+0410    256       2.000    2      MATCH-GRID
+   fullwidth-yen        U+FFE5    256       2.000    2      MATCH-GRID
+   yen-u00a5            U+00A5    -         -        2      NOT-IN-CMAP
+   bar-punct            U+2015    256       2.000    2      MATCH-GRID
+   misc-symbol          U+2600    -         -        2      NOT-IN-CMAP
+   braille              U+2801    -         -        2      NOT-IN-CMAP
+   bopomofo             U+3105    256       2.000    2      MATCH-GRID
+   coverage: required=8076 hit=7451 miss=625 (7.74%)
+   summary: grid-mismatch=0  probe-samples-not-in-cmap=5
+== msgothic.ttc  unitsPerEm=256  numGlyphs=22291  cmapEntries=16127  advance(A)=128
+   sample               codepoint advance   adv/A    grid   verdict
+   space                U+0020    128       1.000    1      MATCH-GRID
+   ascii-digit          U+0030    128       1.000    1      MATCH-GRID
+   ascii-letter         U+0041    128       1.000    1      MATCH-GRID
+   halfwidth-kana       U+FF71    128       1.000    1      MATCH-GRID
+   halfwidth-punct      U+FF61    128       1.000    1      MATCH-GRID
+   fullwidth-latin      U+FF21    256       2.000    2      MATCH-GRID
+   hiragana             U+3042    256       2.000    2      MATCH-GRID
+   katakana             U+30AB    256       2.000    2      MATCH-GRID
+   cjk-ideograph        U+4E2D    256       2.000    2      MATCH-GRID
+   cjk-punct            U+3001    256       2.000    2      MATCH-GRID
+   fullwidth-punct      U+FF1F    256       2.000    2      MATCH-GRID
+   box-drawing-9250     U+2500    256       2.000    2      MATCH-GRID
+   box-drawing-9253     U+2503    256       2.000    2      MATCH-GRID
+   block-element        U+2589    128       1.000    2      GRID-MISMATCH
+   arrow                U+2192    256       2.000    2      MATCH-GRID
+   roman-numeral        U+2160    256       2.000    2      MATCH-GRID
+   greek                U+03A9    256       2.000    2      MATCH-GRID
+   cyrillic             U+0410    256       2.000    2      MATCH-GRID
+   fullwidth-yen        U+FFE5    256       2.000    2      MATCH-GRID
+   yen-u00a5            U+00A5    128       1.000    2      GRID-MISMATCH
+   bar-punct            U+2015    256       2.000    2      MATCH-GRID
+   misc-symbol          U+2600    256       2.000    2      MATCH-GRID
+   braille              U+2801    -         -        2      NOT-IN-CMAP
+   bopomofo             U+3105    -         -        2      NOT-IN-CMAP
+   coverage: required=8076 hit=5989 miss=2087 (25.84%)
+   summary: grid-mismatch=2  probe-samples-not-in-cmap=2

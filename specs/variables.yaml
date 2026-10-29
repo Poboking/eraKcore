@@ -1,0 +1,231 @@
+# variables.yaml — Emuera 变量模型规约
+# 反编译来源: reference/emuera-cs/（版本字符串 1.824.0.0，见 VariableData.cs:1127）
+# 所有 source 均为 "相对路径:行号"；行号以反编译 C# 为准。
+meta:
+  source_assembly: MinorShift.Emuera (Emuera 1.824.0.0)
+  source_sha256: afa5143782d39cb7b6ceacd6f2271f8d322cab0e3f0c9b730a7ac0d3a6bba74e
+  sources:
+    - MinorShift.Emuera.GameData.Variable/VariableData.cs
+    - MinorShift.Emuera.Runtime.Script.Statements.Variable/VariableCode.cs
+    - MinorShift.Emuera.Runtime.Script.Data/ConstantData.cs
+    - MinorShift.Emuera.Runtime.Script.Statements.Variable/CharacterData.cs
+    - MinorShift.Emuera.GameData.Variable/VariableToken.cs
+    - MinorShift.Emuera.GameData.Variable/CharaVariableToken.cs
+    - MinorShift.Emuera.GameData.Variable/LocalVariableToken.cs
+    - MinorShift.Emuera.GameData.Variable/UserDefinedVariableToken.cs
+    - MinorShift.Emuera.GameData.Variable/UserDefinedCharaVariableToken.cs
+    - MinorShift.Emuera.Runtime.Script.Data/UserDefinedVariableData.cs
+    - MinorShift.Emuera.Runtime.Script.Statements.Variable/VariableEvaluator.cs
+
+# 说明:
+# - "index" 为 VariableCode.__LOWERCASE__ (低 16 位) 对应的存储数组下标（VariableToken.cs:68）。
+# - saved 判定依据 VariableToken 构造函数（VariableToken.cs:88-154）；二进制存档按 IsSavedata 逐变量写读（VariableData.cs:3980-3997, 4081-4211）。
+# - 标量整数变量（0 维）当前为空集: VariableData 构造中 dataInteger 长度为 0（VariableData.cs:2962），
+#   且存档循环 `for (i<0)`（VariableData.cs:3518-3525）。所有"看起来像标量"的变量其实都是 1 维数组，
+#   TARGET/MASTER/RESULT 等只是通常只用 [0] 元素（默认值初始化见 VariableData.cs:3491-3510）。
+integer_basics: []   # 无 0 维整数变量
+
+# 1 维整数数组（存储: VariableData.dataIntegerArray[65]，构造见 VariableData.cs:2963-2967）
+# dims 统一为 1；size 默认 1000（ConstantData.cs:212-215），特例另注；size 可被 VariableSize.CSV 修改（ConstantData.cs:309-551）
+integer_arrays:
+  - {name: DAY,       index: 0,  size: 1000, saved: true,  global: false, source: "VariableData.cs:3014", note: "存档判定 VarCodeInt<60 (VariableToken.cs:141-146)"}
+  - {name: MONEY,     index: 1,  size: 1000, saved: true,  global: false, source: "VariableData.cs:3015"}
+  - {name: ITEM,      index: 2,  size: 1000, saved: true,  global: false, source: "VariableData.cs:3016"}
+  - {name: FLAG,      index: 3,  size: 10000, saved: true, global: false, source: "VariableData.cs:3017; ConstantData.cs:216"}
+  - {name: TFLAG,     index: 4,  size: 1000, saved: true,  global: false, source: "VariableData.cs:3018", note: "index 4 < 60 ⇒ 经典存档覆盖 (VariableToken.cs:141-146; VariableData.cs:3526-3529)"}
+  - {name: UP,        index: 5,  size: 1000, saved: true,  global: false, source: "VariableData.cs:3019"}
+  - {name: PALAMLV,   index: 6,  size: 1000, saved: true,  global: false, source: "VariableData.cs:3020", note: "默认值取 Config.PalamLvDef (VariableData.cs:3485-3487)"}
+  - {name: EXPLV,     index: 7,  size: 1000, saved: true,  global: false, source: "VariableData.cs:3021", note: "默认值取 Config.ExpLvDef (VariableData.cs:3488-3490)"}
+  - {name: EJAC,      index: 8,  size: 1000, saved: true,  global: false, source: "VariableData.cs:3022", note: "[0] 默认 10000 (VariableData.cs:3506-3510)"}
+  - {name: DOWN,      index: 9,  size: 1000, saved: true,  global: false, source: "VariableData.cs:3023"}
+  - {name: RESULT,    index: 10, size: 1000, saved: true,  global: false, source: "VariableData.cs:3024"}
+  - {name: COUNT,     index: 11, size: 1000, saved: true,  global: false, source: "VariableData.cs:3025"}
+  - {name: TARGET,    index: 12, size: 1000, saved: true,  global: false, source: "VariableData.cs:3026", note: "[0] 默认 1 (VariableData.cs:3496-3500); 角色索引"}
+  - {name: ASSI,      index: 13, size: 1000, saved: true,  global: false, source: "VariableData.cs:3027", note: "[0] 默认 -1 (VariableData.cs:3491-3495); 角色索引"}
+  - {name: MASTER,    index: 14, size: 1000, saved: true,  global: false, source: "VariableData.cs:3028", note: "角色索引"}
+  - {name: NOITEM,    index: 15, size: 1000, saved: true,  global: false, source: "VariableData.cs:3029"}
+  - {name: LOSEBASE,  index: 16, size: 1000, saved: true,  global: false, source: "VariableData.cs:3030"}
+  - {name: SELECTCOM, index: 17, size: 1000, saved: true,  global: false, source: "VariableData.cs:3031"}
+  - {name: ASSIPLAY,  index: 18, size: 1000, saved: true,  global: false, source: "VariableData.cs:3032"}
+  - {name: PREVCOM,   index: 19, size: 1000, saved: true,  global: false, source: "VariableData.cs:3033"}
+  - {name: TIME,      index: 20, size: 1000, saved: true,  global: false, source: "VariableData.cs:3034"}
+  - {name: ITEMSALES, index: 21, size: 1000, saved: true,  global: false, source: "VariableData.cs:3035"}
+  - {name: PLAYER,    index: 22, size: 1000, saved: true,  global: false, source: "VariableData.cs:3036", note: "角色索引"}
+  - {name: NEXTCOM,   index: 23, size: 1000, saved: true,  global: false, source: "VariableData.cs:3037"}
+  - {name: PBAND,     index: 24, size: 1000, saved: true,  global: false, source: "VariableData.cs:3038", note: "[0] 默认 Config.PbandDef (VariableData.cs:3501-3505)"}
+  - {name: BOUGHT,    index: 25, size: 1000, saved: true,  global: false, source: "VariableData.cs:3039"}
+  # A..Z: index 26..51 (VariableCode.cs:54-79), 各 1000, saved: true
+  - {name: "A..Z",    index: "26-51", size: 1000, saved: true, global: false, source: "VariableData.cs:3040-3065; VariableCode.cs:54-79", note: "26 个单字母数组"}
+  - {name: GLOBAL,    index: 63, size: 1000, saved: true, global: true, source: "VariableData.cs:3066; VariableData.cs:3804-3814", note: "全局存档单列: SaveGlobalToStream 写 dataIntegerArray[63]"}
+  - {name: RANDDATA,  index: 64, size: 625, saved: true, global: false, source: "VariableData.cs:3067; ConstantData.cs:218", note: "随机数状态; VariableSize.CSV 中禁止改尺寸 (ConstantData.cs:328-332)"}
+  - {name: ITEMPRICE, index: 60, size: 1000, saved: false, global: false, source: "VariableData.cs:3111; ConstantData.cs:451-455", note: "常量数组 (Int1DConstantToken), 数据来自 ITEM.CSV 第 3 列 (ConstantData.cs:1803-1813); 赋值抛错 (VariableData.cs:610-628)"}
+
+# 1 维字符串数组（存储: VariableData.dataStringArray[7]，构造见 VariableData.cs:2968-2973；默认各 100，STR=20000）
+string_arrays:
+  - {name: SAVESTR, index: 0, size: 100,   saved: true,  global: false, source: "VariableData.cs:3068; ConstantData.cs:223"}
+  - {name: STR,     index: 1, size: 20000, saved: true,  global: false, source: "VariableData.cs:3070; ConstantData.cs:223", note: "初始时被 STRNAME.CSV 的名字表填充以兼容旧脚本 (VariableData.cs:3414-3416)"}
+  - {name: RESULTS, index: 2, size: 100,   saved: false, global: false, source: "VariableData.cs:3071", note: "index 2 ≥1 ⇒ IsSavedata=false (VariableToken.cs:147-152); 经典存档只写 dataStringArray[0] (VariableData.cs:3530-3533)"}
+  - {name: GLOBALS, index: 5, size: 100,   saved: true,  global: true,  source: "VariableData.cs:3072; VariableData.cs:3804-3814", note: "与 GLOBAL 同入全局存档"}
+  - {name: TSTR,    index: 6, size: 100,   saved: false, global: false, source: "VariableData.cs:3069", note: "同 RESULTS, 不入经典存档"}
+  - {name: SAVEDATA_TEXT, index: -, size: 1, saved: true, global: false, source: "VariableData.cs:3073", note: "0 维字符串 (StrVariableToken, 直接 dataString[VarCodeInt], VariableData.cs:303-329); dataString 长度 1 (VariableData.cs:2968)"}
+
+# 多维（2D/3D）系统整数数组 —— 2026-10-19 spec 与 C# 交叉验证补条目
+# 此前这 8 个名字只在 default_sizes 的合并说明里以注释形式出现过（"全部 (100,100)  # DITEMTYPE/DA-DE"），
+# 没有逐条登记 ⇒ spec_crosscheck.py 的 varTokenDic 全集比对判为缺条目。
+# 登记依据（逐条行号）：VariableData.cs:3103-3110 的 varTokenDic.Add；
+# 尺寸打包常量：2D = 429496729700L ⇒ (100,100)（ConstantData.cs:224-226），
+#              3D = 109951267635300L ⇒ (100,100,100)（ConstantData.cs:232-234）；
+# 建数组：VariableData.cs:2977（2D）/ :2993（3D）。
+# saved 判定：这 8 个 VariableCode 值（DITEMTYPE=419627008 … DE=419627013、TA=822280192、TB=822280193）
+#   都带 __SAVE_EXTENDED__(268435456) 位 ⇒ IsSavedata=true 走**扩展存档**名字-值对，不入经典定长段
+#   （VariableToken.cs:93-96 命中，:103 的 `Code & 673054720` switch 不参与）。
+multi_dim_arrays:
+  - {name: DITEMTYPE, dim: 2, index: 0, size: "(100,100)", saved: true,  global: false, source: "VariableData.cs:3103; ConstantData.cs:224-226; VariableData.cs:2977", note: "Int2DVariableToken; VarCodeInt = 低 16 位 (VariableCode.cs:142)"}
+  - {name: DA,        dim: 2, index: 1, size: "(100,100)", saved: true,  global: false, source: "VariableData.cs:3104; VariableCode.cs:143"}
+  - {name: DB,        dim: 2, index: 2, size: "(100,100)", saved: true,  global: false, source: "VariableData.cs:3105; VariableCode.cs:144"}
+  - {name: DC,        dim: 2, index: 3, size: "(100,100)", saved: true,  global: false, source: "VariableData.cs:3106; VariableCode.cs:145"}
+  - {name: DD,        dim: 2, index: 4, size: "(100,100)", saved: true,  global: false, source: "VariableData.cs:3107; VariableCode.cs:146"}
+  - {name: DE,        dim: 2, index: 5, size: "(100,100)", saved: true,  global: false, source: "VariableData.cs:3108; VariableCode.cs:147"}
+  - {name: TA,        dim: 3, index: 0, size: "(100,100,100)", saved: true, global: false, source: "VariableData.cs:3109; ConstantData.cs:232-234; VariableData.cs:2993", note: "Int3DVariableToken (VariableCode.cs:150)"}
+  - {name: TB,        dim: 3, index: 1, size: "(100,100,100)", saved: true, global: false, source: "VariableData.cs:3110; VariableCode.cs:151"}
+
+
+# 函数局部变量（按函数名 subID 实例化，不入存档）
+local_vars:
+  - {name: LOCAL,  index: 61, size: 1000, source: "VariableData.cs:3180-3183", note: "LocalVariableToken 按 subId(函数名) 创建 (VariableData.cs:3190-3193); 数组懒初始化 (VariableData.cs:1148-1155)"}
+  - {name: ARG,    index: 62, size: 1000, source: "VariableData.cs:3183"}
+  - {name: LOCALS, index: 3,  size: 100,  source: "VariableData.cs:3184-3187"}
+  - {name: ARGS,   index: 4,  size: 100,  source: "VariableData.cs:3187"}
+  - note: "LOCAL/ARG 尺寸可被函数定义中的参数声明拉大: resizeLocalVars (LabelDictionary.cs:66-67); 函数局部变量在每次 SetDefaultLocalValue 清零 (VariableData.cs:3365-3375), 每文件加载后 ClearLocalValue (VariableData.cs:3377-3383)"
+
+# 伪变量/常量（不可赋值: PseudoVariableToken/ConstantToken 赋值抛错, VariableData.cs:602-634, 789-836）
+pseudo_vars:
+  - {name: RAND,     kind: int, source: "VariableData.cs:3153-3155", note: "RandToken: GetNextRand(上界); CompatiRAND 时取 32768 随机 % n (VariableData.cs:838-876)"}
+  - {name: CHARANUM, kind: int, source: "VariableData.cs:3156", note: "= CharacterList.Count (VariableData.cs:878-889)"}
+  - {name: LASTLOAD_TEXT, kind: str, source: "VariableData.cs:3157; VariableData.cs:2898-2902"}
+  - {name: LASTLOAD_VERSION, kind: int, source: "VariableData.cs:3158", note: "默认 -1"}
+  - {name: LASTLOAD_NO, kind: int, source: "VariableData.cs:3159", note: "默认 -1"}
+  - {name: LINECOUNT, kind: int, source: "VariableData.cs:3160"}
+  - {name: ISTIMEOUT, kind: int, source: "VariableData.cs:3161"}
+  - {name: __INT_MAX__, kind: int, source: "VariableData.cs:3162", note: "= long.MaxValue"}
+  - {name: __INT_MIN__, kind: int, source: "VariableData.cs:3163", note: "= long.MinValue"}
+  - {name: EMUERA_VERSION, kind: str, source: "VariableData.cs:3164", note: "硬编码 \"1.824.0.0\" (VariableData.cs:1127)"}
+  - {name: WINDOW_TITLE, kind: str, source: "VariableData.cs:3165", note: "可写 (VariableData.cs:943-960)"}
+  - {name: MONEYLABEL, kind: str, source: "VariableData.cs:3166", note: "= Config.MoneyLabel"}
+  - {name: DRAWLINESTR, kind: str, source: "VariableData.cs:3167"}
+  - {name: "__FILE__/__FUNCTION__/__LINE__", kind: mixed, source: "VariableData.cs:3168-3179", note: "DebugMode 下返回真实位置, 否则空串/0"}
+
+# CSV 常量名字表（Str1DConstantToken, 从 ConstantData.names 取, 只读）
+csv_constants:
+  source: "VariableData.cs:3112-3139; ConstantData.cs:159-162"
+  names: [ABLNAME, TALENTNAME, EXPNAME, MARKNAME, PALAMNAME, ITEMNAME, TRAINNAME, BASENAME, SOURCENAME, EXNAME, EQUIPNAME, TEQUIPNAME, FLAGNAME, TFLAGNAME, CFLAGNAME, TCVARNAME, CSTRNAME, STAINNAME, CDFLAGNAME1, CDFLAGNAME2, STRNAME, TSTRNAME, SAVESTRNAME, GLOBALNAME, GLOBALSNAME, DAYNAME, TIMENAME, MONEYNAME]
+  note: "共 29 组 nameToIntDics (ConstantData.cs:80,114-121); 名字→序号映射 GetKeywordDictionary (ConstantData.cs:914-1204)"
+
+gamebase_constants:
+  source: "VariableData.cs:3140-3152"
+  str: [GAMEBASE_AUTHOR(含旧拼 GAMEBASE_AUTHER), GAMEBASE_INFO, GAMEBASE_YEAR, GAMEBASE_TITLE, GAMEBASE_URL, GAMEBASE_VERSIONNAME]
+  int: [GAMEBASE_GAMECODE, GAMEBASE_VERSION, GAMEBASE_ALLOWVERSION, GAMEBASE_DEFAULTCHARA, GAMEBASE_NOITEM]
+  note: "值来自 GAMEBASE.CSV (GameBase 类); 赋值抛错 (ConstantToken, VariableData.cs:602-634)"
+
+# 角色库变量（第 1 个参数为角色位置, 长度由 ConstantData.CharacterXxxArrayLength 决定, CharacterData.cs:55-126）
+# 各角色实例持有自己的数组 (CharacterData); 角色列表为 varData.CharacterList (VariableData.cs:2892)
+character_vars:
+  layout: "dataInteger[2] + dataString[4] + dataIntegerArray[84] + dataStringArray[1] + dataIntegerArray2D[1] + 每个用户 #DIM CHARADATA 的独立数组 (CharacterData.cs:57-125)"
+  saved_int_scalars:  # CharacterData.dataInteger, 长 2
+    - {name: ISASSI, index: 0, source: "VariableData.cs:3074; CharacterData.cs:53"}
+    - {name: NO,     index: 1, source: "VariableData.cs:3075; CharacterData.cs:53"}
+  saved_str_scalars:  # dataString, 长 4
+    - {name: NAME,      index: 0, source: "VariableData.cs:3097"}
+    - {name: CALLNAME,  index: 1, source: "VariableData.cs:3098"}
+    - {name: NICKNAME,  index: 2, source: "VariableData.cs:3099", note: "SAVE_EXTENDED (VariableToken.cs:93-96)"}
+    - {name: MASTERNAME, index: 3, source: "VariableData.cs:3100", note: "SAVE_EXTENDED"}
+  int_1d:   # CharacterData.dataIntegerArray[84], 默认各 100, 特例: [3]TALENT=1000, [9]CFLAG=1000, [10]JUEL=200, [15]GOTJUEL=200 (ConstantData.cs:240-247)
+    - {name: BASE,     index: 0, source: "VariableData.cs:3076"}
+    - {name: MAXBASE,  index: 1, source: "VariableData.cs:3077"}
+    - {name: ABL,      index: 2, source: "VariableData.cs:3078"}
+    - {name: TALENT,   index: 3, source: "VariableData.cs:3079"}
+    - {name: EXP,      index: 4, source: "VariableData.cs:3080"}
+    - {name: MARK,     index: 5, source: "VariableData.cs:3081"}
+    - {name: PALAM,    index: 6, source: "VariableData.cs:3082"}
+    - {name: SOURCE,   index: 7, source: "VariableData.cs:3083"}
+    - {name: EX,       index: 8, source: "VariableData.cs:3084"}
+    - {name: CFLAG,    index: 9, source: "VariableData.cs:3085"}
+    - {name: JUEL,     index: 10, source: "VariableData.cs:3086"}
+    - {name: RELATION, index: 11, source: "VariableData.cs:3087", note: "新建角色时全元素默认 Config.RelationDef (CharacterData.cs:163-167)"}
+    - {name: EQUIP,    index: 12, source: "VariableData.cs:3088"}
+    - {name: TEQUIP,   index: 13, source: "VariableData.cs:3089"}
+    - {name: STAIN,    index: 14, source: "VariableData.cs:3090", note: "SAVE_EXTENDED, 非 17 之内? 见下 saved 范围注"}
+    - {name: GOTJUEL,  index: 15, source: "VariableData.cs:3091"}
+    - {name: NOWEX,    index: 16, source: "VariableData.cs:3092"}
+    - {name: DOWNBASE, index: 17, source: "VariableData.cs:3093", note: "SAVE_EXTENDED (VariableToken.cs:93-96); 经典版 index<17 才 saved (VariableToken.cs:117-122) ⇒ DOWNBASE(17)/CUP(18)/CDOWN(19)/TCVAR(20) 仅 SAVE_EXTENDED 标志者存档"}
+    - {name: CUP,      index: 18, source: "VariableData.cs:3094", note: "SAVE_EXTENDED"}
+    - {name: CDOWN,    index: 19, source: "VariableData.cs:3095", note: "SAVE_EXTENDED"}
+    - {name: TCVAR,    index: 20, source: "VariableData.cs:3096", note: "SAVE_EXTENDED"}
+    - note: "存档范围: 经典格式存 dataIntegerArray[0..16] (CharacterData.cs:361-364); 扩展格式按 GetExtSaveList 写 (CharacterData.cs:403-411); 二进制格式按 IsSavedata 全量写 (CharacterData.cs:513-545)"
+  str_1d:
+    - {name: CSTR, index: 0, size: 100, source: "VariableData.cs:3101; ConstantData.cs:248-251"}
+  int_2d:
+    - {name: CDFLAG, index: 0, size: [1,1], source: "VariableData.cs:3102; ConstantData.cs:252-259", note: "默认 (1,1); 尺寸由 CDFLAG1.CSV/CDFLAG2.CSV 名字数联动 (ConstantData.cs:642-668)"}
+  csv_template_init: "ADDCHARA 时从 CharacterTemplate 拷贝: NO/NAME/CALLNAME/NICKNAME/MASTERNAME; Maxbase→BASE+MAXBASE(双写); Mark→MARK; Exp→EXP; Abl→ABL; Talent→TALENT; Relation→RELATION; CFlag→CFLAG; Equip→EQUIP; Juel→JUEL; CStr→CSTR (CharacterData.cs:128-192)"
+  add_del:
+    add: "VariableEvaluator.AddCharacter: 按 NO 查模板, new CharacterData(constant, tmpl, varData) 后 Add 到 CharacterList 尾部 (VariableEvaluator.cs:1201-1210); AddCharacterFromCsvNo 按 CSV 文件号, 未命中则伪角色 (VariableEvaluator.cs:1223-1232)"
+    del: "DelCharacter 按实参个数分两条重载 (FunctionIdentifier.cs:1387-1394: array.Length==1 走 DelCharacter(long)，否则含 0 个走 DelCharacter(long[]))。单参 (VariableEvaluator.cs:1241-1249): 越界 → CodeEE(format(OoRDelChara, charaNo.ToString())) 带编号 (:1245) → Dispose (:1247) → RemoveAt (:1248)。数组参 (:1251-1273): 边校验边 Dispose、全部校验通过后才逐个 Remove (:1267 与 :1269-1272); 越界判定用 long 对删除前的 Count (:1257)，但 format 实参写的是 charaNoList.ToString() ⇒ 上屏 System.Int64[]、编号丢失 (官方 bug，ADR-005 须复刻，:1259); 判重按对象 list.Contains (:1262-1265)，串带编号 (:1264)。文案骨架 zhs 表形 lang.emuera-zhs.xml:314 与 :315 (注册 Lang.cs:1438/:1442)。移植侧角色表是 SoA 列存，表示不出「已 Dispose 但仍在表内」的失败中间态 ⇒ 该半死态登记不修。DelAllCharacter 清空 (VariableEvaluator.cs:1275-1286)"
+    sort: "SORTCHARA: SetSortKey 取键值, AscCharacterComparison/DescCharacterComparison 排序, 键相同按原顺序稳定 (CharacterData.cs:772-790; VariableEvaluator.cs:1397-1470)"
+    copy_swap: "CopyChara/CopyTo 逐数组拷贝含用户定义角色变量 (CharacterData.cs:239-349); SwapChara (VariableEvaluator.cs:1378)"
+
+# 用户自定义变量 (#DIM 系列) —— 生命周期与作用域
+scoping:
+  parse: "UserDefinedVariableData.Create 解析 #DIM/#DIMS 关键字: CONST/REF/DYNAMIC/STATIC/GLOBAL/SAVEDATA/CHARADATA, 冲突即 CodeEE (UserDefinedVariableData.cs:44-264)"
+  dimension: "逗号分隔的尺寸参数; 缺省 [1]; 单维上限 1,000,000; 总元素数 ≤1,000,000; 维度 ≤3 (4D 报错), CHARADATA ≤2 维 (UserDefinedVariableData.cs:291-341, 437-449)"
+  initial_value: "= 后可跟常量初值表; 初值必须编译为 SingleTerm 常量; CONST 要求初值数 == 长度 (UserDefinedVariableData.cs:344-427)"
+  private_static: "#DIM (函数内, isPrivate=true) 默认 Static=true; STATIC/DYNAMIC 显式指定; 函数外不允许 STATIC/DYNAMIC 关键字 (UserDefinedVariableData.cs:119-170)"
+  static_token: "Static*VariableToken: IsStatic=true, 全进程单份, SetDefault 时清零并回填 defArray; ScopeIn/ScopeOut 为空操作 (VariableData.cs:1295-1386, 1466-1472)"
+  private_dynamic: "Private*VariableToken: ScopeIn 时旧数组压栈并新建(回填初值), ScopeOut 时弹栈恢复——实现函数调用的动态作用域嵌套 (VariableData.cs:1820-1901, 2131-2154)"
+  global: "#DIM GLOBAL: 注册入 userDefinedGlobalVarList, 随全局存档写 (VariableData.cs:3265-3272, 3971-3977); SAVEDATA 入 userDefinedSaveVarList 按 [维度*2-2(+整数+1)] 分桶 (VariableData.cs:3273-3288)"
+  savedata_str_limit: "非二进制存档 (SystemSaveInBinary=false) 时: 全局 SAVEDATA 字符串变量维度>1 或 CHARADATA 字符串变量 → 报错 (UserDefinedVariableData.cs:465-475)"
+  chara: "#DIM CHARADATA: CreateUserDefCharaVariable 建用户角色变量, 每个角色 CharacterData.UserDefCVarDataList[ArrayIndex] 独立数组; CHARADATA 与 GLOBAL/SAVEDATA/CONST/REF 互斥 (VariableData.cs:3220-3244; UserDefinedVariableData.cs:62-77, 251-260)"
+  ref: "#DIMREF (#DIM REF): 引用变量, 绑定目标数组; REF 不得与 CONST/GLOBAL/SAVEDATA/CHARADATA 同用; 不得有初值; 尺寸只能写 0 (UserDefinedVariableData.cs:89-117, 309-335, 357-364); ERH 中的 REF 直接 NotImplCodeEE (ErhLoader.cs:262-265); 空引用读取抛 EmptyRefVar (VariableData.cs:2325-2332)"
+  const: "#DIMCONST: 必须有初值, 不可多维 (UserDefinedVariableData.cs:294-298, 438-441); 赋值抛 AssignToConst"
+  local_scope_note: "函数内 #DIM 非 DYNAMIC(即 Static) 时行为等同全局静态单份 (CreatePrivateVariable 走 Static 分支并加入 userDefinedStaticVarList, VariableData.cs:3327-3343)"
+
+# 数组语义
+array_semantics:
+  index_type: "所有下标为 64 位整数 long; 2D/3D 访问处用 checked nint 转换 (VariableData.cs:117, 213)"
+  bounds_check: "CheckElement 逐维检查, 越界抛 CodeEE(OoRVarArg) (VariableData.cs:81-100, 173-183; CharaVariableToken.cs:56-70; UserDefinedVariableToken.cs:58-72); SP/范围指令另有 IsArrayRangeValid (含端点=size 合法, 用于区间赋值)"
+  chara_index_check: "角色变量第 1 参先对 CharacterList.Count 检查 (CharaVariableToken.cs:56-61)"
+  forbid: "尺寸为 0 的数组 IsForbid=true, 常量数组同理 (VariableData.cs:25, 112, 676); 存档加载时 IsForbid 名字直接丢弃 (VariableData.cs:4085-4092)"
+  varsize: "VARSIZE 经 GetLength(dimension) 实现: 1D 返回长度, 2D/3D 按维返回, 0 维与伪变量抛错 (VariableData.cs:62-74, 154-166, 202-210; VariableToken.cs:202-210)"
+  range_assign: "批量赋值 SetValue(values, args) 从指定下标起连续覆盖, 调用方须先过 IsArrayRangeValid (VariableData.cs:38-46 等)"
+  setvalueall: "1D 区间 [start,end); 2D/3D 全元素 (VariableData.cs:48-54, 135-146); 私有动态变量在无值时不初始化 (SetDefault 空实现, VariableData.cs:1836-1838)"
+  chara_sort_stability: "AscCharacterComparison: 键值比较结果非 0 时返回之, 否则按 temp_CurrentOrder (装载时的位置) 保证稳定 (CharacterData.cs:772-780)"
+
+# 默认数组尺寸总表 (VariableSize.CSV 可改; 改后名字表与变量长度联动同步, ConstantData.cs:553-670)
+default_sizes:
+  source: "ConstantData.cs:171-260"
+  scalar_int_arrays: "全部 1000; FLAG=10000; ITEMPRICE(index60)=MaxDataList[6](默认1000); RANDDATA(index64)=625"
+  scalar_str_arrays: "全部 100; STR=20000"
+  int_2d: "全部 (100,100)  # DITEMTYPE/DA-DE"
+  int_3d: "全部 (100,100,100)  # TA/TB"
+  chara_int_1d: "全部 100; TALENT=1000; CFLAG=1000; JUEL=200; GOTJUEL=200"
+  chara_str_1d: "CSTR=100"
+  chara_int_2d: "CDFLAG=(1,1)"
+  csv_maxdata: "ABL/EXP/MARK/BASE/EX=100, PALAM=200, TALENT/TRAIN/ITEM/EQUIP/TEQUIP/TFLAG=1000, FLAG=10000, STR/STRNAME=20000, 其余见 ConstantData.cs:173-201"
+
+# 存档归类摘要
+save_classes:
+  classic: "0..59 号 int 数组 + 0 号 str 数组(SAVESTR) 按定长写入 (VariableData.cs:3516-3534)"
+  extended: "SAVE_EXTENDED 标志的变量 + 用户 SAVEDATA 变量按名字-值对写 (VariableData.cs:3556-3626)"
+  global: "GLOBAL(63)/GLOBALS(5) + #DIM GLOBAL SAVEDATA (VariableData.cs:3804-3909, 3961-3978)"
+  binary: "SystemSaveInBinary 时按 IsSavedata&&!IsCharacterData 遍历 varTokenDic + 用户列表 (VariableData.cs:3961-3997); 加载时按名字查回且拒绝角色/常量/私有/局部/CALC 变量 (VariableData.cs:4081-4211)"
+  chara: "经典格式: dataString[0..1], dataInteger[0..1], dataIntegerArray[0..16] (CharacterData.cs:351-389)"
+
+# ─────────────────────────────────────────────────────────────
+# 保存标记勘误（2026-10-17，m2-vars 实现时发现，以源码为准）
+# variables.yaml 上方各条目的 saved 列与源码 IsSavedata 规则有 4 处不一致。
+# 实现已按源码（VariableCode.cs / VariableToken.cs:88-154）执行，下方标注差异：
+#   1) STR   : yaml saved=true  → 源码 false（低16位=1 不满足 <1 的保存门槛）
+#   2) TSTR  : yaml saved=false → 源码 true （带 SAVE_EXTENDED 标志）
+#   3) CDFLAG: yaml 未标        → 源码 true （0x19130000 含 SAVE_EXTENDED）
+#   4) SAVEDATA_TEXT: yaml true → 源码 false（EXTENDED 分支直接 return，疑只走文本扩展段 GetExtSaveList）
+# 待 M4 用二进制存档样本核对后回填本文件（尤其第 4 条）。
+# ─────────────────────────────────────────────────────────────

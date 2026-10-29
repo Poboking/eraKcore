@@ -1,0 +1,28 @@
+; ============================================================================
+; GOLDEN_00_ROOT.ERB - M11-E E2E expansion entry point
+; ----------------------------------------------------------------------------
+; 这一套 fixture 是**移植侧自产**的扩面装置（baseline/self-golden-root.txt，
+; 不是 PC 基准）：把 M11 这一轮只在合成单测里钉过的语义拉进 E2E 全链
+; （erbcc 符号表 -> 语句切片 -> ErbProgramCompiler -> ProcessRuntime 真执行）。
+;
+; 与 fixtures/golden 的关系：**完全独立**。不复用它的 ROOT、不碰它的
+; baseline/pc-golden-root.txt —— 那边 15 节 610 行是 PC 权威基准，任何新增
+; 语句都会把它撞红；扩面只能另起一套自产快照。
+;
+; 每节自带 "=== SECTION:xxx ===" 头；ROOT 头尾各打一条 START/END 标记
+; （GoldenNormalizer 按这两条截取）。
+; ============================================================================
+@GOLDEN_ROOT
+	PRINTL === GOLDEN RUN START ===
+	CALL M11E_CORE01
+	CALL M11E_CORE03
+	CALL M11E_CORE02
+	CALL M11E_CORE04
+	CALL M11E_SAVE14
+	CALL M11E_SAVE13
+	CALL M11E_GFX05
+	CALL M11E_SPRITE
+	CALL M11E_GDRAWG
+	CALL M11E_DTXML
+	CALL M11E_DELCHARA
+	PRINTL === END ===

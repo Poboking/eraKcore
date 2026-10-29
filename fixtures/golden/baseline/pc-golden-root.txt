@@ -1,0 +1,700 @@
+﻿# 环境信息
+Emuera.NET 1.824+v22+EMv18+EEv53 Lazyloadingv3.0 NAudio x64 NAudio
+
+# 变体
+eraThe World【画蛇添足版】 0.00
+
+# 日志
+
+如果出现了错误，请根据目录下的报错指导文件进行报错
+2154ファイルが遅延ローディングテーブルに記録されています
+警告Lv1:GOLDEN_12_SYMBOLS.ERB:第43行:函数"@G12_FUNC"已经被定义过(GOLDEN_12_SYMBOLS.ERB的39行)
+@G12_FUNC
+警告Lv1:GOLDEN_12_SYMBOLS.ERB:第52行:函数"@G12_PLAIN"已经被定义过(GOLDEN_12_SYMBOLS.ERB的48行)
+@G12_PLAIN
+警告Lv1:GOLDEN_12_SYMBOLS.ERB:第56行:函数"@G12_PLAIN"已经被定义过(GOLDEN_12_SYMBOLS.ERB的48行)
+@G12_PLAIN
+警告Lv1:GOLDEN_06_INPUT_AUTO.ERB:第30行:INPUTS命令:参数过多
+	INPUTS "ANS", 0, 1
+警告Lv1:GOLDEN_06_INPUT_AUTO.ERB:第54行:BINPUTS命令:参数过多
+	BINPUTS "BS", 0, 1
+警告Lv1:GOLDEN_06_INPUT_AUTO.ERB:第65行:ONEBINPUTS命令:参数过多
+	ONEBINPUTS "OBS", 0, 1
+ファイル読み込みが完了しました。経過時間：4.31秒
+<shape type='rect' param='0, 30, 24, 64' color='#7070C0'><shape type='rect' param='0, 30, 24, 64' color='#7070C0'><shape type='rect' param='0, 30, 24, 64' color='#7070C1'><shape type='rect' param='0, 30, 24, 64' color='#7070C1'><shape type='rect' param='0, 30, 24, 64' color='#7171C2'><shape type='rect' param='0, 30, 24, 64' color='#7171C3'><shape type='rect' param='0, 30, 24, 64' color='#7171C3'><shape type='rect' param='0, 30, 24, 64' color='#7272C4'><shape type='rect' param='0, 30, 24, 64' color='#7373C5'><shape type='rect' param='0, 30, 24, 64' color='#7373C5'><shape type='rect' param='0, 30, 24, 64' color='#7373C6'><shape type='rect' param='0, 30, 24, 64' color='#7373C6'><shape type='rect' param='0, 30, 24, 64' color='#7474C7'><shape type='rect' param='0, 30, 24, 64' color='#7474C8'><shape type='rect' param='0, 30, 24, 64' color='#7474C8'><shape type='rect' param='0, 30, 24, 64' color='#7575C9'><shape type='rect' param='0, 30, 24, 64' color='#7676CA'><shape type='rect' param='0, 30, 24, 64' color='#7676CA'><shape type='rect' param='0, 30, 24, 64' color='#7676CB'><shape type='rect' param='0, 30, 24, 64' color='#7676CB'><shape type='rect' param='0, 30, 24, 64' color='#7777CC'><shape type='rect' param='0, 30, 24, 64' color='#7777CD'><shape type='rect' param='0, 30, 24, 64' color='#7777CD'><shape type='rect' param='0, 30, 24, 64' color='#7878CE'><shape type='rect' param='0, 30, 24, 64' color='#7878CF'><shape type='rect' param='0, 30, 24, 64' color='#7878CF'><shape type='rect' param='0, 30, 24, 64' color='#7979D0'><shape type='rect' param='0, 30, 24, 64' color='#7A7AD1'><shape type='rect' param='0, 30, 24, 64' color='#7A7AD1'><shape type='rect' param='0, 30, 24, 64' color='#7A7AD2'><shape type='rect' param='0, 30, 24, 64' color='#7A7AD2'><shape type='rect' param='0, 30, 24, 64' color='#7B7BD3'><shape type='rect' param='0, 30, 24, 64' color='#7B7BD4'><shape type='rect' param='0, 30, 24, 64' color='#7B7BD4'><shape type='rect' param='0, 30, 24, 64' color='#7C7CD5'><shape type='rect' param='0, 30, 24, 64' color='#7D7DD6'><shape type='rect' param='0, 30, 24, 64' color='#7D7DD6'><shape type='rect' param='0, 30, 24, 64' color='#7D7DD7'><shape type='rect' param='0, 30, 24, 64' color='#7D7DD7'><shape type='rect' param='0, 30, 24, 64' color='#7E7ED8'><shape type='rect' param='0, 30, 24, 64' color='#7E7ED9'><shape type='rect' param='0, 30, 24, 64' color='#7E7ED9'><shape type='rect' param='0, 30, 24, 64' color='#7F7FDA'><shape type='rect' param='0, 30, 24, 64' color='#7F7FDB'><shape type='rect' param='0, 30, 24, 64' color='#7F7FDB'><shape type='rect' param='0, 30, 24, 64' color='#8080DC'><shape type='rect' param='0, 30, 24, 64' color='#8080DC'><shape type='rect' param='0, 30, 24, 64' color='#8181DD'><shape type='rect' param='0, 30, 24, 64' color='#8181DE'><shape type='rect' param='0, 30, 24, 64' color='#8181DE'><shape type='rect' param='0, 30, 24, 64' color='#8282DF'><shape type='rect' param='0, 30, 24, 64' color='#8282E0'><shape type='rect' param='0, 30, 24, 64' color='#8282E0'><shape type='rect' param='0, 30, 24, 64' color='#8383E1'><shape type='rect' param='0, 30, 24, 64' color='#8484E2'><shape type='rect' param='0, 30, 24, 64' color='#8484E2'><shape type='rect' param='0, 30, 24, 64' color='#8484E3'><shape type='rect' param='0, 30, 24, 64' color='#8484E3'><shape type='rect' param='0, 30, 24, 64' color='#8585E4'><shape type='rect' param='0, 30, 24, 64' color='#8585E5'><shape type='rect' param='0, 30, 24, 64' color='#8585E5'><shape type='rect' param='0, 30, 24, 64' color='#8686E6'><shape type='rect' param='0, 30, 24, 64' color='#8686E7'><shape type='rect' param='0, 30, 24, 64' color='#8686E7'><shape type='rect' param='0, 30, 24, 64' color='#8787E8'><shape type='rect' param='0, 30, 24, 64' color='#8787E8'><shape type='rect' param='0, 30, 24, 64' color='#8888E9'><shape type='rect' param='0, 30, 24, 64' color='#8888EA'><shape type='rect' param='0, 30, 24, 64' color='#8888EA'><shape type='rect' param='0, 30, 24, 64' color='#8989EB'><shape type='rect' param='0, 30, 24, 64' color='#8989EC'><shape type='rect' param='0, 30, 24, 64' color='#8989EC'><shape type='rect' param='0, 30, 24, 64' color='#8A8AED'><shape type='rect' param='0, 30, 24, 64' color='#8A8AED'><shape type='rect' param='0, 30, 24, 64' color='#8B8BEE'><shape type='rect' param='0, 30, 24, 64' color='#8B8BEF'><shape type='rect' param='0, 30, 24, 64' color='#8B8BEF'><shape type='rect' param='0, 30, 24, 64' color='#8C8CF0'><shape type='rect' param='0, 30, 24, 64' color='#8C8CF1'><shape type='rect' param='0, 30, 24, 64' color='#8C8CF1'><shape type='rect' param='0, 30, 24, 64' color='#8D8DF2'><shape type='rect' param='0, 30, 24, 64' color='#8D8DF3'><shape type='rect' param='0, 30, 24, 64' color='#8D8DF3'><shape type='rect' param='0, 30, 24, 64' color='#8E8EF4'><shape type='rect' param='0, 30, 24, 64' color='#8E8EF4'><shape type='rect' param='0, 30, 24, 64' color='#8F8FF5'><shape type='rect' param='0, 30, 24, 64' color='#8F8FF6'><shape type='rect' param='0, 30, 24, 64' color='#8F8FF6'><shape type='rect' param='0, 30, 24, 64' color='#9090F7'><shape type='rect' param='0, 30, 24, 64' color='#9090F8'><shape type='rect' param='0, 30, 24, 64' color='#9090F8'><shape type='rect' param='0, 30, 24, 64' color='#9191F9'><shape type='rect' param='0, 30, 24, 64' color='#9191F9'><shape type='rect' param='0, 30, 24, 64' color='#9292FA'><shape type='rect' param='0, 30, 24, 64' color='#9292FB'><shape type='rect' param='0, 30, 24, 64' color='#9292FB'><shape type='rect' param='0, 30, 24, 64' color='#9393FC'><shape type='rect' param='0, 30, 24, 64' color='#9393FD'><shape type='rect' param='0, 30, 24, 64' color='#9393FD'><shape type='rect' param='0, 30, 24, 64' color='#9494FE'>[100％]     少女祈祷中…
+字典加载完毕 用时4315毫秒
+<img src='TW_title000'>
+<img src='TW_title001'>
+<img src='TW_title002'>
+<img src='TW_title003'>
+<img src='TW_title004'>
+<img src='TW_title005'>
+<img src='TW_title006'>
+<img src='TW_title007'>
+<img src='TW_title008'>
+<img src='TW_title009'>
+<img src='TW_title010'>
+<img src='TW_title011'>
+<img src='TW_title012'>
+<img src='TW_title013'>
+<img src='TW_title014'>
+<img src='TW_title015'>
+<img src='TW_title016'>
+<img src='TW_title017'>
+<img src='TW_title018'>
+<img src='TW_title019'>
+<img src='TW_title020'>
+<img src='TW_title021'>
+<img src='TW_title022'>
+<img src='TW_title023'>
+<img src='TW_title024'>
+<img src='TW_title025'>
+<img src='TW_title026'>
+<img src='TW_title027'>
+<img src='TW_title028'>
+<img src='TW_title029'>
+<img src='TW_title030'>
+<img src='TW_title031'>
+<img src='TW_title032'>
+<img src='TW_title033'>
+<img src='TW_title034'>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+eraThe World【画蛇添足版】
+4.980 - 日语交流用画蛇添足版CH20260326
+(2013～2026)
+ 
+汉化版仅为学习日语的交流之用，禁止对该版本的一切盗用、商用行为
+※游玩中遇到的问题可以去问一下单独指导里的哆来咪（游玩时注意温馨提示哦）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<shape type='space' param='841px'>[0] 开始游戏
+<shape type='space' param='841px'>[1] 继续游戏    [2] DEMO
+【欢落五子棋】<div xpos='1600px' ypos='-937px' width='180px' color='#363636' height='50px' padding='10px' border='2px' radius='4px' bcolor='#A5A5A5'>【欢落五子棋】
+</div>
+0
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+检测到已存在的存档，确定要开始新游戏吗？
+[0] 那当然
+[1] 再想想
+0
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+=== GOLDEN RUN START ===
+=== SECTION:ROOT-INFO ===
+EMUERA_VERSION=1.824.0.0
+MONEYLABEL=￥
+GAMEBASE_TITLE=eraThe World【画蛇添足版】
+GAMEBASE_VERSION=0
+GAMEBASE_GAMECODE=7153
+SAVENOS_FUNC=20
+__INT_MAX__=9223372036854775807
+__INT_MIN__=-9223372036854775808
+=== SECTION:BASIC-SCALAR ===
+A=10 SB=hello
+A=20 SB=world
+A=25
+=== SECTION:BASIC-FORM-ASSIGN ===
+FSA=[raw25andworld!]
+FSB=[expr{literal}%notexpanded%]
+=== SECTION:BASIC-SETARRAY ===
+ARR=1,2,3,4,5
+ARR0=100 ARR1=2
+=== SECTION:BASIC-BIT ===
+A=27
+A=25
+A=13 GETBIT2=1 GETBIT4=0
+=== SECTION:BASIC-VARSET ===
+ARR=7,7,7
+ARR=7,9,9,7
+=== SECTION:BASIC-ARRAYOPS ===
+SORTASC=1,3,5,7,9
+SORTDESC=9,7,5,3,1
+SHIFT=1,1,9,7
+REMOVE=1,9,7
+=== SECTION:BASIC-SWAP-VARSIZE ===
+SWAP=7,1
+VARSIZE_STMT=10
+VARSIZE_FUNC=10 VARSIZE_FLAG=10000 VARSIZE_CFLAG=10000
+=== SECTION:BASIC-POWER-TIMES ===
+POWER_STMT=1024
+POWER_FUNC=81 SQRT=4 CBRT=3
+LOG=4 LOG10=3 EXPONENT=20
+TIMES=32
+=== SECTION:BASIC-METHOD ===
+METHOD_MIN=1
+METHOD_MAX=3
+FUNC_MATH: ABS=42 SIGN=-1,0,1 LIMIT=10 INRANGE=1,0
+GROUPMATCH=1 NOSAMES=1,0 ALLSAMES=1,0
+=== SECTION:BASIC-ARRAYQUERY ===
+MATCH=3 SUMARRAY=11 MAXARRAY=4 MINARRAY=1
+FINDELEMENT=3 FINDLASTELEMENT=4 INRANGEARRAY=4
+=== SECTION:BASIC-STRINGLEN ===
+STRLEN=6
+STRLENFORM=4
+STRLENU=6
+STRLENFORMU=4
+FUNC: STRLENS=4 STRLENSU=4
+WIDTH_FULL=6 WIDTH_HALF=3
+=== SECTION:BASIC-STRINGOPS ===
+SUBSTRING=cde SUBSTRINGU=cde
+SUBSTR_NOLEN=def
+STRFIND=2 STRFINDU=2 MISS=-1
+STRCOUNT=3
+TOSTR=42 TOSTR_D5=00042 TOSTR_X8=000000FF
+TOINT=123/0
+TOUPPER=ABC TOLOWER=abc
+TOFULL=ＡＢ１２ TOHALF=AB12
+CHARATU=c OOR=
+UNICODE=A UNICODEBYTE=65
+CONVERT=ff/1010/100
+ISNUMERIC=1/0
+REPLACE=a+b+c REPLACE1=aXbYc REPLACE2=a+b+c
+STRFORM=V=3
+ESCAPE=a\.b
+REGEXPMATCH=1/0
+=== SECTION:BASIC-ENCODETOUNI ===
+UNI_STMT=3,65,66
+UNI_FUNC=66 NEG=-1
+=== SECTION:BASIC-SPLIT-JOIN ===
+SPLIT_N=3 S1=a S2=b S3=c
+STRJOIN=a|b|c
+=== SECTION:BASIC-BARSTR-MONEYSTR ===
+BARSTR=[*****.....]
+MONEYSTR=￥1234
+=== SECTION:BASIC-DIMS-SCOPE ===
+LINES-APPENDED=0
+=== SECTION:PRINT-NULL-L ===
+ABC
+DEF
+=== SECTION:PRINT-V-S ===
+3
+12
+STR
+ABC
+=== SECTION:PRINT-FORM ===
+A=2B
+C=4
+XY6
+Z8
+=== SECTION:PRINT-K-D ===
+5
+6
+7
+8
+KS
+KSL
+K9
+KL10
+SK11
+SKL12
+DBG
+DBG2
+13
+14
+SD
+SDL
+D15
+DL16
+SDD17
+SDDL18
+=== SECTION:PRINT-SINGLE ===
+ONE
+19
+S3
+F21
+FS23
+K25
+VK27
+SK29
+FK31
+FSK33
+D35
+VD37
+SD39
+FD41
+FSD43
+=== SECTION:PRINT-C ===
+                       AABB                                              C1D2                                              EEFF                                              G3H4                      
+                        IIJJ                                              K5L6                       
+=== SECTION:PRINT-N ===
+NN45NSFN46FSN47 
+AFTER-PRINTN
+=== SECTION:PRINT-W ===
+WW
+48
+SW
+FW49
+FSW50
+KW51
+KW52
+KW53
+KW54
+KW55
+DW56
+DW57
+DW58
+DW59
+DW60
+KW61
+=== SECTION:PRINT-DATA ===
+DAT1DL1
+DK1DD1DF2G1L1
+G1L2=== SECTION:STRDATA ===
+SDV=SDA
+=== SECTION:LINE-CTRL ===
+LINE-A
+LINE-B
+AFTER-CLEAR LINE-DELTA=2
+LINE-D
+AFTER-REUSE LINE-DELTA=5
+=== SECTION:BAR ===
+[**********..........]
+[**........]
+BARSTR_FUNC=[******..]
+=== SECTION:DRAWLINE ===
+=======================================================================================================================================================================================================
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-
+=== SECTION:BUTTON-PLAIN ===
+BTN
+[X]
+                       BC
+BLC                      
+PLAIN
+PF7
+=== SECTION:COLOR ===
+RED=16711680
+RGB=33023
+BYNAME=16711680 DEF=12632256 FOCUS=16776960
+RESET=12632256
+BG=65280
+BGBYNAME=255 DEFBG=0
+BGRESET=0
+COLOR_FROMNAME=16711680
+COLOR_FROMRGB=16711680
+=== SECTION:FONT-STYLE ===
+STYLE=1
+STYLE=3
+STYLE=4
+STYLE=8
+STYLE=0
+FONT=黑体
+FONT_DEFAULT=黑体
+CHKFONT=1
+=== SECTION:ALIGNMENT ===
+ALIGN0=LEFT
+ALIGN1=CENTER
+ALIGN2=RIGHT
+ALIGN3=LEFT
+REDRAW=0
+REDRAW=1
+=== SECTION:CONFIG-QUERY ===
+PRINTCPERLINE=0 PCL=5 FUNC=5
+PRINTCLENGTH=25
+SAVENOS_STMT=0 SN0=20 FUNC=20
+=== SECTION:HTML ===
+HTMLPLAIN
+ 
+TAGSPLIT_N=4 R0=<i> R1=AB R2=</i>
+HTML_STRINGLEN=4 PLAIN=36
+HTML_TOPLAINTEXT=ABCD
+HTML_ESCAPE=&lt;a&gt;
+HTML_STRINGLINES=2
+HTML_GETPRINTEDSTR=[<p align='left'><nobr>HTML_STRINGLINES=2</nobr></p>]
+HTML_POPPRINTINGSTR=[]
+HTML_SUBSTRING=[<i>AB</i>C] R=<i>AB</i>C
+=== SECTION:LINE-QUERY ===
+EMPTY=1
+GETDISPLAYLINE=如果出现了错误，请根据目录下的报错指导文件进行报错
+ISSKIP=0 MESSKIP=0
+=== SECTION:DEBUGPRINT ===
+DEBUG-DONE
+=== SECTION:IF-CHAIN ===
+IF-BRANCH
+ELSEIF-BRANCH2
+ELSE-BRANCH2
+SIF-TRUE
+AFTER-SIF
+=== SECTION:SELECTCASE-INT ===
+CASE-2TO3
+CASE-ELSE2
+=== SECTION:SELECTCASE-STR ===
+SCASE-BB
+=== SECTION:FOR-NEXT ===
+F0
+F1
+F2
+AFTER-FOR COUNT=3
+FS0
+FS2
+FS4
+FD3
+FD2
+FD1
+AFTER-ZERO-FOR COUNT=3
+=== SECTION:REPEAT ===
+R0
+R1
+R2
+RC0
+RC2
+RB0
+RB1
+AFTER-REPEAT COUNT=3
+=== SECTION:WHILE ===
+W0
+W1
+W2
+AFTER-WHILE COUNT=3
+=== SECTION:DO-LOOP ===
+D0
+D1
+D2
+DO-ONCE
+AFTER-DO COUNT=3
+=== SECTION:WHILE-BREAK-CONT ===
+WB1
+WB3
+AFTER-WHILE-BREAK COUNT=4
+=== SECTION:GOTO ===
+AT-LAB1
+AT-LAB2
+AFTER-TRYGOTO
+AFTER-TRYGOTOFORM
+NEVER-AFTER-TRYCGOTO
+AFTER-TRYCGOTO
+TRYCGOTOFORM-OK
+AFTER-TRYCGOTOFORM
+=== SECTION:TRYGOTOLIST ===
+AT-LAB5
+AFTER-TRYGOTOLIST
+=== SECTION:CALL-RETURN ===
+SUB-ARGS 1 2
+AFTER-CALL R0=10 R1=20 R2=30
+S2-ARG 3
+AFTER-CALLFORM R=77
+AFTER-TRYCALL
+AFTER-TRYCALLFORM
+TRYC-CATCH-CALL
+AFTER-TRYCCALL
+CAUGHT-TRYCJUMPFORM
+AFTER-TRYCJUMPFORM
+CAUGHT-MISSING-CALL
+CAUGHT-MISSING-CALL
+CAUGHT-MISSING-CALL
+RESTART-DONE COUNT=3
+=== SECTION:JUMP2 ===
+=== SECTION:JUMP ===
+AT-JUMPTARGET
+AT-JUMPTARGET2
+AT-LISTEND
+=== SECTION:TRYCALLLIST ===
+LISTCALLED 5
+AFTER-TRYCALLLIST R=6
+=== SECTION:CALLF ===
+CALLF-RESULT 9
+CALLFORMF-RESULT 9
+AFTER-TRYCALLF
+AFTER-TRYCALLFORMF
+=== SECTION:CALLEVENT ===
+SKIP-CALLEVENT-EVENT-FUNC
+=== SECTION:LOGIC-OPS ===
+AND=1 0 OR=1 0 NOT=1
+DOUBLENEG=0 XOR=1
+CMP=1 1 0 1 1 0
+STRCMP=1 1
+=== SECTION:RETURNFORM ===
+RF=11,3
+=== SECTION:CHARA-ADD ===
+VOIDNO=0
+CHARANUM=4
+GETCHARA0=0 GETCHARA1=3 GETCHARA999=-1
+EXISTCSV0=1 EXISTCSV999=0
+=== SECTION:CHARA-CSV ===
+CSVNAME=你
+CSVCALLNAME=你
+CSVNICKNAME=
+CSVMASTERNAME=
+CSVBASE=2000 CSVABL=0 CSVMARK=0 CSVEXP=0
+CSVRELATION=0 CSVTALENT=0 CSVCFLAG=0 CSVEQUIP=0 CSVJUEL=0
+CSVCSTR=
+=== SECTION:CHARA-DATA ===
+NAME0=你 CALLNAME0=你 NO0=0
+BASE0_0=2000 MAXBASE0_0=2000
+ABL=5,3 CFLAG=42,42,9
+FINDCHARA=0 FINDLASTCHARA=1 MISS=-1 FROM1=1
+CMATCH=2 SUMCARRAY=194 MAXCARRAY=101 MINCARRAY=9
+INRANGECARRAY=2
+=== SECTION:CHARA-PRINTDATA ===
+Ｃ感覚LV5 技巧LV2 
+[性別]
+ 
+ 
+   快Ｃ[..........]     0   快Ｖ[..........]     0   快Ａ[..........]     0   快Ｂ[..........]     0   快Ｍ[..........]     0
+   潤滑[..........]     0   恭順[..........]     0   欲情[..........]     0   屈服[..........]     0   習得[..........]     0
+   恥情[..........]     0   苦痛[..........]     0   恐怖[..........]     0   好意[..........]     0   優越[..........]     0
+   反感[..........]     0   不快[..........]     0   抑鬱[..........]     0   眠姦[..........]     0
+=== SECTION:CHARA-SORT-SWAP ===
+SORTASC=30,10,20
+SORTDESC=30,101,20
+SWAPPED=20,30
+COPIED=101,101
+ADDCOPY NUM=5
+PICKUP NUM=2
+=== SECTION:CHARA-STAIN ===
+STAIN0=0
+=== SECTION:CHARA-SHOP ===
+所持アイテム：なし
+=== SECTION:CHARA-DELETE ===
+AFTER-DEL NUM=1
+AFTER-DELALL NUM=1
+=== SECTION:DATA-BASIC ===
+D-ONED-L1
+D-FORM20LIST-A1
+LIST-A2
+LIST-A3DK1DKL2
+DD1DDL1
+=== SECTION:STRDATA-BASIC ===
+SDV=[SD-B]
+=== SECTION:RNG-SEEDED ===
+RAND1=335
+RAND2=162
+RANDSEQ=2,4,2,3,1
+PD-G1=== SECTION:RNG-DUMPRESTORE ===
+DUMPED=609256
+AFTERDUMP=672230
+=== SECTION:RNG-INITRAND ===
+INITSEQ=30,80
+=== SECTION:RNG-STRDATA-SEEDED ===
+SDR=[SR3]
+=== SECTION:INPUT-AUTO ===
+INPUT=42
+INPUTS="ANS"
+=== SECTION:TINPUT-AUTO ===
+TINPUT=111
+TINPUTS=TDEF
+TONEINPUT=9
+TONEINPUTS=TS
+=== SECTION:BINPUT-AUTO ===
+BINPUT=55
+BINPUTS="BS"
+ONEBINPUT=66
+ONEBINPUTS="OBS"
+=== SECTION:INPUT-STATE ===
+END-INPUT-AUTO
+=== SECTION:IO-TEXTFILE ===
+SAVETEXT=1
+LOADTEXT=[GOLDEN-IO-TEST]
+EXISTFILE=1 MISS=0
+=== SECTION:IO-SAVEDATA ===
+SAVEDATA_TEXT=[GOLDEN-DESC-2]
+CHKDATA=0 DESC=GOLDEN TEST SAVE
+=== SECTION:IO-GLOBAL ===
+SAVEGLOBAL_EXIST=1
+LOADGLOBAL=1 G=777 GS=GSTR
+RESETGLOBAL G=0 GS=
+=== SECTION:IO-CHARAFILE ===
+FIND_CHARADATA=1 F0=GOLDEN_CHARA.dat
+CHKCHARADATA=0
+BEFORE-LOAD NUM=0
+AFTER-LOAD NUM=1 CSTR=CDATA
+=== SECTION:IO-ENUMFILES ===
+ENUM_DAT=1
+ENUM_ERB=13
+=== SECTION:IO-CLEANUP ===
+END-IO
+=== SECTION:SKIPDISP ===
+SKIPDISP_RESULT=0
+VISIBLE-AGAIN
+=== SECTION:NOSKIP ===
+NOSKIP-VISIBLE
+AFTER-NOSKIP
+=== SECTION:FORCEKANA ===
+KANA0
+KANA1
+=== SECTION:AWAIT ===
+AFTER-AWAIT
+=== SECTION:GETTIME ===
+GETTIME_RESULTS_LEN=19 NUMERIC=0
+=== SECTION:ASSERT ===
+AFTER-ASSERT
+=== SECTION:SOUND-MISSING ===
+EXISTSOUND=0
+ISPLAYINGBGM=0 ISPLAYINGSOUND=-1
+SOUND-DONE
+=== SECTION:TOOLTIP ===
+TOOLTIP-DONE
+=== SECTION:HOTKEY-MEMORY ===
+HOTKEY_STATE_INIT=0
+HOTKEY_STATE=0
+MEMORY-DONE
+=== SECTION:RESETDATA ===
+AFTER-RESETDATA FLAG=0
+=== SECTION:WINDOW-TITLE ===
+WT=GOLDEN-TITLE
+END-MISC
+※※※已创建Log文件GOLDEN_LOG.txt※※※
+=== SECTION:VAR-UTILS ===
+GETVAR=123 GETVARS=[eraThe World【画蛇添足版】]
+SETVAR=1 NOW=456
+VARSETEX=9,9,9
+EXISTVAR=1,6,0
+ISDEFINED=0
+GETPALAMLV=2 GETEXPLV=4
+=== SECTION:ENUMVAR ===
+ENUMVARBEGINSWITH=2
+ENUMVARENDSWITH=83
+ENUMVARWITH=2
+ENUMMACROBEGINSWITH=0
+=== SECTION:ARRAYMSORT ===
+MSORT_KA=1,1,2,3,3
+MSORT_KB=10,11,20,30,33
+=== SECTION:MAP ===
+MAP_CREATE=1 AGAIN=0 EXIST=1
+MAP_SET=1 SET2=1
+MAP_HAS=1/0
+MAP_GET=V1/
+MAP_SIZE=2
+MAP_KEYS=K1,K2
+MAP_TOXML=<map><p><k>K1</k><v>V1</v></p><p><k>K2</k><v>V2</v></p></map>
+MAP_FROMXML=1
+GM2=V1/V2 SIZE=2
+MAP_REMOVE=1 SIZE=1
+MAP_CLEAR=1 SIZE=0
+MAP_RELEASE=1/1
+=== SECTION:XML ===
+XML_DOCUMENT=1
+XML_EXIST=1
+XML_GET=2 X0=1 X1=2
+XML_GET_TEXT=1 T=A1
+XML_SET=1
+XML_GET_AFTER=1 T=B1
+XML_ADDNODE=1
+XML_ADDATTRIBUTE=1
+XML_TOSTR=<root><a id="1">B1</a><a id="2">A2</a><c attr="V">CC</c></root>
+XML_REMOVENODE=1
+XML_REMOVEATTRIBUTE=1
+XML_REPLACE=1
+XML_TOSTR2=<root><a>B1</a><b id="9">B9</b></root>
+=== SECTION:XML-SRC ===
+XML_SRC_GET=1 V=10
+=== SECTION:XML-BYNAME ===
+XML_DOCUMENT=1
+XML_GET_BYNAME=1 X=1
+XML_SET_BYNAME=1
+XML_ADDNODE_BYNAME=1
+XML_ADDATTRIBUTE_BYNAME=1
+XML_REMOVENODE_BYNAME=1
+XML_REMOVEATTRIBUTE_BYNAME=1
+XML_REPLACE_BYNAME=1
+XML_TOSTR3=<r><z>7</z></r>
+XML_RELEASE2=1
+XML_RELEASE=1
+=== SECTION:DT ===
+DT_CREATE=1 AGAIN=0
+DT_COLUMN_ADD=1 ADD2=1
+DT_COLNAMES=3
+DT_COLUMN_EXIST=5/0
+DT_COLUMN_OPTIONS=1
+DT_ROW_ADD1_LEN=1
+DT_ROW_ADD2_LEN=2
+DT_ROW_LENGTH=2 DT_COLUMN_LENGTH=3
+DT_CELL_GETS0=R1 V0=10
+DT_CELL_GETS1=R2 V1=20
+DT_CELL_SET=1
+DT_CELL_GET_AFTER=99
+DT_CELL_ISNULL=0
+DT_SELECT=2
+DT_SELECT_HITS=2
+DT_ROW_SET=-2
+DT_ROW_SET_AFTER=R1/99
+DT_ROW_REMOVE=0
+DT_ROW_REMOVE_AFTER=2
+DT_COLUMN_REMOVE=1
+DT_COLNAMES2=2
+DT_TOXML_SCHEMA_LEN=954 DATA_LEN=179
+DT_FROMXML=1 ROWS=2 COLS=2
+DT_NOCASE=1
+DT_CLEAR=1 ROWS=0
+DT_RELEASE=1 EXIST=0
+=== SECTION:ERD-GETNUM ===
+GETNUM=-1
+GETNUMB=-1
+ERDNAME=[]
+=== SECTION:FUNC-ENUM ===
+EXISTFUNCTION=2/3/1/0
+EXISTMETH=1/2/0
+GETMETH=42 GETMETH_DEF=-7
+GETMETHS=zS GETMETHS_DEF=DEF
+GETDOINGFUNCTION=GOLDEN_XMLMAP
+ENUMFUNCBEGINSWITH=0
+ENUMFUNCENDSWITH=0
+ENUMFUNCWITH=0
+ENUMMACROENDSWITH=0
+ENUMMACROWITH=0
+END-XMLMAP
+=== SECTION:G-BUFFER ===
+GCREATE=1
+GCREATED=1 MISS=0
+GWIDTH=100 GHEIGHT=60
+GCLEAR=1
+GSETBRUSH=1
+GFILLRECT=1
+GSETCOLOR=0
+GGETCOLOR=0/0
+GGETBRUSH=65280
+GSETPEN=1 GGETPEN=6636321 W=3
+GDRAWLINE=1
+GSETFONT=1
+GGETFONT=黑体 SIZE=16 STYLE=1
+GDRAWTEXT=1
+GSAVE=1 GLOAD=1
+GLOAD_DISPOSE=1
+GDISPOSE14=0
+GDRAWG=1
+GDRAWGWITHROTATE=1
+GCREATE_MASK=1
+GDRAWGWITHMASK_MISMATCH=0
+GCREATE_SRC=1
+GDRAWGWITHMASK=1
+GDASHSTYLE=1
+GDISPOSE=1
+=== SECTION:SPRITE ===
+GCREATE2=1
+SPRITECREATE=1
+SPRITECREATED=1 MISS=0
+GDRAWSPRITE=1
+CBGSETSPRITE=1
+CBGSETBUTTONSPRITE=1
+SPRITEWIDTH=40 HEIGHT=20
+SPRITEPOS=0,0
+SPRITEMOVE=1 POS=5,7
+SPRITESETPOS=1 POS=1,2
+SPRITEGETCOLOR=0
+SPRITEDISPOSE=1
+SPRITEDISPOSEALL=35
+=== SECTION:SPRITE-ANIME ===
+GCREATE3=1
+ANIMECREATE=1
+ANIMEADDFRAME=1
+SETANIMETIMER=1
+=== SECTION:CBG ===
+GCREATE4=1
+CBGSETG=1
+CBGREMOVERANGE=1
+CBGSETBMAPG=1
+CBGCLEARBUTTON=1
+CBGREMOVEBMAP=1
+CBGCLEAR=1
+GDISPOSE13=1
+=== SECTION:WINDOW ===
+CLIENTWIDTH=1800
+CLIENTHEIGHT=955
+BITMAPCACHE=0
+END-GVIEW
+=== SECTION:DUP-METHOD ===
+DUP-METHOD=2
+=== SECTION:DUP-PLAIN ===
+DUP-PLAIN=3
+=== SECTION:EVENT-BUCKET ===
+EVENT-DEFS=3 EXPECT-ORDER=PRI,NORMAL,LATER
+EVENT-BUCKET-REMARK=collect one turn end to see markers
+=== END ===

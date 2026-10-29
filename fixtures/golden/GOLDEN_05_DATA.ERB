@@ -1,0 +1,85 @@
+; ============================================================================
+; GOLDEN_05_DATA.ERB - deterministic data sections + SEEDED RANDOM section
+; isa.yaml: DATA DATAFORM DATALIST ENDLIST ENDDATA STRDATA RANDOMIZE INITRAND
+;   DUMPRAND
+; ----------------------------------------------------------------------------
+; WARNING: the RNG section (@GOLDEN_RNG) uses RANDOMIZE with FIXED SEEDS. Its
+;   output is only reproducible on engines that implement the identical RNG
+;   algorithm/sequence (see specs/rng.md). Compare this section only against
+;   engines claiming RNG parity; exclude it from generic L2 diffs otherwise.
+; NOTE: @GOLDEN_RNG is a separate function because GOLDEN_00_ROOT calls it
+;   right after @GOLDEN_DATA (see ROOT call order).
+; ============================================================================
+@GOLDEN_DATA
+	#DIMS SDV
+	PRINTL === SECTION:DATA-BASIC ===
+	PRINTDATA
+		DATA D-ONE
+	ENDDATA
+	PRINTDATAL
+		DATA D-L1
+		DATA D-L2
+		DATA D-L3
+	ENDDATA
+	PRINTDATA
+		DATAFORM D-FORM{10*2}
+	ENDDATA
+	PRINTDATA
+		DATALIST
+			DATA LIST-A1
+			DATA LIST-A2
+			DATA LIST-A3
+		ENDLIST
+	ENDDATA
+	PRINTDATAK
+		DATA DK1
+	ENDDATA
+	PRINTDATAKL
+		DATA DKL1
+		DATA DKL2
+	ENDDATA
+	PRINTDATAD
+		DATA DD1
+	ENDDATA
+	PRINTDATADL
+		DATA DDL1
+		DATA DDL2
+	ENDDATA
+	PRINTL === SECTION:STRDATA-BASIC ===
+	STRDATA SDV
+		DATA SD-A
+		DATA SD-B
+	ENDDATA
+	PRINTFORML SDV=[%SDV%]
+@GOLDEN_RNG
+	#DIM RI
+	#DIMS SDR
+	PRINTL === SECTION:RNG-SEEDED ===
+	; fixed seed: golden valid only for engines with identical RNG
+	RANDOMIZE 20261017
+	PRINTFORML RAND1={RAND(1000)}
+	PRINTFORML RAND2={RAND(100, 200)}
+	PRINTFORML RANDSEQ={RAND(10)},{RAND(10)},{RAND(10)},{RAND(10)},{RAND(10)}
+	PRINTDATA
+		DATA PD-G1
+		DATA PD-G2
+		DATA PD-G3
+	ENDDATA
+	PRINTL === SECTION:RNG-DUMPRESTORE ===
+	RANDOMIZE 777
+	RI = RAND(1000000)
+	DUMPRAND
+	PRINTFORML DUMPED={RI}
+	RI = RAND(1000000)
+	PRINTFORML AFTERDUMP={RI}
+	PRINTL === SECTION:RNG-INITRAND ===
+	INITRAND
+	PRINTFORML INITSEQ={RAND(100)},{RAND(100)}
+	PRINTL === SECTION:RNG-STRDATA-SEEDED ===
+	RANDOMIZE 424242
+	STRDATA SDR
+		DATA SR1
+		DATA SR2
+		DATA SR3
+	ENDDATA
+	PRINTFORML SDR=[%SDR%]

@@ -1,0 +1,441 @@
+# 原版 Lang.Error 文案表 —— 词法 / ArgumentBuilder / 块结构三族
+#
+# 权威来源（只读参考仓）：
+#   - 日文原文：MinorShift.Emuera.Runtime.Utils.EvilMask/Lang.cs
+#   - 中文译文：MinorShift.Emuera.Properties.lang.emuera-zhs.xml
+#   - 调用点：MinorShift.Emuera.GameProc.Function/ArgumentBuilder.cs、ArgumentParser.cs、
+#             MinorShift.Emuera.Runtime.Script.Loader/ErbLoader.cs
+#
+# 代码侧镜像：core/lexer/LangText.kt 的 enum LangKey。本文件与它由
+# core-vm 的 ErrorTextRenderTest 双向对账（id 集合、ja/zhs 模板、占位符个数、两侧行号），
+# 任何一侧漂了都会红。
+#
+# 语言口径（编译层缺陷收口波 L11 裁定）：
+#   - 内核/契约层报错取 ja：Lang.cs 日文原文，{0} 照常展开（LexError / LexWarning 走这档）；
+#   - 使用者面诊断取 zhs：lang.emuera-zhs.xml 译文（BlockChecker、ArgBuilders 的 warn/fail）；
+#   - 照抄纪律：只做按序号原位替换，不 trim、不改引号形态、不修误译（ADR-005）。
+#
+# 字段：
+#   id        Lang.Error 的键名（去掉 Error. 前缀）
+#   lang_cs   Lang.cs 行号（日文原文）
+#   zhs_xml   lang.emuera-zhs.xml 行号（中文译文）
+#   args      占位符个数 = string.Format 实参个数
+#   status    wired = 本轮已接线；registered = 键已登记、调用点仍用旧串（见 used_at）
+#   used_at   本轮接线的 Kotlin 调用点（文件:行号）
+#   ja / zhs  模板原文（{0} 未展开；块标量 |- 保留逐字内容）
+
+schema: 1
+
+keys:
+  # ---------------------------------------------------------------------
+  # 一、词法层（Lang.cs:3554-3594 / zhs:843-853）
+  # 消费点：LexicalAnalyzer 的 6 条自造句。本轮只补 LexError 的键构造与渲染层，
+  # 调用点接线属 L06 面（见交付回执「需接线」）。
+  # ---------------------------------------------------------------------
+  - id: MacroOverLimit
+    lang_cs: 3554
+    zhs_xml: 843
+    args: 1
+    status: registered
+    used_at: LexicalAnalyzer.kt:649（宏展开计数，接线待组长）
+    ja: |-
+      マクロの展開数が1文あたりの上限値{0}を超えました(自己参照・循環参照のおそれ)
+    zhs: |-
+      宏展开的次数超过单次展开上限值{0}(可能是因为自我调用・循环调用)
+
+  - id: UnexpectedFullWidthSpace
+    lang_cs: 3562
+    zhs_xml: 845
+    args: 1
+    status: registered
+    used_at: LexicalAnalyzer.kt:434-437（全角空格，接线待组长）
+    ja: |-
+      予期しない全角スペースを発見しました(この警告はシステムオプション「{0}」により無視できます)
+    zhs: |-
+      发现意料之外的全角空格(此警告可以用系统配置「{0}」来无视)
+
+  - id: UnexpectedCharacter
+    lang_cs: 3582
+    zhs_xml: 850
+    args: 1
+    status: registered
+    used_at: LexicalAnalyzer.kt:477-479（未知字符，接线待组长）
+    ja: |-
+      字句解析中に予期しない文字'{0}'を発見しました
+    zhs: |-
+      词法解析中出现意料之外的字符'{0}'
+
+  - id: EmptyTwoSBrackets
+    lang_cs: 3586
+    zhs_xml: 851
+    args: 0
+    status: registered
+    used_at: 无（原版 LexicalAnalyzer.cs:808-831 的 [[ 语法在移植侧统一报 UnexpectedCharacter；接线待组长裁定）
+    ja: |-
+      空の[[]]です
+    zhs: |-
+      空的[[]]
+
+  - id: MissingTwoSBrackets
+    lang_cs: 3590
+    zhs_xml: 852
+    args: 0
+    status: registered
+    used_at: 无（同上，移植侧未单独区分缺 ]]，接线待组长裁定）
+    ja: |-
+      対応する"]]"のない"[["です
+    zhs: |-
+      没有对应"]]"的"[["
+
+  - id: CanNotRenameKey
+    lang_cs: 3594
+    zhs_xml: 853
+    args: 1
+    status: registered
+    used_at: 无（同上，移植侧未走 rename 符号通道，接线待组长裁定）
+    ja: |-
+      字句解析中に置換(rename)できない符号{0}を発見しました
+    zhs: |-
+      发现词法解析中无法被替换(rename)的符号{0}
+
+  # ---------------------------------------------------------------------
+  # 二、ArgumentBuilder 族（Lang.cs:1918-2086 / zhs:434-476）
+  # 消费点：core/stmt/ArgBuilders 的 fail/warn（统一带「语句名 + 命令:」前缀，
+  # 前缀本体 = Instruction，实参表见 ArgumentBuilder.cs:32）。
+  # ---------------------------------------------------------------------
+  - id: Instruction
+    lang_cs: 1918
+    zhs_xml: 434
+    args: 0
+    status: wired
+    used_at: ArgBuilders.kt:144（argPrefix → instructionPrefix）
+    ja: |-
+      命令:
+    zhs: |-
+      命令:
+
+  - id: MissingArg
+    lang_cs: 1922
+    zhs_xml: 435
+    args: 0
+    status: wired
+    used_at: ArgBuilders.kt:225/236/329/351（STR / FORM_STR / INT_ANY / FORM_STR_ANY 缺参）
+    ja: |-
+      引数が設定されていません
+    zhs: |-
+      缺少参数
+
+  - id: NotEnoughArguments
+    lang_cs: 1926
+    zhs_xml: 436
+    args: 0
+    status: wired
+    used_at: ArgBuilders.kt:154（checkArgumentType 实参不足）
+    ja: |-
+      引数が足りません
+    zhs: |-
+      参数过少
+
+  - id: TooManyArg
+    lang_cs: 1930
+    zhs_xml: 437
+    args: 0
+    status: wired
+    used_at: ArgBuilders.kt:147（tooMany，level 1 截断）
+    ja: |-
+      引数が多すぎます
+    zhs: |-
+      参数过多
+
+  - id: CanNotRecognizeArg
+    lang_cs: 1934
+    zhs_xml: 438
+    args: 1
+    status: wired
+    used_at: ArgBuilders.kt:163（checkArgumentType 空参数位）
+    ja: |-
+      第{0}引数を認識できません
+    zhs: |-
+      无法识别第{0}参数
+
+  - id: IncorrectArg
+    lang_cs: 1938
+    zhs_xml: 439
+    args: 1
+    status: registered
+    used_at: ArgBuilders.kt:164（类型校验，接线待组长）
+    ja: |-
+      第{0}引数の型が正しくありません
+    zhs: |-
+      第{0}参数的类型错误
+
+  - id: ArgIsNotVariable
+    lang_cs: 1942
+    zhs_xml: 440
+    args: 1
+    status: wired
+    used_at: ArgBuilders.kt:171（changeable）、:470（VARSIZE 未登记变量，ArgumentParser.cs:531）
+    ja: |-
+      第{0}引数に変数以外を指定することはできません
+    zhs: |-
+      第{0}参数必须为变量
+
+  - id: ArgIsConst
+    lang_cs: 1946
+    zhs_xml: 441
+    args: 1
+    status: registered
+    used_at: ArgBuilders.kt:172（changeable 常量位，接线待组长）
+    ja: |-
+      第{0}引数に変更できない変数を指定することはできません
+    zhs: |-
+      第{0}参数不能指定为只读变量
+
+  - id: MissingArgAfterComma
+    lang_cs: 1974
+    zhs_xml: 448
+    args: 0
+    status: wired
+    used_at: ArgBuilders.kt:361（FORM_STR_ANY 逗号后耗尽）
+    ja: |-
+      ','の後ろに引数がありません。
+    zhs: |-
+      ,'后面必须存在一个参数
+
+  - id: ArgIsNotRequired
+    lang_cs: 1978
+    zhs_xml: 449
+    args: 0
+    status: wired
+    used_at: ArgBuilders.kt:208（VOID 构造器多余实参）
+    ja: |-
+      引数は不要です
+    zhs: |-
+      不需要参数
+
+  - id: ExtraCharacterAfterArg
+    lang_cs: 1994
+    zhs_xml: 453
+    args: 0
+    status: wired
+    used_at: ArgBuilders.kt:473（VARSIZE 名后多余字符）
+    ja: |-
+      引数の後に余分な文字があります
+    zhs: |-
+      参数后面有一个多余的字符
+
+  - id: IgnoreArgBecauseNotInt
+    lang_cs: 2078
+    zhs_xml: 474
+    args: 0
+    status: wired
+    used_at: ArgBuilders.kt:522（INPUTS 第 2 参非整数）
+    ja: |-
+      第2引数は整数型ではないため、無視されます
+    zhs: |-
+      第二个参数因为不是整型数值而被忽略
+
+  - id: OmittedArg1
+    lang_cs: 2082
+    zhs_xml: 475
+    args: 0
+    status: wired
+    used_at: ArgBuilders.kt:280（INT_EXPRESSION 省略实参补 0）
+    ja: |-
+      省略できない引数が省略されています。Emueraは0を補います
+    zhs: |-
+      必要的参数被省略了。Emuera自动补0
+
+  - id: OmittedArg2
+    lang_cs: 2086
+    zhs_xml: 476
+    args: 0
+    status: registered
+    used_at: 无（eramaker 兼容档，本作未触发）
+    ja: |-
+      省略できない引数が省略されています。Emueraは0を補いますがeramakerの動作は不定です
+    zhs: |-
+      必要的参数被省略了。Emuera自动补0，但在eramaker中的行为未定义
+
+  # ---------------------------------------------------------------------
+  # 三、块结构族（Lang.cs:2590-2714 / zhs:602-633）
+  # 消费点：core/stmt/BlockChecker（配 Table 来自 FunctionIdentifier.cs:4144-4173）。
+  # ---------------------------------------------------------------------
+  - id: OutsideSelectcase
+    lang_cs: 2590
+    zhs_xml: 602
+    args: 1
+    status: wired
+    used_at: BlockChecker.kt:83/:127（SELECTCASE 前置区 / CASE 无母块）
+    ja: |-
+      SELECTCASE構文の分岐の外に命令"{0}"が含まれています
+    zhs: |-
+      在SELECTCASE语法的分支以外包含命令"{0}"
+
+  - id: InvalidElse
+    lang_cs: 2606
+    zhs_xml: 606
+    args: 1
+    status: wired
+    used_at: BlockChecker.kt:125（ELSE/ELSEIF 栈顶不是 IF）
+    ja: |-
+      IF～ENDIFの外で"{0}"文が使われました
+    zhs: |-
+      在IF-ENDIF以外使用了"{0}"
+
+  - id: UnexpectedEndif
+    lang_cs: 2614
+    zhs_xml: 608
+    args: 0
+    status: wired
+    used_at: BlockChecker.kt:161（ENDIF 空栈/错配；zhs 是官方反向误译，照抄）
+    ja: |-
+      対応するIFの無いENDIF文です
+    zhs: |-
+      缺少IF对应的ENDIF
+
+  - id: InstructionNotClosed
+    lang_cs: 2618
+    zhs_xml: 609
+    args: 3
+    status: registered
+    used_at: 无（原版 SELECTCASE 的 stack2 恢复路径 ErbLoader.cs:1247-1256/1275-1287 未移植，见 BlockChecker KDoc 已知差异）
+    ja: |-
+      {0}文に対応する{1}がない状態で{2}文に到達しました
+    zhs: |-
+      在{0}没有对应{1}情况下运行到{2}语句
+
+  - id: UnexpectedEndselect
+    lang_cs: 2626
+    zhs_xml: 611
+    args: 0
+    status: wired
+    used_at: BlockChecker.kt:162（ENDSELECT 空栈/错配）
+    ja: |-
+      対応するSELECTCASEの無いENDSELECT文です
+    zhs: |-
+      应对selectcase无endselect文。
+
+  - id: MissingCorresponding
+    lang_cs: 2634
+    zhs_xml: 613
+    args: 2
+    status: wired
+    used_at: BlockChecker.kt:106（EOF 残留开语句）、:171（REND/NEXT/WEND/LOOP 无母块或错配）
+    ja: |-
+      対応する"{0}"の無い"{1}"文です
+    zhs: |-
+      缺少"{0}"对应的"{1}"
+
+  - id: MissingTryc
+    lang_cs: 2638
+    zhs_xml: 614
+    args: 0
+    status: wired
+    used_at: BlockChecker.kt:66/:164（CATCH 无 TRYC 系）
+    ja: |-
+      対応するTRYC系命令がありません
+    zhs: |-
+      缺少对应的TRYC系统命令
+
+  - id: UnexpectedEndcatch
+    lang_cs: 2642
+    zhs_xml: 615
+    args: 0
+    status: wired
+    used_at: BlockChecker.kt:163（ENDCATCH 空栈/错配）
+    ja: |-
+      対応するCATCHのないENDCATCHです
+    zhs: |-
+      缺少CATCH对应的ENDCATCH
+
+  - id: UnexpectedDatalist
+    lang_cs: 2662
+    zhs_xml: 620
+    args: 0
+    status: registered
+    used_at: 无（DATALIST 是 OPEN，BlockChecker 不校验其母块；原版 ErbLoader.cs:1414）
+    ja: |-
+      対応するPRINTDATA系命令のないDATALISTです
+    zhs: |-
+      缺少PRINTDATA系列命令对应的DATALIST
+
+  - id: UnexpectedEndlist
+    lang_cs: 2666
+    zhs_xml: 621
+    args: 0
+    status: wired
+    used_at: BlockChecker.kt:165（ENDLIST 空栈/错配）
+    ja: |-
+      対応するDATALISTのないENDLISTです
+    zhs: |-
+      缺少DATALIST对应的ENDLIST
+
+  - id: MissingPrintdataStrdata
+    lang_cs: 2678
+    zhs_xml: 624
+    args: 1
+    status: wired
+    used_at: BlockChecker.kt:166（ENDDATA 空栈/错配）
+    ja: |-
+      対応するPRINTDATA系命令もしくはSTRDATAのない"{0}"です
+    zhs: |-
+      缺少PRINTDATA系列命令或STRDATA系列命令对应的{0}
+
+  - id: MissingTrycalllist
+    lang_cs: 2694
+    zhs_xml: 628
+    args: 1
+    status: wired
+    used_at: BlockChecker.kt:168（ENDFUNC 空栈/错配）
+    ja: |-
+      対応するTRYCALLLIST系命令のない"{0}"です
+    zhs: |-
+      缺少TRYCALLLIST系列命令对应的{0}
+
+  - id: MissingNoskip
+    lang_cs: 2714
+    zhs_xml: 633
+    args: 1
+    status: wired
+    used_at: BlockChecker.kt:167（ENDNOSKIP 空栈/错配）
+    ja: |-
+      対応するNOSKIP系命令のない"{0}"です
+    zhs: |-
+      缺少NOSKIP系列命令对应的{0}
+
+  # ---------------------------------------------------------------------
+  # 四、行解析族（本轮只登记键与行号，接线归 L06 面）
+  # ---------------------------------------------------------------------
+  - id: CanNotInterpretSharpLine
+    lang_cs: 2354
+    zhs_xml: 543
+    args: 0
+    status: registered
+    used_at: LexicalAnalyzer.kt:830（# 行关键字为空，接线待组长）
+    ja: |-
+      解釈できない#行です
+    zhs: |-
+      解析#行失败
+
+  - id: InvalidCharacterAfterInstruction1
+    lang_cs: 2878
+    zhs_xml: 674
+    args: 1
+    status: registered
+    used_at: LineParser.kt:284（全角空格且 SystemAllowFullSpace 关闭，接线待组长）
+    ja: |-
+      命令で行が始まっていますが、命令の直後に半角スペース・タブ以外の文字が来ています(この警告はシステムオプション「{0}」により無視できます)
+    zhs: |-
+      以命令开始的行在命令后有半角空格和水平制表符以外的文字(此警告可以用系统配置「{0}」来无视)
+
+  - id: InvalidCharacterAfterInstruction2
+    lang_cs: 2882
+    zhs_xml: 675
+    args: 0
+    status: registered
+    used_at: LineParser.kt:286（其余非法字符，接线待组长）
+    ja: |-
+      命令で行が始まっていますが、命令の直後に半角スペース・タブ以外の文字が来ています
+    zhs: |-
+      以命令开始的行在命令后有半角空格和水平制表符以外的文字

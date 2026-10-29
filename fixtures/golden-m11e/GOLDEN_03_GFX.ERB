@@ -1,0 +1,51 @@
+; ============================================================================
+; GOLDEN_03_GFX.ERB - GFX-05 / SPRITECREATE 负尺寸 / GDRAWG 11 参
+; ----------------------------------------------------------------------------
+; GFX-05 PRINT_RECT 取色（spec: EmueraConsole.cs:3197-3199 + ConsoleRectangleShapePart.cs:46）
+;   PrintShape 把执行时点的 userStyle.Color 冻进形状段；SETCOLOR 之后必须跟色，
+;   RESETCOLOR / 未设色回落 Config.ForeColor = 192,192,192（ConfigData.cs:68）。
+;   语句本身不产文字 —— 观察面是宿主 sink 的 printRect(params, rgb) 带色重载
+;   （M11eExpandE2ETest 的记录型 sink）。
+; SPRITECREATE 负尺寸取绝对值（spec: ASprite.cs:16-23 + FunctionMethodCreator.cs:7057-7068）
+;   10 参形态的 destW/destH 先各自取绝对值再进 ASprite，读回 SPRITEWIDTH/HEIGHT 为正。
+; GDRAWG 11 参（spec: FunctionMethodCreator.cs:7266-7274）
+;   第 11 参是颜色矩阵引用（RefInt2D/RefInt3D），原版 ReadColormatrix 后走 GDrawG 带矩阵重载。
+;   语料实况写法是 `L_CM:0:0`（ステータス表示関連/縁取り.ERB:84）。
+;   10 参形态是「无矩阵」直通；11 参矩阵按行主序 m[源通道*5+目标通道] 换算
+;   （GraphicsBuffer.applyColorMatrix），本节把 R 通道映射到 G 通道。
+;   TODO(verify)：HEAD 的 GDRAWG 仍忽略第 11 参（m11e-dttoxml 路未合流），
+;   GDRAWG_11_PIX 现钉的是「忽略」读数；矩阵接线落地后该行会变成 4278255360。
+; ============================================================================
+@M11E_GFX05
+	PRINTL === SECTION:M11E-GFX05 ===
+	SETCOLOR 255, 0, 0
+	PRINT_RECT 10, 20, 300, 40
+	RESETCOLOR
+	PRINT_RECT 5px
+	PRINTFORML GFX05_END=1
+
+@M11E_SPRITE
+	PRINTL === SECTION:M11E-SPRITE ===
+	PRINTFORML GCREATE_NEG={GCREATE(20, 10, 20)}
+	PRINTFORML SPRITECREATE_NEG={SPRITECREATE("M11E_NEG", 20, 0, 0, 10, 20, 0, 0, -30, -40)}
+	PRINTFORML SPRITE_NEG_SIZE={SPRITEWIDTH("M11E_NEG")},{SPRITEHEIGHT("M11E_NEG")}
+	PRINTFORML SPRITECREATE_POS={SPRITECREATE("M11E_POS", 20, 0, 0, 10, 20, 0, 0, 30, 40)}
+	PRINTFORML SPRITE_POS_SIZE={SPRITEWIDTH("M11E_POS")},{SPRITEHEIGHT("M11E_POS")}
+	PRINTFORML SPRITE_DISPOSE={SPRITEDISPOSE("M11E_NEG")}/{SPRITEDISPOSE("M11E_POS")}
+	PRINTFORML GDISPOSE_BASE={GDISPOSE(20)}
+
+@M11E_GDRAWG
+	#DIM MAT, 5, 5
+	PRINTL === SECTION:M11E-GDRAWG ===
+	PRINTFORML GCREATE_SRC={GCREATE(21, 4, 4)}
+	PRINTFORML GSETBRUSH_SRC={GSETBRUSH(21, 0xFFFF0000)}
+	PRINTFORML GFILL_SRC={GFILLRECTANGLE(21, 0, 0, 4, 4)}
+	PRINTFORML GCREATE_DST10={GCREATE(22, 4, 4)}
+	PRINTFORML GDRAWG_10={GDRAWG(22, 21, 0, 0, 4, 4, 0, 0, 4, 4)}
+	PRINTFORML GDRAWG_10_PIX={GGETCOLOR(22, 1, 1)}
+	MAT:0:1 = 256
+	MAT:3:3 = 256
+	PRINTFORML GCREATE_DST11={GCREATE(23, 4, 4)}
+	PRINTFORML GDRAWG_11={GDRAWG(23, 21, 0, 0, 4, 4, 0, 0, 4, 4, MAT:0:0)}
+	PRINTFORML GDRAWG_11_PIX={GGETCOLOR(23, 1, 1)}
+	PRINTFORML G_PIX_DISPOSE={GDISPOSE(21)}/{GDISPOSE(22)}/{GDISPOSE(23)}

@@ -1,0 +1,65 @@
+; ============================================================================
+; GOLDEN_07_INPUT_MANUAL.ERB - input statements that REQUIRE HUMAN INPUT
+; ----------------------------------------------------------------------------
+; These cannot be auto-skipped by the engine (NeedValue=true or
+; StopMesskip=true). Run separately with: @GOLDEN_INPUT_MANUAL
+; Follow the on-screen prompts; the operator actions are deterministic when
+; performed exactly as written. See golden-runbook.md for the keystroke list.
+; isa.yaml: WAIT FORCEWAIT WAITANYKEY TWAIT ONEINPUT ONEINPUTS INPUTANY
+;   INPUT(without CanSkip) PRINTDATAW TONEINPUT(with countdown display)
+; ============================================================================
+@GOLDEN_INPUT_MANUAL
+	PRINTL === SECTION:INPUT-MANUAL ===
+	PRINTFORML OP: press ENTER.
+	WAIT
+	PRINTFORML AFTER-WAIT
+	PRINTFORML OP: press ENTER.
+	WAITANYKEY
+	PRINTFORML AFTER-WAITANYKEY
+	PRINTFORML OP: press ENTER.
+	FORCEWAIT
+	PRINTFORML AFTER-FORCEWAIT
+	PRINTFORML OP: press ENTER.
+	TWAIT 500, 0
+	PRINTFORML AFTER-TWAIT ISTIMEOUT={ISTIMEOUT}
+	PRINTFORML OP: type 123 then ENTER.
+	INPUT
+	PRINTFORML INPUT_MANUAL={RESULT}
+	PRINTFORML OP: type HELLO then ENTER.
+	INPUTS
+	PRINTFORML INPUTS_MANUAL=%RESULTS:0%
+	PRINTFORML OP: press any digit key.
+	ONEINPUT
+	PRINTFORML ONEINPUT={RESULT}
+	PRINTFORML OP: press any letter key.
+	ONEINPUTS
+	PRINTFORML ONEINPUTS=%RESULTS:0%
+	PRINTFORML OP: press ENTER.
+	INPUTANY
+	PRINTFORML INPUTANY={RESULT}/%RESULTS:0%
+	PRINTL === SECTION:PRINTDATAW-MANUAL ===
+	PRINTFORML OP: press ENTER.
+	PRINTDATAW
+		DATA PDW1
+	ENDDATA
+	PRINTFORML AFTER-PRINTDATAW
+	PRINTFORML OP: press ENTER.
+	PRINTDATAKW
+		DATA PKW1
+	ENDDATA
+	PRINTFORML AFTER-PRINTDATAKW
+	PRINTFORML OP: press ENTER.
+	PRINTDATADW
+		DATA PDW2
+	ENDDATA
+	PRINTFORML AFTER-PRINTDATADW
+	PRINTL === SECTION:INPUT-CANSKIP-ONCE ===
+	PRINTFORML OP: just press ENTER (accepts empty -> default).
+	SKIPLOG 0
+	INPUT 999
+	PRINTFORML INPUT_DEF={RESULT}
+	PRINTL === SECTION:WINDOW-STATE ===
+	PRINTFORML ISACTIVE={ISACTIVE()}
+	PRINTFORML GETKEY_A_UNPRESSED={GETKEY(65)}
+	PRINTFORML GETKEYTRIGGERED={GETKEYTRIGGERED(65)}
+	PRINTL === END-MANUAL ===
