@@ -40,6 +40,48 @@ builds and runs standalone on desktop, server, and CI.
 `specs/` is the semantic authority of this project, covering the ISA, built-ins,
 variables, loading, save format, and RNG.
 
+
+## Modules
+
+| Module | Description |
+|---|---|
+| `core-vm` | ERA semantic VM: ERB bytecode execution, variable & character systems, save I/O, built-in functions, SFMT RNG |
+| `render` | Pure-JVM rendering: glyph cache, text grid, button hit regions, display list, graphics layers |
+| `tools/erbcc` | ERB / ERH → `erbc.v1` bytecode container compiler |
+| `tools/vmdbg` | Non-interactive, agent-oriented debug CLI: call / trace / where / var / disasm / sweep / ledger |
+| `tools/uipreview` | Desktop render preview: drives the real core-vm + render, viewable in a browser |
+| `tools/fontsubset` | Font subsetting scripts (Python) that maintain `render/src/main/resources/fonts` |
+
+## Build & Test
+
+Requires JDK 17+. Run all commands from the repository root.
+
+```bash
+./gradlew :core-vm:test             # per-module tests
+./gradlew :tools:erbcc:installDist  # compiler CLI
+```
+
+A few tests depend on real corpora or profiling artifacts and are gated by the
+`ERATW_CORPUS` / `ERATW_GAMEDIR` / `ERATW_ERBC_DIR` environment variables: with
+the variables unset, those cases are simply not generated; everything else is
+self-contained. CI runs exactly that tier.
+
+## Repository Layout
+
+```
+eraKcore (this repo, MIT)      eratw-pocket (GPL-3.0)
+├── core-vm   ←────────────    ├── render-canvas
+├── render    ←────────────    ├── platform
+└── erbcc                      └── app (Compose shell)
+```
+
+eratw-pocket knows nothing about game semantics — on purpose. The authoritative
+definitions of script behavior, built-in functions, and save formats all live in
+this repo's `core-vm` and `specs/`, and shell changes are not allowed to alter
+game behavior. So if something "plays wrong", please file it here rather than on
+[eratw-pocket](https://github.com/Poboking/eratw-pocket), even when it happens on
+a phone.
+
 ## Architecture & Design Decisions
 
 **Spec-first differential development.** The six specs under `specs/` were all
@@ -83,47 +125,6 @@ run. It never touches a line of engine code: internal layout refactors leave
 the metric untouched, while semantic changes land faithfully in the chain
 values.
 
-## Modules
-
-| Module | Description |
-|---|---|
-| `core-vm` | ERA semantic VM: ERB bytecode execution, variable & character systems, save I/O, built-in functions, SFMT RNG |
-| `render` | Pure-JVM rendering: glyph cache, text grid, button hit regions, display list, graphics layers |
-| `tools/erbcc` | ERB / ERH → `erbc.v1` bytecode container compiler |
-| `tools/vmdbg` | Non-interactive, agent-oriented debug CLI: call / trace / where / var / disasm / sweep / ledger |
-| `tools/uipreview` | Desktop render preview: drives the real core-vm + render, viewable in a browser |
-| `tools/fontsubset` | Font subsetting scripts (Python) that maintain `render/src/main/resources/fonts` |
-
-## Build & Test
-
-Requires JDK 17+. Run all commands from the repository root.
-
-```bash
-./gradlew :core-vm:test             # per-module tests
-./gradlew :tools:erbcc:installDist  # compiler CLI
-```
-
-A few tests depend on real corpora or profiling artifacts and are gated by the
-`ERATW_CORPUS` / `ERATW_GAMEDIR` / `ERATW_ERBC_DIR` environment variables: with
-the variables unset, those cases are simply not generated; everything else is
-self-contained. CI runs exactly that tier.
-
-## Repository Layout
-
-```
-eraKcore (this repo, MIT)      eratw-pocket (GPL-3.0)
-├── core-vm   ←────────────    ├── render-canvas
-├── render    ←────────────    ├── platform
-└── erbcc                      └── app (Compose shell)
-```
-
-eratw-pocket knows nothing about game semantics — on purpose. The authoritative
-definitions of script behavior, built-in functions, and save formats all live in
-this repo's `core-vm` and `specs/`, and shell changes are not allowed to alter
-game behavior. So if something "plays wrong", please file it here rather than on
-[eratw-pocket](https://github.com/Poboking/eratw-pocket), even when it happens on
-a phone.
-
 ## Corpus & Copyright
 
 This repository distributes **no** era game data (scripts, images, audio, saves,
@@ -162,3 +163,4 @@ files that accompany it.
 
 [MIT](LICENSE). Bundled fonts carry their own open-source licenses — see the
 font table in [NOTICE.md](NOTICE.md).
+
