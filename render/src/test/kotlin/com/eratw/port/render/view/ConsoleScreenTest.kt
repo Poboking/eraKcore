@@ -79,12 +79,16 @@ class ConsoleScreenTest {
 
     private fun titleLines(): List<RenderLine> = listOf(
         ScreenRows.textLine(BAR_FULL),                                    // 基准:61  TITLE.ERB:62
-        ScreenRows.textLine("eraThe World【画蛇添足版】"),                    // :62     TITLE.ERB:66
-        ScreenRows.textLine("4.980 - 日语交流用画蛇添足版CH20260326"),         // :63     TITLE.ERB:67
-        ScreenRows.textLine("(2013～2026)"),                               // :64     TITLE.ERB:68
+        // :62-:67 —— 标题 banner 六行不取基准原文，用自造测试串。基准那几行是
+        // 上游版本的界面文案，不属于引擎语义；版式判据（行数、脏区列跨、按钮列位）
+        // 由 :61/:68 的 ━ 条和各按钮行提供，banner 文本换成什么都不影响这些断言。
+        // 同步项：`render/src/test/resources/view/title-screen-snapshot.txt` 第 2-7 行。
+        ScreenRows.textLine("eraKcore TEST BANNER"),
+        ScreenRows.textLine("v0.0.0 - synthetic banner, not game text"),
+        ScreenRows.textLine("(test fixture)"),
         ScreenRows.textLine(" "),                                         // :65     TITLE.ERB:69 的空 PRINTL
-        ScreenRows.textLine("汉化版仅为学习日语的交流之用，禁止对该版本的一切盗用、商用行为"), // :66 TITLE.ERB:70
-        ScreenRows.textLine("※游玩中遇到的问题可以去问一下单独指导里的哆来咪（游玩时注意温馨提示哦）"), // :67 TITLE.ERB:71
+        ScreenRows.textLine("TEST LINE A - no upstream text in this fixture"),
+        ScreenRows.textLine("TEST LINE B - no upstream text in this fixture"),
         ScreenRows.textLine(BAR_FULL),                                    // :68     TITLE.ERB:72
         ScreenRows.line(
             ScreenRows.pad(MENU_COL_CELLS),
