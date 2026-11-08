@@ -24,8 +24,8 @@ import java.nio.file.Path
  *
  * ## 列数不是设备属性
  *
- * 设备档案只存几何；列数（110 缺省）是**版面偏好**（对应
- * `CanvasConsoleView.fontColumnsOverride` 的手机可读档），由 `--columns` 给、
+ * 设备档案只存几何；列数（136 缺省）是**预览版面偏好**（预览走 `ScreenLayout.fixedColumns`
+ * 的固定列口径，真机由配置字号派生），由 `--columns` 给、
  * 不进档案。`consoleWidth` 是 boot 参数，切设备 = 重开会话（`GameSession` KDoc）。
  */
 data class DeviceProfile(

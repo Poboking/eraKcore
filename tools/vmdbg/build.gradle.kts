@@ -2,7 +2,7 @@
 // 工具链/依赖风格照抄 tools/erbcc（纯 JVM 工具模块口径：禁 Android API），
 // 但入口用 application 插件：installDist 后 tools/vmdbg/build/install/vmdbg/bin/vmdbg <子命令>。
 plugins {
-    kotlin("jvm")
+    alias(libs.plugins.kotlin.jvm)
     application
 }
 
@@ -11,14 +11,15 @@ application {
 }
 
 kotlin {
-    jvmToolchain(17)
+    // A-5：17 走 catalog 的 versions.jvmTarget（全仓 JVM 面同源）。
+    jvmToolchain(libs.versions.jvmTarget.get().toInt())
 }
 
 dependencies {
     implementation(project(":core-vm"))
     testImplementation(kotlin("test"))
-    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testImplementation(libs.junit.jupiter)
+    testRuntimeOnly(libs.junit.platform.launcher)
     // 合成语料装置（MiniCorpus）要用 erbcc 的 CorpusCompile + ErbcArtifacts 把临时 mini ERB
     // 编成 .erbc 产物目录。方向安全（与 core-vm 对 erbcc 的测试依赖同一口径）：
     // erbcc(main) → core-vm(main)；vmdbg(main) → core-vm(main)；vmdbg(test) → erbcc(main) 无环。

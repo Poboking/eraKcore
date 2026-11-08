@@ -19,6 +19,9 @@ import java.time.OffsetDateTime
  *
  * - `--policy` 缺省 exhaustive；`--seed` 缺省 20260226（策略实现内部的 `java.util.Random`
  *   种子，CONTRACT-DBG6 §0.3：禁 kotlin.random、确定性差分前提）；
+ * - `--boot-only`（布尔，obs-compat512）：引导到落 `<out>/seed.dbg` 即收工，**不跑任何局**
+ *   （装载 floor 二分用：只要「装载 + 引导」这条链活下来，不必付浸泡时间）。与 `--soak-min`
+ *   互斥；缺省关 = 既有行为逐字不变；
  * - 预算三旋钮：`--max-episodes` 缺省 200、`--wall-min` 缺省 30（分钟/局）、`--max-depth`
  *   缺省 24（快照栈深度）；
  * - 种子三选一：`--boot <配方>`（覆盖内置 START 链）→ 引导成功后种子落 `<out>/seed.dbg`；
@@ -66,19 +69,40 @@ object CmdExplore {
     /** explore 的带值选项（Main.kt 的 Args.VALUE_OPTS 必须收录，见 [requireValueOptsWired]）。 */
     internal val VALUE_OPTS_NEEDED = listOf(
         "--policy", "--seed", "--max-episodes", "--wall-min", "--max-depth", "--boot", "--seed-snap",
-        "--sweep-ledger",
+        "--sweep-ledger", "--soak-min", "--idle-min-ms", "--idle-max-ms", "--slow-step-ms", "--step-wall-ms",
     )
 
     fun run(parsed: Args, out: PrintStream, err: PrintStream): Int {
         requireValueOptsWired(parsed)
-        val policyName = parsed.valueOr("--policy", "exhaustive")
-        if (policyName != "exhaustive" && policyName != "least-visited") {
-            throw CliError("--policy 只认 exhaustive|least-visited: $policyName")
+        // 浸泡档旋钮（obs-soak）：--soak-min>0 即进入浸泡模式；缺省策略随之切到 soak（随机操作）。
+        val soakMin = parsed.longOr("--soak-min", 0L)
+        if (soakMin < 0) throw CliError("--soak-min 不得为负: $soakMin")
+        val soak = soakMin > 0L
+        // 只引导不跑局（obs-compat512 的装载 floor 二分旋钮）：与浸泡互斥（两者判据相反）。
+        val bootOnly = parsed.flag("--boot-only")
+        if (bootOnly && soak) throw CliError("--boot-only 与 --soak-min 互斥（前者只要引导链，后者要浸泡）")
+        val idleMinMs = parsed.longOr("--idle-min-ms", 0L)
+        val idleMaxMs = parsed.longOr("--idle-max-ms", idleMinMs)
+        if (idleMinMs < 0 || idleMaxMs < idleMinMs) {
+            throw CliError("--idle-min-ms/--idle-max-ms 需 0<=min<=max（实得 min=$idleMinMs max=$idleMaxMs）")
+        }
+        val slowStepMs = parsed.longOr("--slow-step-ms", 5000L)
+        // 单步墙钟闸（obs-midhang）：全局装配旋钮 `--step-wall-ms` 的 explore 侧透传 + 校验。
+        // 缺省 0 = 关闭 ⇒ 既有 explore/sweep/call 行为逐字不变；与 --wall-min（每局墙钟，只喂
+        // 输入循环）和 --steps（引导与整局共用的步数闸）三闸独立，纯计算挂起只吃得到本闸。
+        val stepWallMs = parsed.longOr("--step-wall-ms", 0L)
+        if (stepWallMs < 0) throw CliError("--step-wall-ms 不得为负: $stepWallMs")
+        val defaultPolicy = if (soak) "soak" else "exhaustive"
+        val policyName = parsed.valueOr("--policy", defaultPolicy)
+        if (policyName != "exhaustive" && policyName != "least-visited" && policyName != "soak") {
+            throw CliError("--policy 只认 exhaustive|least-visited|soak: $policyName")
         }
         val policySeed = parsed.longOr("--seed", 20260226L)
-        val maxEpisodes = parsed.longOr("--max-episodes", 200L).toInt()
+        // 浸泡档主终止条件 = 总墙钟；max-episodes 退居二次安全闸，用户没点名时给到极大。
+        val maxEpisodes = parsed.value("--max-episodes")?.toLongOrNull()?.toInt()
+            ?: if (soak) Int.MAX_VALUE else 200
         if (maxEpisodes <= 0) throw CliError("--max-episodes 必须为正: $maxEpisodes")
-        val wallMin = parsed.longOr("--wall-min", 30L)
+        val wallMin = parsed.longOr("--wall-min", if (soak) soakMin else 30L)
         if (wallMin < 0) throw CliError("--wall-min 不得为负: $wallMin")
         val maxDepth = parsed.longOr("--max-depth", 24L).toInt()
         if (maxDepth <= 0) throw CliError("--max-depth 必须为正: $maxDepth")
@@ -96,18 +120,34 @@ object CmdExplore {
         val cfg = ExploreConfig(
             maxEpisodes = maxEpisodes,
             wallMs = wallMin * 60_000L,
-            maxDepth = maxDepth,
+            maxDepth = if (soak) 0 else maxDepth,
             outDir = outDir,
+            soak = soak,
+            soakWallMs = soakMin * 60_000L,
+            idleMinMs = idleMinMs,
+            idleMaxMs = idleMaxMs,
+            slowStepMs = slowStepMs,
+            stepWallMs = stepWallMs,
+            soakSeed = policySeed,
+            bootOnly = bootOnly,
         )
         out.println(
             "explore: policy=" + policyName + " seed=" + policySeed +
-                " maxEpisodes=" + maxEpisodes + " wallMin=" + wallMin + " maxDepth=" + maxDepth,
+                " maxEpisodes=" + maxEpisodes + " wallMin=" + wallMin + " maxDepth=" + cfg.maxDepth,
         )
+        if (soak) {
+            out.println("soak: wallMin=" + soakMin + " idle=[" + idleMinMs + "," + idleMaxMs + "]ms slowMs=" + slowStepMs)
+            // 堆挡位自证（obs-soak512）：桌面 java 拉起行的 -Xmx 折 MiB，读数前核对挡位真的生效。
+            out.println("soak: heapCeilingMi=" + heapCeilingMiNow())
+        }
+        out.println("stepWallMs=" + stepWallMs + (if (stepWallMs > 0) "（单步墙钟闸启用：命中即中断该步并把抛点现场写台账）" else "（关闭：与既有行为逐字一致）"))
+        if (bootOnly) out.println("bootOnly=true（引导到落 seed.dbg 即收工，不跑任何局）")
         out.println("out=" + outDir)
 
+        val meter = if (soak) SoakMeter(slowStepMs) else null
         val factory = policyFactory
         val sink = ExploreInputSink(cfg.tailLines)
-        val assembled = Assembler.assemble(parsed, sinkOverride = sink)
+        val assembled = Assembler.assemble(parsed, sinkOverride = sink, out = out)
         // E2 台账（局部名 ledger：不遮蔽 PrintStream 参数 out —— 同名会让 out.println 编译红）
         val ledger = ExploreOut(
             outDir,
@@ -131,8 +171,26 @@ object CmdExplore {
                     )
             },
             err = err,
+            meter = meter,
         )
-        val result = driver.run()
+        // 堆 OOM 兜底（obs-soak512）：装配/播种/局间 restore 在主线程跑，OutOfMemoryError 若从
+        // driver.run() 穿出，soak.txt/soak-steps.jsonl 的正常落盘点（下方）就到不了——先抢救
+        // 已结算的浸泡读数再报错退出，「死在哪一步」必须可读，不许丢台账。
+        val result = try {
+            driver.run()
+        } catch (t: OutOfMemoryError) {
+            err.println("vmdbg: 堆 OOM（主线程/局间，obs-soak512）: " + (t.message ?: t.javaClass.name))
+            err.println("vmdbg: 挡位=" + heapCeilingMiNow() + "MiB；当时 live≈" + heapUsedMiNow() + "MiB")
+            if (meter != null) {
+                runCatching {
+                    Files.writeString(outDir.resolve("soak.txt"), meter.renderReport(policySeed, soakMin), Charsets.UTF_8)
+                    Files.writeString(outDir.resolve("soak-steps.jsonl"), meter.stepJsonl(), Charsets.UTF_8)
+                }
+                out.println("soak-summary=" + meter.summaryLine())
+                out.println("status=HEAP_OOM（浸泡台账已抢救落盘；堆 OOM 专节见 soak.txt）")
+            }
+            return 1
+        }
         if (result.bootFailure != null) {
             out.println("status=BOOT_FAILED")
             out.println("reason=" + result.bootFailure)
@@ -146,7 +204,22 @@ object CmdExplore {
         val counts = result.outcomeCounts.entries.sortedByDescending { it.value }
         out.println("outcomes=" + counts.joinToString(",") { it.key.name + ":" + it.value })
         out.println("findings=" + result.findingsCount)
+        if (result.findingsSuppressed > 0) {
+            // 护栏生效（obs-soakwall）：同种重复超单种/总闸上限的条数只计数不入台账。
+            out.println("findingsSuppressed=" + result.findingsSuppressed + "（重复抑制未入台账）")
+        }
         out.println("ledger=explore.jsonl / findings.jsonl / replay/ / coverage.txt（同目录）")
+        if (meter != null) {
+            // 浸泡读数落盘（全在 --out，产物不入 git）：soak.txt 聚合分位 + 慢步专节；
+            // soak-steps.jsonl 逐条「提交→到点」耗时台账。
+            Files.writeString(outDir.resolve("soak.txt"), meter.renderReport(policySeed, soakMin), Charsets.UTF_8)
+            Files.writeString(outDir.resolve("soak-steps.jsonl"), meter.stepJsonl(), Charsets.UTF_8)
+            out.println("soak-steps=" + meter.count())
+            out.println("soak-summary=" + meter.summaryLine())
+            out.println("soak-slow=" + meter.slowSteps().size + "（见 soak.txt 慢步专节：函数名:pc/步序/动作）")
+            out.println("soak-heap=peak=" + meter.heapPeakMi() + "Mi ceiling=" + meter.heapCeilingMi() + "Mi oom=" + meter.ooms().size)
+            out.println("soak-ledger=soak.txt / soak-steps.jsonl（同目录）")
+        }
         return 0
     }
 

@@ -154,8 +154,10 @@ class ColorNamesTest {
         val ctx = fnCtx()
         for (name in listOf("transparent", "TRANSPARENT", "Transparent", "TrAnSpArEnT")) {
             val e = assertFailsWith<CodeEE> { colorFromName(ctx, name) }
-            assertTrue(e.message!!.contains("COLOR_FROMNAME"), e.message ?: "无消息")
-            assertTrue(e.message!!.contains("transparent"), e.message ?: "无消息")
+            // 官方逐字（Error.TransparentUnsupported，Lang.cs:1982 / zhs 表 :450）：运行期与声明期
+            // 同一条串，原版不做 Format、也不带函数名前缀。旧 pin 断言含 "COLOR_FROMNAME" 与小写
+            // "transparent" —— 那是把自造串当正确行为钉死，随本笔接线按官方原文改写。
+            assertEquals("不能将透明(Transparent)指定为颜色", e.message, "COLOR_FROMNAME 的 TRANSPARENT 支必须抛官方逐字串")
         }
         assertTrue(ColorNames.isTransparent("TRANSPARENT"))
         assertFalse(ColorNames.isTransparent(" transparent"))

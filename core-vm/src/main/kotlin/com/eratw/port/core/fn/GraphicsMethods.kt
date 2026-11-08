@@ -14,13 +14,22 @@ import com.eratw.port.core.font.FontSidecarReader
 import com.eratw.port.core.font.PortFonts
 import com.eratw.port.core.font.SLOT_FONT_SIDECAR
 import com.eratw.port.core.host.BinaryFileOps
+import com.eratw.port.core.host.CBG_SLOT
 import com.eratw.port.core.host.CbgPool
 import com.eratw.port.core.host.CellWidth
 import com.eratw.port.core.host.FileOps
+import com.eratw.port.core.host.GRAPHICS_SINK_SLOT
+import com.eratw.port.core.host.GRAPHICS_SLOT
 import com.eratw.port.core.host.GraphicsBuffer
 import com.eratw.port.core.host.GraphicsPool
+import com.eratw.port.core.host.GraphicsSinkRef
+import com.eratw.port.core.host.NoopGraphicsSink
+import com.eratw.port.core.host.PNG_PAYLOAD_SLOT
+import com.eratw.port.core.host.PngPayloadStore
+import com.eratw.port.core.host.SPRITE_SLOT
 import com.eratw.port.core.host.GlyphMaskHostProvider
 import com.eratw.port.core.host.GlyphRequest
+import com.eratw.port.core.host.RuntimeAux
 import com.eratw.port.core.host.SpritePool
 import com.eratw.port.core.host.compositeGlyphMask
 import com.eratw.port.core.host.isSane
@@ -136,9 +145,17 @@ internal fun registerGraphicsMethods(r: BuiltinRegistry) {
             }
             val ops = c.host.fileOps ?: throw CodeEE("函数 GCREATEFROMFILE 需要宿主文件能力（fileOps == null）")
             val rawPath = a.size > 2 && iv(a[2]) != 0L
-            val loaded = readImageFile(c, ops, contentDirPath(sv(a[1]), rawPath))
-            val ok = loaded != null && g.createFromArgb(loaded.width, loaded.height, loaded.pixels)
-            if (!ok && loaded != null) trace.reason = "create-rejected=${loaded.width}x${loaded.height}"
+            val path = contentDirPath(sv(a[1]), rawPath)
+            // 延迟装载（M12-MEM-GFX）：装了宿主解码通道时**只量尺寸、不落像素**，像素留到
+            // 真被读的那一刻（见 [deferredImageFile]）。理由是本作语料的立绘动图工作表
+            // 单张就有 8000x4000（ARGB 122 MiB），一次性解进 Dalvik 堆会直接顶爆 512 MiB 挡。
+            // 返回码口径不变：量不出尺寸 ⇒ 走原来的立即解码分支，失败仍折成 0。
+            val ok = deferredImageFile(c, ops, path, g) || run {
+                val loaded = readImageFile(c.host, c.aux, ops, path)
+                val created = loaded != null && g.createFromArgb(loaded.width, loaded.height, loaded.pixels)
+                if (!created && loaded != null) trace.reason = "create-rejected=${loaded.width}x${loaded.height}"
+                created
+            }
             if (ok) 1L else 0L
         }
     }
@@ -697,7 +714,7 @@ internal fun registerGraphicsMethods(r: BuiltinRegistry) {
                 0L
             } else {
                 val ops = c.host.fileOps ?: throw CodeEE("函数 GSAVE 需要宿主文件能力（fileOps == null）")
-                val path = savePath(index.toInt())
+                val path = savePath(c, index.toInt())
                 try {
                     val sink = ops as? BinaryFileOps
                     if (sink != null) {
@@ -729,7 +746,7 @@ internal fun registerGraphicsMethods(r: BuiltinRegistry) {
                 0L
             } else {
                 val ops = c.host.fileOps ?: throw CodeEE("函数 GLOAD 需要宿主文件能力（fileOps == null）")
-                val loaded = readImageFile(c, ops, savePath(index.toInt()))
+                val loaded = readImageFile(c.host, c.aux, ops, savePath(c, index.toInt()))
                 if (loaded != null && g.createFromArgb(loaded.width, loaded.height, loaded.pixels)) 1L else 0L
             }
         }
@@ -969,6 +986,23 @@ internal fun registerGraphicsMethods(r: BuiltinRegistry) {
         1L
     }
 
+    // GETANIMETIMER：0 参，读回动画重绘定时器的**当前间隔**（毫秒）。
+    // 权威：spec builtin-functions.yaml:2225-2232 + fork-src Creator.Method.cs:9012-9024
+    //（4.981 上游新增；reference/emuera-cs 全文零命中）——「定时器启用时取 Interval，未启用返回 0」；
+    //「SETANIMETIMER 传 0 或负值关定时器（此后本函数返 0）、传小于 10 的正值会被抬到 10」。
+    // 池字段 animeTimerMs 存的是 SETANIMETIMER 的**原参**（写侧不夹，见其上 KDoc），故读出侧按
+    // EmueraConsole.setRedrawTimer（EmueraConsole.cs:967-980）的同一规则折算 Interval——与 render 侧
+    // SpriteAnimeTimeline.repaintIntervalMs（重绘排程读同一个池字段）同规则、不新增第二份状态。
+    // 语料以「先存旧值、SET 新值驱动动画、再 SET 回旧值」使用（Toolkits.ERB:314-325）。
+    int("GETANIMETIMER", 0, 0) { c, _ ->
+        val ms = c.sprites().animeTimerMs
+        when {
+            ms <= 0 -> 0L
+            ms < ANIME_TIMER_MIN_INTERVAL_MS -> ANIME_TIMER_MIN_INTERVAL_MS.toLong()
+            else -> ms.toLong()
+        }
+    }
+
     /**
      * GDRAWSPRITE：2 / 4 / 6 / 7 参（id, name[, x, y | x, y, w, h[, matrix]]）。
      *
@@ -1078,6 +1112,7 @@ internal fun registerGraphicsMethods(r: BuiltinRegistry) {
             val (x, y) = readPoint("CBGSETG", a, 1)
             val depth = checkDepth("CBGSETG", a, 3, 4)
             c.cbg().add(CbgPool.Layer(depth, gid = g.id, x = x, y = y))
+            c.pushCbgLayers()
             1L
         }
     }
@@ -1091,6 +1126,7 @@ internal fun registerGraphicsMethods(r: BuiltinRegistry) {
             val (x, y) = readPoint("CBGSETSPRITE", a, 1)
             val depth = checkDepth("CBGSETSPRITE", a, 3, 4)
             c.cbg().add(CbgPool.Layer(depth, spriteName = s.name, x = x, y = y))
+            c.pushCbgLayers()
             1L
         }
     }
@@ -1118,19 +1154,23 @@ internal fun registerGraphicsMethods(r: BuiltinRegistry) {
                     x = x, y = y, isButton = true, buttonValue = value.toInt(), tooltip = tooltip,
                 ),
             )
+            c.pushCbgLayers()
             1L
         }
     }
 
     // CBGSETBMAPG：1 参（gid）。同一张图重复设置 → 0（EmueraConsole.cs:650-664）。
+    // 成功分支同样重推整表：取色图 gid 随每条快照下发（CbgLayerSnapshot.buttonMapGid），
+    // 不重推渲染侧就停在上一次的 gid 上（见 GraphicsSink.setCbgLayers 的 KDoc）。
     int("CBGSETBMAPG", 1, 1) { c, a ->
         val g = readGraphics(c, "CBGSETBMAPG", a[0])
         if (!g.isCreated) {
-            0L
+           0L
         } else if (c.cbg().buttonMapGid == g.id) {
             0L
         } else {
             c.cbg().buttonMapGid = g.id
+            c.pushCbgLayers()
             1L
         }
     }
@@ -1138,14 +1178,17 @@ internal fun registerGraphicsMethods(r: BuiltinRegistry) {
     // CBGCLEAR / CBGCLEARBUTTON / CBGREMOVEBMAP：恒 1（:7589-7593 / :7627-7631 / :7643-7647）。
     int("CBGCLEAR", 0, 0) { c, _ ->
         c.cbg().clear()
+        c.pushCbgLayers()
         1L
     }
     int("CBGCLEARBUTTON", 0, 0) { c, _ ->
         c.cbg().clearButtons()
+        c.pushCbgLayers()
         1L
     }
     int("CBGREMOVEBMAP", 0, 0) { c, _ ->
         c.cbg().clearButtonMap()
+        c.pushCbgLayers()
         1L
     }
 
@@ -1154,6 +1197,7 @@ internal fun registerGraphicsMethods(r: BuiltinRegistry) {
         val zmin = intArg("CBGREMOVERANGE", a, 0)
         val zmax = intArg("CBGREMOVERANGE", a, 1)
         c.cbg().clearRange(zmin, zmax)
+        c.pushCbgLayers()
         1L
     }
 }
@@ -1194,6 +1238,16 @@ private fun isRootedPath(path: String): Boolean =
 /** 原版的资源目录名（`Program.cs:219` 的 `Path.Combine(ExeDir, "resources")`，尾分隔符自带）。 */
 private const val CONTENT_DIR = "resources/"
 
+/**
+ * 动画重绘定时器的**最小间隔**（毫秒）。
+ *
+ * `EmueraConsole.setRedrawTimer` 把小于 10 的正参抬到 10（spec: EmueraConsole.cs:973-976；
+ * 见 `render/.../SpriteAnimeTimeline.kt:50` 的同名常量 [MIN_REPAINT_MS]）——那是
+ * `Timers.Timer.Interval` 的单位下限，不是帧间隔。`GETANIMETIMER` 读 Interval，
+ * 故读出侧照此折算（`:967-980`）。
+ */
+private const val ANIME_TIMER_MIN_INTERVAL_MS = 10
+
 /** 第 [i] 个整数参数（原版 `arguments[i].GetIntValue`）。 */
 private fun intArg(name: String, a: List<Value?>, i: Int): Int {
     if (i >= a.size) throw CodeEE("函数 $name：缺少第 ${i + 1} 个参数")
@@ -1217,7 +1271,9 @@ private fun readGraphics(c: BuiltinContext, name: String, v: Value?): GraphicsBu
     val id = iv(v)
     if (id < 0) throw CodeEE("函数 $name：图形编号不能为负（$id）")
     if (id > Int.MAX_VALUE) throw CodeEE("函数 $name：图形编号过大（$id）")
-    return c.gfx().get(id.toInt())
+    // 堆外载荷通道（OOM-B）：每语句检查点现读 aux 槽 —— 装与不装只改「PNG 载荷放哪」，
+    // 返回码与像素语义一字不动；未装时（纯 JVM 闸）与今天逐字相同。
+    return c.gfx().get(id.toInt(), c.aux.peek<PngPayloadStore>(PNG_PAYLOAD_SLOT))
 }
 
 /** 取颜色（`ReadColor`，:9352-9360）。合法范围 0..0xFFFFFFFF；按 ARGB 原样返回。 */
@@ -1694,10 +1750,15 @@ private fun gdrawG(c: BuiltinContext, args: GdrawGArgs): Long {
  * 像素级差异按契约 §4 A4 不复刻。
  * TODO(verify)：Android 渲染层自绘时的 source-over 口径要与这里的 alpha=0 归零一致。
  */
-private fun readImageFile(c: BuiltinContext, ops: FileOps, path: String): PngImage? {
-    val trace = c.imageTrace()
+private fun readImageFile(
+    host: BuiltinHost,
+    aux: RuntimeAux,
+    ops: FileOps,
+    path: String,
+): PngImage? {
+    val trace = aux.slot(IMAGE_LOAD_TRACE_SLOT) { ImageLoadTrace() }
     trace.path = path
-    val bytes = c.host.readFileBytes(path)
+    val bytes = host.readFileBytes(path)
     if (bytes == null) trace.reason = "no-bytes"
     // M10-GFX 宿主解码通道：装了 `ImageDecoderHost`（`:platform` 用 BitmapFactory）时先问它。
     // 口径不动的两条理由：1) 没装时 aux.peek 为 null，本函数与今天逐项相同（语料闸/E2E 走的
@@ -1705,7 +1766,7 @@ private fun readImageFile(c: BuiltinContext, ops: FileOps, path: String): PngIma
     // 与 GLOAD 的返回码分支一个字没改。原版本来就能解 webp（Utils.cs:511-515 走 WebP.Load、
     // :516 走 new Bitmap(path)），所以这条是把「我们自己的解码器解不通」的缺口补上，
     // 不是为复刻失败而失败。alpha==0 归零与下面 png/webp 两支同式。
-    val decoder = c.aux.peek<com.eratw.port.core.host.ImageDecoderHost>(com.eratw.port.core.host.IMAGE_DECODER_SLOT)
+    val decoder = aux.peek<com.eratw.port.core.host.ImageDecoderHost>(com.eratw.port.core.host.IMAGE_DECODER_SLOT)
     if (decoder == null) {
         if (bytes != null) trace.reason = "no-decoder"
     } else if (bytes != null) {
@@ -1766,16 +1827,106 @@ private fun readImageFile(c: BuiltinContext, ops: FileOps, path: String): PngIma
     return PngImage(loaded.width, loaded.height, loaded.pixels)
 }
 
-/** GSAVE / GLOAD 的存档图片路径：`{Config.SavDir}img{index:0000}.png`（:9471-9474）。 */
-private fun savePath(index: Int): String {
-    val digits = index.toString().padStart(4, '0')
-    return "sav/img$digits.png"
+/**
+ * `GCREATEFROMFILE` 的**延迟装载**分支（M12-MEM-GFX）：只量尺寸，像素留到首访问。
+ *
+ * ## 为什么必须这么做
+ *
+ * 原版这张缓冲是 GDI+ `Bitmap`（**原生内存**），移植侧是 `IntArray`（Dalvik 堆，
+ * `largeHeap` 512 MiB 挡）。本作语料的立绘动图是整张工作表：
+ * `resources/As06MARK-IV/anime/服_笑顔动_25.webp` 是 8000x4000 ⇒ ARGB **122 MiB**。
+ * 训练场景里点一个会打印立绘/挿絵的指令（玩家反馈：点「爱抚」），这张图立刻被
+ * `RM_G_ID` → `GCREATEFROMFILE` 解进堆，再叠上渲染侧同尺寸的位图副本 ⇒
+ * `OutOfMemoryError` 直接把进程带走，连错误报告都来不及落（2026-10-30 真机反馈）。
+ *
+ * ## 语义边界（改了哪一条、没改哪一条）
+ *
+ * - **没改**：返回码仍按「这张图能不能量出来」给（量不出来 ⇒ 返回 false ⇒ 调用方走原来的
+ *   立即解码分支，失败照旧折成 0）；`GWIDTH`/`GHEIGHT`/`GCREATED` 读的是登记尺寸，与解码后
+ *   的尺寸同源；像素内容仍由 [readImageFile] 给（PNG/webp/文本载体的回落顺序一个字没动），
+ *   只是**时机**推迟到第一次真读像素（`GGETCOLOR` / `GDRAWSPRITE` / `GSAVE`）。
+ * - **改了**：`fileSource` 被登记到缓冲上，渲染侧可以按路径直接解位图、完全不碰 `pixels`
+ *   （见 `GraphicsBuffer.fileSource` 与 `SpriteBitmapSource`）。
+ * - 缓冲一旦被画写（`GDRAWG` 等），`fileSource` 立刻作废，渲染侧回落到 `pixels`。
+ *
+ * 只有装了宿主解码通道（`ImageDecoderHost`，且它实现了 `probe`）时才走这条；
+ * 纯 JVM 闸/语料对拍没有解码通道，逐项走老路，基准读数不变。
+ *
+ * @return true = 已按延迟形态建好缓冲（尺寸合法且可量出）；false = 没走这条，调用方回退
+ */
+private fun deferredImageFile(c: BuiltinContext, ops: FileOps, path: String, g: GraphicsBuffer): Boolean {
+    val decoder = c.aux.peek<com.eratw.port.core.host.ImageDecoderHost>(
+        com.eratw.port.core.host.IMAGE_DECODER_SLOT,
+    ) ?: return false
+    val trace = c.imageTrace()
+    trace.path = path
+    val bytes = c.host.readFileBytes(path)
+    if (bytes == null) {
+        trace.reason = "no-bytes"
+        return false
+    }
+    val size = try {
+        decoder.probe(path, bytes)
+    } catch (t: Throwable) {
+        null
+    }
+    if (size == null || size.size < 2) {
+        trace.reason = "no-probe"
+        return false
+    }
+    // 只捕获稳定对象（宿主 / aux / 文件口 / 路径）：延迟闭包会被缓冲长期持有，
+    // 捕获 BuiltinContext 等于把一次求值帧钉在内存里，几千张图就是几千份帧。
+    val host = c.host
+    val aux = c.aux
+    val created = g.createDeferredFromFile(size[0], size[1], path) {
+        readImageFile(host, aux, ops, path)?.pixels
+    }
+    if (!created) {
+        trace.reason = "deferred-rejected=${size[0]}x${size[1]}"
+        return false
+    }
+    trace.reason = "deferred=${size[0]}x${size[1]}"
+    return true
 }
 
-/** 池访问（每 VM 一份，挂 `c.store.aux`）。 */
-private fun BuiltinContext.gfx(): GraphicsPool = aux.slot("gfx") { GraphicsPool() }
-private fun BuiltinContext.sprites(): SpritePool = aux.slot("sprite") { SpritePool() }
-private fun BuiltinContext.cbg(): CbgPool = aux.slot("cbg") { CbgPool() }
+/** GSAVE / GLOAD 的存档图片路径：`{Config.SavDir}img{index:0000}.png`（:9471-9474）。 */
+private fun savePath(c: BuiltinContext, index: Int): String =
+    ConfigMethods.saveFolderPrefix(c) + "img${index.toString().padStart(4, '0')}.png"
+
+/** 池访问（每 VM 一份，挂 `c.store.aux`）。槽名用 core 常量，宿主侧回收按同一份找。 */
+private fun BuiltinContext.gfx(): GraphicsPool = aux.slot(GRAPHICS_SLOT) { GraphicsPool() }
+private fun BuiltinContext.sprites(): SpritePool = aux.slot(SPRITE_SLOT) { SpritePool() }
+private fun BuiltinContext.cbg(): CbgPool = aux.slot(CBG_SLOT) { CbgPool() }
+
+/**
+ * CBG 池变更后把**整表快照**推给渲染侧（`GraphicsSink.setCbgLayers`）。
+ *
+ * 三条 set 命令的成功分支、`CBGSETBMAPG` 的成功分支与 `CBGCLEAR` / `CBGCLEARBUTTON` /
+ * `CBGREMOVEBMAP` / `CBGREMOVERANGE` 变更后各调一次 —— 原版是「`cbgList` 变了就重画」，
+ * `EmueraConsole.cs:645-646` / `:679-680` 的 `Add + Sort` 与 `:563-614` 的三种清除都直接改
+ * 那张有序列；取色图两条（`:650-664` / `:616-621`）虽然不动列表，但 `buttonMapGid` 是
+ * 快照字段，改它同样要重推（否则渲染侧拿着旧 gid 做按下态比对）。
+ *
+ * ## 为什么从 aux 取 sink
+ *
+ * 本文件是**内建函数**层，执行语境只有 [BuiltinContext]，没有 `ExecContext.graphics`；
+ * sink 的唯一读面是 `RuntimeAux` 的 [GRAPHICS_SINK_SLOT]（`ExecContext` 在构造与赋值时
+ * 各发一份，见其 [com.eratw.port.core.sem.ExecContext.graphics] 的 KDoc）。
+ * 槽不存在（纯函数层单测）或仍是 [NoopGraphicsSink] 时整段跳过 ⇒ 既有装置零行为差。
+ *
+ * 快照里的 `widthPx` / `heightPx` 用 `peek` 取（**不建**缓冲条目：`GraphicsPool.get` 会
+ * 惰性建空条目，推快照不该改状态面）。
+ */
+private fun BuiltinContext.pushCbgLayers() {
+    val sink = aux.peek<GraphicsSinkRef>(GRAPHICS_SINK_SLOT)?.sink ?: return
+    if (sink === NoopGraphicsSink) return
+    sink.setCbgLayers(
+        cbg().snapshot(
+            graphics = aux.peek<GraphicsPool>(GRAPHICS_SLOT),
+            sprites = aux.peek<SpritePool>(SPRITE_SLOT),
+        ),
+    )
+}
 
 /**
  * `GCREATEFROMFILE` / `GLOAD` 最近一次「取不到像素」的原因，挂在同一个 aux 表上供**宿主回读**。
@@ -1961,9 +2112,20 @@ private fun isZeroAdvanceMark(codePoint: Int): Boolean {
  *   与 `ＡＢＣ`（实测按 CJK 档 18.25）这类**同一张退化网格里同档**的码位上分叉；
  * ③ 基准 `pc-golden-root.txt` 从未断言过宽高（只有 `:648` 的 `GDRAWTEXT=1`）⇒ 无对拍尺子。
  * 三项都属组长接线。空串 ⇒ 0 行 ⇒ 高 0，这一条与 PC 同值（实测 `"W=0 / H=0"`）。
+ *
+ * 溢出：脚本字号是 long 且只校验 `> 0`（:6562 无上界、:6584 只拒非正），`sizePx * 行数`
+ * 按 long 回绕会得出**负数高度**（正字号、正行数却把负值写进 RESULT_ARRAY[1]，脚本侧再拿去做
+ * 布局就是负值扩散）。原版这边是 float 测量后 `(long)` 截断（:6585-6587），float 在
+ * 4.6e18 量级早已没有像素级分辨力，读数本就不可用 ⇒ 溢出只在没有可靠读数的输入上可达；
+ * 这里饱和到 `Long.MAX_VALUE`，可达域内读数与旧实现完全一致。
  */
 private fun measureHeightPx(sizePx: Long, lineCount: Int): Long =
-    if (lineCount <= 0) 0L else if (lineCount == 1) sizePx else sizePx * lineCount
+    when {
+        lineCount <= 0 -> 0L
+        lineCount == 1 -> sizePx
+        sizePx > Long.MAX_VALUE / lineCount -> Long.MAX_VALUE
+        else -> sizePx * lineCount
+    }
 
 /**
  * 文本宽度：按 GenericTypographic 的行切分逐行量，取**最宽那一行**；
@@ -2050,8 +2212,23 @@ private fun measureTextPixels(
 private fun fontCatalogOf(c: BuiltinContext): FontSidecarCatalog {
     val catalog = c.aux.slot(SLOT_FONT_SIDECAR) { FontSidecarCatalog() }
     val ops = c.host.fileOps
-    catalog.reader = ops?.let { nonNullOps -> FontSidecarReader { path -> nonNullOps.readText(path) } }
+    if (ops == null) {
+        // 没有文件口：读取口置空。load 见到 null 不写负缓存，宿主稍后接上还能再查
+        // （FontSidecarCatalog.load 的「reader == null」分支）。
+        catalog.reader = null
+    } else {
+        // 读取口按宿主实例复用：GDRAWTEXT / GGETTEXTSIZE 是逐帧热路径，原先每次调用都新建一个
+        // 捕获 lambda 交给 reader，纯属可避免的分配。仅当宿主换了 FileOps 实例（或装配层塞了
+        // 别的读取口）时才重建。
+        val cur = catalog.reader as? HostTextReader
+        if (cur == null || cur.ops !== ops) catalog.reader = HostTextReader(ops)
+    }
     return catalog
+}
+
+/** 把宿主 [FileOps.readText] 直接转给 sidecar 目录；实例可复用，只在换读取口时重建。 */
+private class HostTextReader(val ops: FileOps) : FontSidecarReader {
+    override fun read(path: String): String? = ops.readText(path)
 }
 
 /**

@@ -179,7 +179,8 @@ class MethodCallExprLowerTest {
 
     /** 编译 MAIN + 全部被调方法，并给出 `FuncMeta`（isMethod / returnsStr / 形参桶数）。 */
     private fun model(main: List<Statement>, vararg callees: Callee): Model {
-        val c = ErbProgramCompiler()
+        // 本类钉「融合前」指令形状：显式关掉 MODERN-T1 条件位融合（上游 171e7d1b 后缺省开）。
+        val c = ErbProgramCompiler(fuseEvalJump = false)
         val tbl = callTable()
         val known = buildSet {
             add("MAIN")
@@ -458,7 +459,7 @@ class MethodCallExprLowerTest {
 
     @Test
     fun `非方法label表达式位调用 编译期按UsedNonMethodFunc原文抛`() {
-        val c = ErbProgramCompiler()
+        val c = ErbProgramCompiler(fuseEvalJump = false)
         val e = assertFailsWith<CompileException> {
             c.compileFunction(
                 FuncSig("MAIN", 0),

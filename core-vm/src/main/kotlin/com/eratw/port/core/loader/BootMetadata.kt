@@ -1,8 +1,10 @@
 package com.eratw.port.core.loader
 
 import com.eratw.port.core.Version
+import com.eratw.port.core.compile.CallDefaults
 import com.eratw.port.core.expr.Binary
 import com.eratw.port.core.expr.Expr
+import com.eratw.port.core.expr.FloatLiteral
 import com.eratw.port.core.expr.FormConversion
 import com.eratw.port.core.expr.FormPart
 import com.eratw.port.core.expr.FormStringTerm
@@ -82,12 +84,21 @@ class BootMetaFormatException(
  *
  * 记录序固定（先声明计数、后逐条），`end` 收尾；读侧校验「声明计数 == 实际条数」并拒绝
  * 未知关键字与多余内容，截断文件因此一定会报错而不是「静默少一半声明」。
- * `str-constants` 与 `load-warnings` 是 `end` 之前的两个**可选**段（都是尾部追加）：
+ * `str-constants` / `load-warnings` / `param-defaults` / `method-types` 是 `end` 之前的
+ * 四个**可选**段（都是尾部追加）：
  * `str-constants` 缺段读侧按空表处理、写出侧恒写（含 `str-constants 0`）；
  * `load-warnings` 缺段读侧按 null 处理（= 写出方没有告警通道），写出侧仅在模型非 null 时写
  * （空清单也写 `load-warnings 0`）。因此「无告警通道的元数据」经新写出端得到的文本与旧版
  * **逐字节相同**（新写出·旧读不炸），而旧侧车经新读侧得到 null 清单（旧写出·新读不炸，
  * 消费口径见 [loadWarningsOrEmpty]）。
+ * `param-defaults` / `method-types` 缺段读侧按空表处理，写出侧**空表整段省略**（R7 波 0）：
+ * 空表与缺段语义等价（都 = 「没有该数据」），故不必像 `load-warnings` 那样分 null/empty；
+ * 省略换来的是「不含本数据的模型文本与引入之前逐字节相同」。
+ *
+ * **为什么不升 `format-version`**：加可选段是**兼容改动** —— 旧读侧遇到不认识的关键字会在
+ * `next("end")` 处报「期望 end，实际 X」，是**明确失败**而不是静默错读，这正是想要的形态，
+ * 不需要版本号去表达它（同 `str-constants` / `load-warnings` 两次加段的先例，
+ * 以及 `decodeDefaultsInt` KDoc 里写下的同一条推理）。
  * 同一份 [BootMetadata] 两次 [encodeText] 逐字节相同（所有 Map 按键排序、函数按 index 排序）。
  *
  * 读侧的**实例共享**：`labels` / `fileByKey` / `functions` 三段里逐字相同的函数键、
@@ -185,7 +196,7 @@ class BootMetadata(
      * 消费点 ParserMediator.cs:148），且原版每次启动从源码重新装载、不存在「编译产物侧车」，
      * 因此没有任何持久化告警可对照。本段的三字段内容 = erbcc save-15a 的
      * `LoadWarning(file, line, message)`（1 基行号，口径同
-     * `.workbuddy/golden-pc-loadwarnings.txt` 前两列），保序直存、不去重不排序。
+     * `<internal-workdir>/golden-pc-loadwarnings.txt` 前两列），保序直存、不去重不排序。
      *
      * **null 与空清单严格区分**（CMP-82/83/84 教训：严格往返、禁静默容错）：
      * - null = 写出方没有告警通道（旧调用点 / 手构元数据）⇒ 编码**省略整段**，
@@ -194,7 +205,86 @@ class BootMetadata(
      * 旧侧车（无该段）读回为 null，消费方要「总是拿到清单」用 [loadWarningsOrEmpty]。
      */
     val loadWarnings: List<LoadWarning>? = null,
+    /**
+     * 形参缺省默认值表（`param-defaults` 段；R7 波 0）：函数键（大写）→ 逐位默认值，
+     * 与形参个数等长，null 位 = 该位没有可注入的默认值。
+     *
+     * **类型就是编译期那张表**：[com.eratw.port.core.compile.CallDefaults]（同一 typealias、
+     * 同一口径 —— 原版 `FunctionLabelLine.Def`，spec: FunctionLabelLine.cs:49 /
+     * CalledFunction.cs:167）。全量编译在**编译期**把它补进实参表，`.erbc` 容器因此不需要
+     * 新段；但**设备端补丁编译**手里只有补丁源码，没有全量语料的函数头，只能从侧车读回 ——
+     * 否则「补丁里省略实参」会退化成「省略位不写、形参保留既有值」，而 PC 全量编译会把
+     * 默认值补上：同一行 ERB 两种行为，不报错、不崩溃，只是数值悄悄不对（R7 不变量 I6 的起点）。
+     *
+     * **只收字面量**：`IntLiteral` / `StrLiteral`。依据两条 —— `LineParser.foldLiteralDefault`
+     * 只折叠这两类与一元 `PLUS`/`MINUS`/`BIT_NOT`，且 `CallDefaultsCollector.add` 只收
+     * `ParamDefault.expr != null`。非字面量默认值（全量语料实测 **37 处**，常量名/带尾注的行，
+     * 如 `DT_SELECT_NULL_IS_LAST#7 DEF_CELL_NULL`）本段 **不记**，与编译期口径完全一致：
+     * 那 37 处在全量编译里也是「不注入」，不是 0。
+     *
+     * **缺段 = 空表，且空表与缺段语义等价**（都 = 「没有默认值数据」），故不像 [loadWarnings]
+     * 那样区分 null/empty：写出侧空表整段省略，使「不含本数据的模型」文本与引入本段之前
+     * **逐字节相同**（旧侧车经新读侧、新写出端对无本数据模型，两个方向都不炸）。
+     */
+    val paramDefaults: CallDefaults = emptyMap(),
+    /**
+     * 方法（`#FUNCTION` / `#FUNCTIONS`）的返回类型三态（`method-types` 段；R7 波 0）：
+     * 函数键（大写）→ [MethodType]。**只记方法**，普通 `@label` 不入本表。
+     *
+     * 存在理由：[FuncMeta.returnsStr] 是**两态**，而编译期算它的口径是
+     * `scan.funcTypes[key] == OperandType.STR`（`CorpusCompile.kt:636`）—— 类型未知时也是
+     * false，与 INT 混为一谈。但 `buildExprCallTable` 要求三分桶，KDoc 原话：
+     * 「把可能实为 `#FUNCTION` 的方法误降级成字符串通道会**静默读错值**，而保守只是明确失败」
+     * （`tools/erbcc/.../bridge/ExprCalls.kt:19-38`）。`flags` 的 7 位已用满
+     * （[FUNC_FLAGS_MASK] = 0x7F，读侧严卡 0..127）装不下第三态，故另立本段。
+     *
+     * 消费口径：[knownMethodTypes] 直接喂 `buildExprCallTable`（`U` 桶靠**键缺失**表达，
+     * 与该函数 `Map<String, OperandType>` 参数的口径天然一致）；[unknownMethodKeys] 供
+     * 「点名报错」用（不变量 I7）。
+     *
+     * 缺段 = 空表（= 全部方法类型未知 ⇒ 一律不降级 ⇒ 保守明确失败）。
+     */
+    val methodTypes: Map<String, MethodType> = emptyMap(),
 ) {
+
+    /**
+     * 方法返回类型的**三态**（`method-types` 段的载荷）。
+     *
+     * 为什么不用 `OperandType`：那个枚举只有 `INT`/`STR` 两值（`core/expr/Expr.kt:4-7`），
+     * 第三态在 `buildExprCallTable` 里是靠「`methodTypes` 缺这个键」表达的。侧车若也只存两态，
+     * 「类型未知」与「根本没记这个方法」就分不开了 —— 而前者要**点名报错**（I7）、后者只是
+     * 「不是方法」。故侧车显式存三态，消费时再把 [UNKNOWN] 滤掉（见 [knownMethodTypes]）。
+     *
+     * TODO(verify)：4.981 fork 的第三种返回类型 `OperandType.FLOAT`（`#FUNCTIONF`）在本枚举里
+     * **没有对应态**。全量侧车的 `method-types` 由 `CorpusCompile` 的 `when` 产出，那里把
+     * `OperandType.FLOAT` 落进 `UNKNOWN`（`CorpusCompile.kt:869-874` 的 `else` 分支），于是 base
+     * 浮点方法被记成「类型未知」（消费侧 `PatchCompiler` 保守不降级 ⇒ 明确失败，非静默读错）。
+     * 补齐须**两模块同时改**：本文件加 `FLOAT('F')`（枚举 + `ofCode` + 读侧字母 + `knownMethodTypes`）
+     * 会撞两处穷尽 `when`（本文件 `knownMethodTypes` 与 `CorpusCompile.kt:888` 的桶校验，后者在
+     * `tools/erbcc`、不属 T7 的 write_set）⇒ 按 C-OWNERSHIP 交组长接线。4.981 语料零 `#FUNCTIONF`
+     * 声明 ⇒ 该缺口在真实语料不可观测（ADR-005「不可达」面）。
+     */
+    enum class MethodType(val code: Char) {
+        /** `#FUNCTION`：整型返回。 */
+        INT('I'),
+
+        /** `#FUNCTIONS`：字符串返回。 */
+        STR('S'),
+
+        /** 方法身份确定、返回类型未知（缺 `#FUNCTION`/`#FUNCTIONS` 之外的声明信息）。 */
+        UNKNOWN('U'),
+        ;
+
+        companion object {
+            /** 侧车载荷字母 → 枚举；非法字母返回 null（读侧据此当场拒绝）。 */
+            fun ofCode(code: Char): MethodType? = when (code) {
+                'I' -> INT
+                'S' -> STR
+                'U' -> UNKNOWN
+                else -> null
+            }
+        }
+    }
 
     /** 一条装载期告警（`文件:行 | 文案`；行 1 基，字段与 erbcc `LoadWarning` 一一对应）。 */
     data class LoadWarning(val file: String, val line: Int, val message: String)
@@ -211,6 +301,42 @@ class BootMetadata(
      */
     fun loadWarningsOrEmpty(): List<LoadWarning> = loadWarnings ?: emptyList()
 
+    /**
+     * [methodTypes] 的**已知类型**投影（`U` 桶滤掉），可直接喂
+     * `com.erbcc.bridge.buildExprCallTable` 的 `methodTypes` 参数。
+     *
+     * 为什么滤掉而不是映射成某个 `OperandType`：`buildExprCallTable` 的三分桶判据是
+     * `when (methodTypes[key]) { INT -> …; STR -> …; else -> unknownMethods }`，
+     * **键缺失**就是「未知」。滤掉 `U` 得到的表与全量编译喂进去的那张
+     * （`scan.funcTypes`，本身只含已知类型）逐键相同 —— 这正是波 0 出口判据⑤的对拍点。
+     */
+    fun knownMethodTypes(): Map<String, OperandType> {
+        if (methodTypes.isEmpty()) return emptyMap()
+        val out = HashMap<String, OperandType>(methodTypes.size)
+        for ((key, t) in methodTypes) {
+            when (t) {
+                MethodType.INT -> out[key] = OperandType.INT
+                MethodType.STR -> out[key] = OperandType.STR
+                // 未知类型不进表：`buildExprCallTable` 按「缺键 = 未知」落 unknownMethods。
+                MethodType.UNKNOWN -> Unit
+            }
+        }
+        return out
+    }
+
+    /**
+     * 返回类型**未知**的方法键集合（保序：按 [methodTypes] 的迭代序）。
+     *
+     * 补丁编译期用它点名报错（不变量 I7）：表达式位调用这些方法时**不许降级**，
+     * 只能明确失败 —— 静默选一条通道就是「可能读错值」。
+     */
+    fun unknownMethodKeys(): Set<String> {
+        if (methodTypes.isEmpty()) return emptySet()
+        val out = LinkedHashSet<String>()
+        for ((key, t) in methodTypes) if (t == MethodType.UNKNOWN) out.add(key)
+        return out
+    }
+
     /** `$标签` 运行期解析（`ProcessRuntime.LabelTable` 的同款语义；两侧键都大写归一）。 */
     fun labelPc(functionKey: String, label: String): Int? =
         labels[functionKey.uppercase()]?.get(label.uppercase())
@@ -226,6 +352,11 @@ class BootMetadata(
      *
      * 存在理由：`program.erbc` 的 SHA-256 只有落盘时才知道（写侧车的一方手里有产物字节），
      * 而模型在编译期就构造好了。用副本把它补进去，读侧仍能用 [encodeText] 原样回放出同一份文本。
+     *
+     * **新增字段必须加进这里**：本方法是逐字段转抄而不是 `copy()`（[BootMetadata] 是普通类），
+     * 漏一个字段就是「erbcc 写出的侧车丢掉该段」的静默数据丢失 —— 而且因为写出侧空表省略整段，
+     * 丢了之后文本仍然合法、装载仍然成功，只在补丁编译期才暴露成「没有默认值数据」。
+     * 波 0 新增的 [paramDefaults] / [methodTypes] 就是照这条加进来的。
      */
     fun withHeader(
         engineTag: String = this.engineTag,
@@ -241,6 +372,8 @@ class BootMetadata(
         engineTag = engineTag,
         programSha256 = programSha256,
         loadWarnings = loadWarnings,
+        paramDefaults = paramDefaults,
+        methodTypes = methodTypes,
     )
 
     /** 侧车文本（UTF-8 编码前的形态；LF 换行）。确定性见类 KDoc。 */
@@ -255,11 +388,38 @@ class BootMetadata(
             "globalDims=${globalDims.size}, privateDims=${privateDims.size}, " +
             "macros=${dimParseConfig.macros.size}, constants=${dimParseConfig.intConstants.size}, " +
             "strConstants=${dimParseConfig.strConstants.size}, " +
-            "loadWarnings=${loadWarnings?.size ?: "-"})"
+            "loadWarnings=${loadWarnings?.size ?: "-"}, " +
+            "paramDefaults=${paramDefaults.size}, methodTypes=${methodTypes.size})"
 
     companion object {
-        /** 侧车格式版本（与 `.erbc` 容器的 `ErbcFormat.VERSION_1` 无关，各自演进）。 */
-        const val FORMAT_VERSION = 1
+        /**
+         * 侧车格式版本（与 `.erbc` 容器的 `ErbcFormat.VERSION_1` 无关，各自演进）。
+         *
+         * v2：`private-dim` 尾部在 `isPrivate` 与 `dimsCsv` 之间插入 `isFloat`
+         * （4.981 fork 的 `#DIMF`）。读侧按版本门控：v1 侧车无该原子 ⇒ `isFloat=false`。
+         *
+         * v3：两个**可选**尾部原子（4.981 fork 的初值与 `#LOCALFSIZE`）：
+         * - `private-dim` 在 `defaultsStr` 之后追加 `float 初值`（裸浮点；`-`/缺省 = null）；
+         * - `function` 在 `localsSize` 之后、`position` 之前追加 `floatLocalSize`
+         *   （裸整数；缺省 = 0）。
+         *
+         * 同一版本内再追加一个 function 行原子：**`returnsFloat`（`#FUNCTIONF`，4.981
+         * fork 的第三种 MethodType）**。它与 `floatLocalSize` 同为裸整数、同在 `position`
+         * 之前，靠**成对写**消歧：`returnsFloat = true` 时 `floatLocalSize` **无条件占位**
+         * （为 0 也写），读侧「position 前有两个裸整数 ⇒ 前一个是 floatLocalSize、后一个是
+         * 0/1 的 returnsFloat；只有一个 ⇒ 就是 floatLocalSize；没有 ⇒ 两者默认」。
+         * 非浮点方法与 v2/v3 的既有行**逐字节相同**（真语料全部是这种形态）。
+         *
+         * 三者都按「**非默认值才写**」落地：没有浮点初值 / `#LOCALFSIZE` / `#FUNCTIONF`
+         * 的声明与 v2 逐字节相同（真语料全部是这种形态，产物字节不受影响）。读侧靠形态
+         * 消歧 —— function 行 position 恒是引号串，私有 dim 行在 `defaultsStr` 后还有记号
+         * 即浮点初值。v1/v2 侧车照旧可读，按无该原子处理。
+         *
+         * TODO(verify)：erbcc 的 `BootMetaWriter` 尚未产出 `private-dim` 的浮点初值原子
+         * （`CorpusCompile` 的 `#DIMF` 初值解析不在本路文件），见交付报告「需组长接线」。
+         * `function` 的两个原子（`floatLocalSize` / `returnsFloat`）已由本路接线。
+         */
+        const val FORMAT_VERSION = 3
 
         /** 默认 `engine` 标签（erbcc 写出时会带自己的版本，见 `BootMetaWriter`）。 */
         const val DEFAULT_ENGINE_TAG: String = Version.NAME + " " + Version.VERSION
@@ -366,12 +526,21 @@ private const val MAX_FUNCTION_INDEX = 1 shl 20
 private const val FUNC_FLAGS_MASK = 0x7F
 
 /**
+ * `OperatorCode` 名到枚举的一次性索引（P17）。
+ *
+ * [BootMetaCodec.opAt] 此前对每一条运算符字段线性扫 `OperatorCode.entries` 逐名比较；
+ * 表达式树密集（PRINTDATA / DATAFORM 载荷）的侧车会把这条 O(枚举数) 的扫描放大成整份
+ * 装载的热点。枚举名唯一（`enum class` 天然保证），`associateBy` 建一次即可 O(1)。
+ */
+private val OPERATOR_BY_NAME: Map<String, OperatorCode> = OperatorCode.entries.associateBy { it.name }
+
+/**
  * 侧车文本编解码。
  *
  * 记录一览（`<...>` = 裸整数，`"..."` = 引号串，`(...)` = 记号列表）：
  *
  * ```
- * format-version <1>
+ * format-version <3>
  * engine "<tag>"
  * program-sha256 "<hex>" | -
  * labels <F>                       # 以下 labelset 行数
@@ -382,11 +551,11 @@ private const val FUNC_FLAGS_MASK = 0x7F
  * data-sections <S>                # 以下 datasec 行数
  * datasec <stmtIndex> <groups>     # groups = ((expr...) (expr...))
  * functions <N>
- * function <index> <defIndex> "<key>" "<name>" <flags> <argInt> <argStr> <localSize> <localsSize> "<position>"
+ * function <index> <defIndex> "<key>" "<name>" <flags> <argInt> <argStr> <localSize> <localsSize> [<floatLocalSize> [<returnsFloat>]] "<position>"
  * global-dims <N>
  * global-dim "<file>" <line> "<raw>"
  * private-dims <N>
- * private-dim "<funcKey>" "<name>" <isStr> <isConst> <isRef> <isGlobal> <isSavedata> <isCharaData> <isStatic> <isPrivate> <dimsCsv> (<defaultsIntCsv>|-|"") (<defaultsStrList>|-)
+ * private-dim "<funcKey>" "<name>" <isStr> <isConst> <isRef> <isGlobal> <isSavedata> <isCharaData> <isStatic> <isPrivate> <isFloat> <dimsCsv> (<defaultsIntCsv>|-|"") (<defaultsStrList>|-) [<defaultsFloat>]
  * dim-config <systemSaveInBinary 0|1>
  * macros <N>
  * macro "<NAME>" "<body>"
@@ -396,6 +565,10 @@ private const val FUNC_FLAGS_MASK = 0x7F
  * str-const "<NAME>" "<value>"
  * load-warnings <N>                # 可选段：写出方无告警通道（模型 null）时整段省略
  * load-warn "<file>" <line> "<message>"
+ * param-defaults <N>               # 可选段（R7 波 0）：空表整段省略
+ * param-default "<FuncKey>" (<expr>|-)...   # 逐位，`-` = 该位无默认值；expr 只认 int/str
+ * method-types <N>                 # 可选段（R7 波 0）：空表整段省略
+ * method-type "<FuncKey>" <I|S|U>
  * end
  * ```
  *
@@ -457,7 +630,15 @@ private object BootMetaCodec {
                 .append(flagsOf(f)).append(' ')
                 .append(f.argIntCount).append(' ').append(f.argStrCount).append(' ')
                 .append(f.localSize).append(' ').append(f.localsSize).append(' ')
-                .append(quote(f.position)).append('\n')
+            // v3 可选原子：非 0 才写（0 = 未声明 #LOCALFSIZE；行字节与 v2 相同）。
+            // 浮点方法（returnsFloat）额外占用一个 0/1 原子；此时 floatLocalSize **无条件占位**
+            // （为 0 也写）—— 读侧才有无歧义的「一/两个裸整数」判据（见 FORMAT_VERSION KDoc）。
+            if (f.returnsFloat) {
+                sb.append(f.floatLocalSize).append(' ').append(1).append(' ')
+            } else if (f.floatLocalSize != 0) {
+                sb.append(f.floatLocalSize).append(' ')
+            }
+            sb.append(quote(f.position)).append('\n')
         }
 
         sb.append("global-dims ").append(m.globalDims.size).append('\n')
@@ -474,11 +655,15 @@ private object BootMetaCodec {
                 .append(' ').append(bit(s.isRef)).append(' ').append(bit(s.isGlobal))
                 .append(' ').append(bit(s.isSavedata)).append(' ').append(bit(s.isCharaData))
                 .append(' ').append(bit(s.isStatic)).append(' ').append(bit(s.isPrivate))
+                .append(' ').append(bit(s.isFloat))
                 .append(' ').append(if (s.dims.isEmpty()) "-" else s.dims.joinToString(",")).append(' ')
                 // 空数组（非 null）用空引号串写出：旧写法写空缺格会让读侧字段整体左移（CMP-83）
                 .append(s.defaultsInt?.let { if (it.isEmpty()) "\"\"" else it.joinToString(",") } ?: "-")
                 .append(' ')
-                .append(s.defaultsStr?.let { list(it.map(::quote)) } ?: "-").append('\n')
+                .append(s.defaultsStr?.let { list(it.map(::quote)) } ?: "-")
+                // v3 可选原子：只有写了浮点初值才追加（行字节与 v2 相同）。
+                .apply { s.defaultsFloat?.let { append(' ').append(it) } }
+                .append('\n')
         }
 
         val cfg = m.dimParseConfig
@@ -513,6 +698,29 @@ private object BootMetaCodec {
             }
         }
 
+        // 形参默认值（R7 波 0）：段尾追加、**空表整段省略** ⇒ 不含本数据的模型文本与引入
+        // 本段之前逐字节相同。键排序保证确定性；逐位保序（位号就是形参序，重排即错位）；
+        // `-` = 该位无默认值（`CallDefaults` 的 null 位）。载荷走 encodeExpr 的 int/str 记号，
+        // 不新造语法 —— 写出侧只会产这两种（见 [paramDefaults] KDoc 的「只收字面量」）。
+        if (m.paramDefaults.isNotEmpty()) {
+            sb.append("param-defaults ").append(m.paramDefaults.size).append('\n')
+            for (k in m.paramDefaults.keys.sorted()) {
+                sb.append("param-default ").append(quote(k)).append(' ')
+                sb.append(list(m.paramDefaults.getValue(k).map { d -> d?.let(::encodeExpr) ?: "-" }))
+                sb.append('\n')
+            }
+        }
+
+        // 方法返回类型三态（R7 波 0）：同上，空表整段省略；字母裸写（`I`/`S`/`U` 都是单字符
+        // 且不与任何数字/引号记号混淆，故不加引号 —— 与 flags 等位字段同一写法）。
+        if (m.methodTypes.isNotEmpty()) {
+            sb.append("method-types ").append(m.methodTypes.size).append('\n')
+            for (k in m.methodTypes.keys.sorted()) {
+                sb.append("method-type ").append(quote(k)).append(' ')
+                    .append(m.methodTypes.getValue(k).code).append('\n')
+            }
+        }
+
         sb.append("end\n")
         return sb.toString()
     }
@@ -534,6 +742,7 @@ private object BootMetaCodec {
     /** 表达式 → 单行记号串（`when` 作表达式用，新增 [Expr] 实现时编译期失败）。 */
     private fun encodeExpr(e: Expr): String = when (e) {
         is IntLiteral -> "(int ${e.value} ${e.line} ${e.col})"
+        is FloatLiteral -> "(float ${e.value} ${e.line} ${e.col})"
         is StrLiteral -> "(str ${quote(e.value)} ${e.line} ${e.col})"
         is NullTerm -> "(null ${bit(e.isInt)} ${e.line} ${e.col})"
         is VarRef -> "(var ${quote(e.name)} ${e.subKey?.let(::quote) ?: "-"} ${typeOf(e.operandType)} " +
@@ -1430,6 +1639,25 @@ private object BootMetaCodec {
             if (argStr < 0) throw failAt(r.lineNo, "function argStrCount 为负: $argStr")
             if (localSize < 0) throw failAt(r.lineNo, "function localSize 为负: $localSize")
             if (localsSize < 0) throw failAt(r.lineNo, "function localsSize 为负: $localsSize")
+            // v3 可选原子（见 FORMAT_VERSION）：position 恒是引号串，故「下一个不是引号串」
+            // 就是可选区。一个裸整数 = floatLocalSize（v1/v2 侧车没有该位 ⇒ 0）；
+            // 两个 = 前 floatLocalSize、后 returnsFloat（写出侧对浮点方法成对写，见 encode）。
+            val floatLocalSize: Int
+            val returnsFloat: Boolean
+            if (version >= 3 && !sc.tryQuote()) {
+                floatLocalSize = atomInt(sc, "function floatLocalSize", r.lineNo)
+                returnsFloat = if (!sc.tryQuote()) atomBool(sc, "function returnsFloat", r.lineNo) else false
+            } else {
+                floatLocalSize = 0
+                returnsFloat = false
+            }
+            if (floatLocalSize < 0) throw failAt(r.lineNo, "function floatLocalSize 为负: $floatLocalSize")
+            if (floatLocalSize > 0xFFFF) throw failAt(r.lineNo, "function floatLocalSize 越 16 位域: $floatLocalSize")
+            if (returnsFloat && flags and 2 == 0) {
+                // MethodType 只存在于方法（fork LogicalLineParser.cs:183-193 先置 IsMethod）；
+                // 侧车是外部输入，非方法带浮点位只可能来自坏档。
+                throw failAt(r.lineNo, "function returnsFloat 只允许出现在 #FUNCTIONF 方法上（flags 未置方法位）")
+            }
             val position = atomString(sc, "function position", r.lineNo)
             if (!sc.atEnd()) throw BootMetaFormatException("第 ${r.lineNo} 行：function 有多余内容")
             functions.add(
@@ -1448,6 +1676,8 @@ private object BootMetaCodec {
                     argStrCount = argStr,
                     localSize = localSize,
                     localsSize = localsSize,
+                    floatLocalSize = floatLocalSize,
+                    returnsFloat = returnsFloat,
                     defIndex = defIndex,
                     position = position,
                 ),
@@ -1498,9 +1728,14 @@ private object BootMetaCodec {
             val isCharaData = atomBool(sc, "isCharaData", r.lineNo)
             val isStatic = atomBool(sc, "isStatic", r.lineNo)
             val isPrivate = atomBool(sc, "isPrivate", r.lineNo)
+            // v2 起带 `#DIMF` 浮点标记；v1 侧车无此原子，按整数/字符串声明读入（isFloat=false）。
+            val isFloat = if (version >= 2) atomBool(sc, "isFloat", r.lineNo) else false
             val dims = intCsv(atomBare(sc, "private-dim dims", r.lineNo), r.lineNo)
             val defaultsInt = decodeDefaultsInt(sc, r.lineNo)
             val defaultsStr = decodeStrListOpt(sc, r.lineNo)
+            // v3 可选原子（见 FORMAT_VERSION）：defaultsStr 之后还有记号即浮点初值；
+            // v1/v2 侧车到此已经行尾 ⇒ null。
+            val defaultsFloat = if (version >= 3 && !sc.atEnd()) decodeDefaultsFloat(sc, r.lineNo) else null
             if (!sc.atEnd()) throw BootMetaFormatException("第 ${r.lineNo} 行：private-dim 有多余内容")
             privateDims.add(
                 BootMetadata.PrivateDim(
@@ -1516,8 +1751,10 @@ private object BootMetaCodec {
                         isCharaData = isCharaData,
                         isStatic = isStatic,
                         isPrivate = isPrivate,
+                        isFloat = isFloat,
                         defaultsInt = defaultsInt,
                         defaultsStr = defaultsStr,
+                        defaultsFloat = defaultsFloat,
                     ),
                 ),
             )
@@ -1594,6 +1831,51 @@ private object BootMetaCodec {
                 null
             }
 
+        // `param-defaults` 段可选（段序在 `load-warnings` 之后、`end` 之前；R7 波 0）。
+        // 缺段 = 空表（语义等价，见 [BootMetadata.paramDefaults] KDoc）。计数同样过 checkCount：
+        // 坏档在第一条 param-default 之前就失败，不会先按声明数预分配。
+        // 函数键走 internKey（与 labels/files/functions 同一驻留池 ⇒ 同实例，查表零字符串比较）。
+        val paramDefaults = LinkedHashMap<String, List<Expr?>>()
+        if (cursor.peek() && cursor.rec.matches("param-defaults")) {
+            val defCount = atomInt(next("param-defaults"), "param-defaults 计数")
+            checkCount(defCount, "param-defaults 计数")
+            repeat(defCount) {
+                val r = next("param-default")
+                use(r)
+                val k = internKey(atomString(sc, "param-default 函数键", r.lineNo))
+                val defs = decodeParamDefaults(sc, r.lineNo)
+                if (!sc.atEnd()) throw BootMetaFormatException("第 ${r.lineNo} 行：param-default 有多余内容")
+                // CMP-82 同口径：Map 段同名后者覆盖会**无声**（写出侧按键排序，重复只可能来自坏档）。
+                if (paramDefaults.put(k, defs) != null) {
+                    throw failAt(r.lineNo, "param-default 函数键重复: $k")
+                }
+            }
+        }
+
+        // `method-types` 段可选（R7 波 0）。字母只认 I/S/U —— 写出侧恒写这三个之一，
+        // 其余形态（多字符、小写、数字）一律当场拒绝，不猜也不折中。
+        val methodTypes = LinkedHashMap<String, BootMetadata.MethodType>()
+        if (cursor.peek() && cursor.rec.matches("method-types")) {
+            val mtCount = atomInt(next("method-types"), "method-types 计数")
+            checkCount(mtCount, "method-types 计数")
+            repeat(mtCount) {
+                val r = next("method-type")
+                use(r)
+                val k = internKey(atomString(sc, "method-type 函数键", r.lineNo))
+                val bare = atomBare(sc, "method-type 类型位", r.lineNo)
+                val t = when {
+                    bare.eq("I") -> BootMetadata.MethodType.INT
+                    bare.eq("S") -> BootMetadata.MethodType.STR
+                    bare.eq("U") -> BootMetadata.MethodType.UNKNOWN
+                    else -> throw failAt(r.lineNo, "method-type 类型位只认 I/S/U，实为 ${bare.text}")
+                }
+                if (!sc.atEnd()) throw BootMetaFormatException("第 ${r.lineNo} 行：method-type 有多余内容")
+                if (methodTypes.put(k, t) != null) {
+                    throw failAt(r.lineNo, "method-type 函数键重复: $k")
+                }
+            }
+        }
+
         val end = next("end")
         if (!end.payloadBlank()) throw BootMetaFormatException("第 ${end.lineNo} 行：end 后不应有内容")
         if (cursor.peek()) {
@@ -1616,6 +1898,8 @@ private object BootMetaCodec {
             engineTag = engineTag,
             programSha256 = sha,
             loadWarnings = loadWarnings,
+            paramDefaults = paramDefaults,
+            methodTypes = methodTypes,
         )
     }
 
@@ -1765,6 +2049,58 @@ private object BootMetaCodec {
         return n.items.map { if (it is Node.Quoted) it.text else throw failAt(line, "defaultsStr 元素必须是引号串") }
     }
 
+    /**
+     * v3 的 `defaultsFloat` 原子（`private-dim` 行尾，见 [BootMetaCodec] 的格式说明）。
+     *
+     * `-` = null（未写浮点初值）；其余必须是**有限**浮点。写出侧用
+     * [Double.toString]（`1.5`、`1.0`、`1.0E10` 这类 `toDoubleOrNull` 可逆形态）；
+     * 读侧拒绝 NaN/Infinity（`DimParser` 的初值折叠产不出它们，出现即为存储位腐）。
+     */
+    private fun decodeDefaultsFloat(sc: Scanner, line: Int): Double? {
+        val n = sc.node()
+        if (n !is Node.Bare) throw failAt(line, "defaultsFloat 必须是裸浮点或 -")
+        if (n.eq(DASH)) return null
+        val v = n.text.toDoubleOrNull() ?: throw failAt(line, "defaultsFloat 不是浮点数: ${n.text}")
+        if (!v.isFinite()) throw failAt(line, "defaultsFloat 不是有限数: ${n.text}")
+        return v
+    }
+
+    /**
+     * `param-default` 的逐位默认值表：`( … )`，每项是 `(int …)` / `(str …)` 或裸 `-`（无默认值）。
+     *
+     * **值域闸（CMP-82 口径）**：写出侧只可能产 `IntLiteral` / `StrLiteral`（依据见
+     * [BootMetadata.paramDefaults] KDoc），故 `decodeExpr` 解出别的形态（`(var …)` / `(call …)` /
+     * `(binary …)` …）一律当场拒绝。静默收下等于让一份手改侧车把「编译期明确不注入」的位
+     * （语料里那 18 处常量名默认值）变成「运行期求值」—— 语义直接跑偏，且不报错。
+     *
+     * 空表 `()` 接受（= 该函数没有可注入的默认值；`CallDefaultsCollector.add` 的
+     * `if (injectable)` 保证写出侧不会产它，但收下后能**原样写回** ⇒ 文本往返互逆，不亏）。
+     */
+    private fun decodeParamDefaults(sc: Scanner, line: Int): List<Expr?> {
+        val n = sc.node()
+        if (n !is Node.Lst) throw failAt(line, "param-default 默认值表必须是列表")
+        if (n.items.isEmpty()) return emptyList()
+        val out = ArrayList<Expr?>(n.items.size)
+        for (item in n.items) {
+            if (item is Node.Bare && item.eq(DASH)) {
+                out.add(null)
+                continue
+            }
+            val e = decodeExpr(item, line)
+            if (e !is IntLiteral && e !is StrLiteral) {
+                throw failAt(line, "param-default 默认值只认字面量（int/str），实为 ${exprTagOf(item)}")
+            }
+            out.add(e)
+        }
+        return out
+    }
+
+    /** 表达式记号的标签（`int` / `str` / `var` …）；只用于错误消息，不进模型。 */
+    private fun exprTagOf(node: Node): String {
+        val first = (node as? Node.Lst)?.items?.firstOrNull()
+        return if (first is Node.Bare) first.text else "非表达式记号"
+    }
+
     private fun decodeGroups(sc: Scanner, line: Int): List<List<Expr>> {
         val n = sc.node()
         if (n !is Node.Lst) throw failAt(line, "datasec 载荷必须是组列表")
@@ -1833,8 +2169,7 @@ private object BootMetaCodec {
         fun opAt(i: Int): OperatorCode {
             val atom = a[i] as? Node.Atom ?: throw failAt(line, "表达式 ${tag.text} 第 $i 字段不是原子")
             val text = atom.text
-            return OperatorCode.entries.firstOrNull { it.name == text }
-                ?: throw failAt(line, "未知运算符 $text")
+            return OPERATOR_BY_NAME[text] ?: throw failAt(line, "未知运算符 $text")
         }
 
         // `when (tag)` 的旧写法要为分支判定先物化标签串；换成区间等值比较（11 个分支 +

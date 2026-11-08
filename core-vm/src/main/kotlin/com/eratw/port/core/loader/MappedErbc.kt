@@ -8,6 +8,8 @@ import com.eratw.port.core.code.ErbcHeader
 import com.eratw.port.core.code.Instruction
 import com.eratw.port.core.code.MappedCodeSource
 import com.eratw.port.core.code.Program
+import com.eratw.port.core.code.ProgramBase
+import com.eratw.port.core.diag.LockWatch
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -479,13 +481,23 @@ class MappedErbc internal constructor(
         maxEnsureDepth: Int = MAX_ENSURE_DEPTH,
         /** 兼容装载档：true = 解码期去重与校验串行（见 [ProgramLoader.loadMapped] 的 `compat`）。 */
         serialPhases: Boolean = false,
+        /**
+         * 本段基线（R7-C3 的映射路同步；[ProgramBase.NONE] = 全量产物口径）。
+         *
+         * [ProgramBase.NONE] 时与不传基线的装载**逐位相同**（既有调用点零改动）；非零时
+         * 本产物是绝对下标空间上的**本段窗口**（补丁产物）：池按基线重灌、[Program] 六基线
+         * 原样传入、validate 按绝对 pc/下标判界 —— 判据与 `ErbcReader.decode(bytes, base)`
+         * 逐字同源（同产物两条装载路径 8 访问点读数逐位一致是 `ErbcStreamBaseTest` 的主钉）。
+         * 池/语句/函数表仍走惰性视图，带基线装载不物化任何池条目。
+         */
+        base: ProgramBase = ProgramBase.NONE,
     ): Program {
         checkOpen()
         checkSectionLayout()
         // 分段 mark（M11-MEM）：段布局校验只读几个 u32，但它是「段表被改坏」的失败点，
         // 失败屏要能把它与真正的解码段区分开。
         mark?.onStage("program.${LoadStages.SECTION_TABLE}")
-        return ProgramLoader.decodeMapped(this, mark, lazyStatements, maxEnsureDepth, serialPhases)
+        return ProgramLoader.decodeMapped(this, mark, lazyStatements, maxEnsureDepth, serialPhases, base)
     }
 
     /**
@@ -819,20 +831,47 @@ class MappedProgramSource internal constructor(
     fun program(mark: LoadStageMark?): Program {
         checkHandleOpen()
         cached?.let { return it }
-        synchronized(this) {
+        // FEEL1-L3 探针（只观测）：整池解码段的「排队等待 / 持锁时长」。未挂载 = watch == null
+        // ⇒ 不取时钟、不进 LockWatch、零分配。锁还是这一把、段还是这一段：
+        // 块的值就是原来 `return p` 的那个实例（同一监视器、同一次解码、同一返回值），
+        // 换成交出块值只为了让记录点落在监视器**外侧**（LockWatch 的叶锁不变式）。
+        // 内层 `cached?.let { return it }` 的「别的线程已物化」早退**不记样本**。
+        val watch = LockWatch.handleOrNull()
+        val enterNs = if (watch === null) 0L else System.nanoTime()
+        var acquiredNs = 0L
+        var sizeTag = 0L
+        val created = synchronized(this) {
+            if (watch !== null) acquiredNs = System.nanoTime()
             cached?.let { return it }
             checkHandleOpen()
             val p = file?.toProgram(mark, lazyStatements = !eagerStatements)
                 ?: throw ErbcLoadException("$pathText: 映射已关闭，不能再取段数据")
             cached = p
             isMaterialized = true
-            return p
+            if (watch !== null) sizeTag = file?.byteSize?.toLong() ?: 0L
+            p
         }
+        // tag = 本份产物的字节数（哪一块 erbc 解了三秒）。
+        if (watch !== null) {
+            watch.noteSegment(
+                LockWatch.ID_ERBC_MATERIALIZE, enterNs, acquiredNs, System.nanoTime(), sizeTag,
+            )
+        }
+        return created
     }
 
     override fun close() {
+        // FEEL1-L3 探针（只观测，锁语义一字未动）：本句柄监视器的「排队等待 / 持锁时长」。
+        // 未挂载 = watch == null ⇒ 不取时钟、不进 LockWatch、零分配；监视器还是这一把、
+        // 段还是这一段（`toClose?.close()` 照旧留在锁外，见原注释）。
+        // 重复 close 的早退（`closedReason != null`）按 LockWatch 类 KDoc「早退不记样本」跳过。
+        val watch = LockWatch.handleOrNull()
+        val enterNs = if (watch === null) 0L else System.nanoTime()
+        var acquiredNs = 0L
+        var handoffTag = 0L
         var toClose: MappedErbc? = null
         synchronized(this) {
+            if (watch !== null) acquiredNs = System.nanoTime()
             if (closedReason != null) return
             val p = cached
             // 句柄不留强引用：惰性形态下通道与映射的寿命只该跟着 Program 走，调用方丢掉
@@ -840,9 +879,18 @@ class MappedProgramSource internal constructor(
             cached = null
             val keepChannel = p != null && p.holdsLazyStatementPool
             closedReason = if (keepChannel) "句柄已关闭（通道留给惰性语句池）" else "映射已关闭"
+            // tag = 这一条 close 走的是哪一支：1 = 通道留给惰性语句池，2 = 通道当场关掉
+            // （两支在同一次监视器里排队，锁序表的「互等」病灶就在这一对，见 LockWatch 类 KDoc）。
+            if (watch !== null) handoffTag = if (keepChannel) 1L else 2L
             val f = file
             file = null
             if (!keepChannel) toClose = f
+        }
+        // 记录点在监视器**外侧**：与 program 那处同一口径（LockWatch 的监视器是叶锁）。
+        if (watch !== null) {
+            watch.noteSegment(
+                LockWatch.ID_ERBC_CLOSE, enterNs, acquiredNs, System.nanoTime(), handoffTag,
+            )
         }
         // 关通道放在锁外：close 只做状态切换，真正的 close 不持有句柄锁（避免与 Program 侧
         // 的惰性解码相互等待）。惰性产物这里 toClose 恒 null ⇒ 通道留给 Program。

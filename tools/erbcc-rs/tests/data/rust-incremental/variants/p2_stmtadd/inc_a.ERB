@@ -1,0 +1,7 @@
+; 探针语料 A（变体 p2_stmtadd：新增一条 PRINTFORML 语句 —— 语句池 +1，后档 marker 下标全体位移）
+@IFA_ONE(ARG, ARG:1, ARGS)
+	PRINTFORML A1-STR {ARG} {ARG:1} %ARGS%
+@IFA_TWO
+	PRINTFORML A2-STR
+	PRINTFORML A3-STR
+	CALL IFA_ONE, 1, 2, "A-CALL-LIT"

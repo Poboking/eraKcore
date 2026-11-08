@@ -1,0 +1,33 @@
+# erbcc-rs / rust-staging 车道登记：闸 1 认账读数（Haruki 机实测）
+# 产法：python devtools/verify_rust_erbc_staging.py gate1 --register --register-into 1101
+# 时间：2026-11-01 16:18:17　语料：C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\tests\data\rust-manifest\corpus
+# 编译器指纹（现读 pin 目录 manifest.txt）：compiler-digest 4ef357c0758d9635927d7e4c5c3cb11315a3ea8d1faef94d324438c3cdb8ee86　compiler-sources 194
+# 机相关：erbc-freshness / erbc-source / game-root 含产出机绝对路径；换机（或改 core-vm 源码树）后重跑本命令刷新，不放宽判据。
+
+## 档 A（corpus-root 兜底档）
+erbc-source C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-staging\gate1-20261101-161653\rust\erbc.v1
+erbc-dir-fallback false
+erbc-freshness verified(erbcc 0.1.0-SNAPSHOT, compiler 4ef357c0758d, container v2, program 152f8d4430ce5a5b0e2ead87696608a603ff1cc0f4396fb7c54949439a4db9e3, 源 3 个文件来自 C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\tests\data\rust-manifest\corpus)
+program-sha256 152f8d4430ce5a5b0e2ead87696608a603ff1cc0f4396fb7c54949439a4db9e3
+program-bytes 950
+program-parts 0
+manifest-sha256 126dbd6e1d7a966e7412bb92ede9a5947f453e0577ca543757390a9749c41fdb
+entries-erbc 4
+bytes-erbc 3373
+staged-entries 4
+staged-bytes 3373
+program-mode stored
+
+## 档 B（-PeratwGameRoot/ERB 正路档）
+erbc-source C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-staging\gate1-20261101-161653\rust\erbc.v1
+erbc-dir-fallback false
+erbc-freshness verified(erbcc 0.1.0-SNAPSHOT, compiler 4ef357c0758d, container v2, program 152f8d4430ce5a5b0e2ead87696608a603ff1cc0f4396fb7c54949439a4db9e3, 源 3 个文件来自 C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-staging\gate1-20261101-161653\game\ERB)
+program-sha256 152f8d4430ce5a5b0e2ead87696608a603ff1cc0f4396fb7c54949439a4db9e3
+program-bytes 950
+program-parts 0
+manifest-sha256 126dbd6e1d7a966e7412bb92ede9a5947f453e0577ca543757390a9749c41fdb
+entries-erbc 4
+bytes-erbc 3373
+staged-entries 10
+staged-bytes 3782
+program-mode stored

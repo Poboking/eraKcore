@@ -54,10 +54,12 @@ object GameBaseLoader {
             val key = cols[0]
             when (key) {
                 "コード" -> {
-                    // GameBase.cs:132-137：先赋值再判 0
-                    gameCode = tryatoi(cols[1]) ?: 0L
-                    if (gameCode == 0L) {
-                        warnings.add("GameBase.csv: 代码为 0 或非整数（原版 SaveCodeIs0 告警）")
+                    // GameBase.cs:132-136：`if (tryatoi(array[1], out ScriptUniqueCode) && ScriptUniqueCode == 0L)`
+                    // 才 Warn ⇒ 解析失败（tryatoi false，out 落 0）**不告警**，只有真读到 0 码才告。
+                    val parsed = tryatoi(cols[1])
+                    gameCode = parsed ?: 0L
+                    if (parsed != null && parsed == 0L) {
+                        warnings.add("GameBase.csv: 代码为 0（原版 SaveCodeIs0 告警）")
                     }
                 }
                 // GameBase.cs:138-140：ScriptVersionDefined = tryatoi(...)，ScriptVersion 同源落 0

@@ -241,6 +241,36 @@ class VmStringRetTest {
         assertEquals(null, vm.stringResult, "每次 run 开始重置（Vm.kt run 初始化），不得读到残留")
     }
 
+    @Test
+    fun `掉尾方法的内层字符串调用不得污染 stringResult`() {
+        // 复刻 ProcessRuntime.invokeUserMethod 的 nested.run(meta.index)：从 callee 本体
+        // 直接起跑，它内部 _CALL 一个 #FUNCTIONS、随后走编译器尾声兜底 `_RET NONE`。
+        // 修复前内层 `_RETS`（depth 1）把地名写进 stringResult，宿主于是把内层返回值
+        // 当成掉尾方法的返回值；修复后内层只经 leaveFrameStr 写调用方返回槽。
+        val b = CodeBuilder()
+        val main = b.declareFunction("main", 0, 0)
+        b.emit(Opcode._HALT)
+
+        val callee = b.declareFunction("callee", b.here(), 0)
+        b.emit(Opcode._CALL, 2, STR_RET_FLAG, SlotAddr.local(1)) // inner()，返回值落 R1
+        b.emit(Opcode._PRINT_STR, SlotAddr.local(1), 1) // 帧返回通道仍须拿到内层的串
+        b.emit(Opcode._RET, SlotAddr.NONE) // = 编译器尾声兜底返回
+
+        val inner = b.declareFunction("inner", b.here(), 0)
+        b.emit(Opcode._SET_STR, SlotAddr.local(0), b.string("山道·通往沼泽之道"))
+        b.emit(Opcode._RETS, SlotAddr.local(0))
+
+        b.setFunctionSlots(main, 1)
+        b.setFunctionSlots(callee, 2)
+        b.setFunctionSlots(inner, 1)
+
+        val host = StrRetHost()
+        val vm = VirtualMachine(b.build(0), host)
+        vm.run(1) // callee 作第 0 帧（同 nested.run(meta.index)）
+        assertEquals("山道·通往沼泽之道\n", host.output.toString(), "内层返回值仍须经返回槽交给调用方")
+        assertEquals(null, vm.stringResult, "内层 _RETS 不得写顶层 stringResult，否则掉尾方法会返回地名")
+    }
+
     // ------------------------------------------------------------------
     // 帧生命周期：enter/exit 配对、深度、尾跳
     // ------------------------------------------------------------------

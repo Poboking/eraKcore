@@ -1,0 +1,5 @@
+kind	file	function	line	name	detail	count
+VAR_UNBOUND	A1_UNBOUND.ERB	AUDIT_A1	1	AUDIT_NO_SUCH_VAR_A1	EXISTVAR("AUDIT_NO_SUCH_VAR_A1") 的名字在运行期命名空间里不存在（运行期现解析，indices=0 noArg=false）	1
+KEYWORD_UNBOUND	A3_RELATION.ERB	AUDIT_A3	1	RELATION:NOKEY	未定义角色名 "NOKEY"（chara*.csv 中不存在）	1
+KEYWORD_USER_VAR	A2_KEYWORD.ERB	AUDIT_A2	3	AUDIT_LOCAL_VAR:NOKEY	用户自定义变量 AUDIT_LOCAL_VAR 没有 ERD 表（未找到 AUDIT_LOCAL_VAR.csv 或 AUDIT_LOCAL_VAR@1.csv）	2
+COMPILE_DIM_WARNING	A6_PRIVWARN.ERB		1	AUDIT_P6A	#DIM 布局面丢弃（level 2）: AUDIT_P6A 的尺寸 'NO_SUCH_MACRO' 不能求值为单个整数常量（原版 UserDefinedVariableData.cs:325-328 HasNotExpressionAfterComma） | #DIM AUDIT_P6A, NO_SUCH_MACRO	1

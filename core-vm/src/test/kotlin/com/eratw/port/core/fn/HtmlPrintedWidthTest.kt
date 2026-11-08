@@ -5,6 +5,8 @@ import com.eratw.port.core.expr.EvalContext
 import com.eratw.port.core.expr.Value
 import com.eratw.port.core.expr.VariableReader
 import com.eratw.port.core.host.CellWidth
+import com.eratw.port.core.host.SPRITE_SLOT
+import com.eratw.port.core.host.SpritePool
 import com.eratw.port.core.vars.VariableStore
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -104,6 +106,17 @@ private fun pwLen(html: String, drawablePx: Long, fontSize: Long = 18L): Long =
     HtmlStrictParser(html, pwMeasure(fontSize), { it }, fontSize, 0xFFFF00, drawablePx, collectRows = false)
         .length().toLong()
 
+// ===== IMG-A4 I1：无 width 属性的 <img> 按图元真实宽高比折算（ConsoleImagePart.cs:67-71）=====
+
+/** 尺寸源查表（生产形状 = BuiltinHost.imageSizeOf / aux 的 SpritePool）：`a.png` → 300×100，其余 = 图元缺失。 */
+private val pwSizes: (String) -> ImagePixelSize? =
+    { src -> if (src.equals("a.png", ignoreCase = true)) ImagePixelSize(300, 100) else null }
+
+/** 与 [pwLen] 同构，但接上图元尺寸源（IMG-A4 的解析器入参）。 */
+private fun pwLenSized(html: String, drawablePx: Long, fontSize: Long = 18L): Long =
+    HtmlStrictParser(html, pwMeasure(fontSize), { it }, fontSize, 0xFFFF00, drawablePx, collectRows = false, imageSizeOf = pwSizes)
+        .length().toLong()
+
 class HtmlPrintedWidthTest {
 
     // ===== FN-01：img / shape 的打印宽（像素） =====
@@ -112,11 +125,65 @@ class HtmlPrintedWidthTest {
     fun `img 无 width 属性时按 AltText 上屏 宽度即该文案的度量`() {
         // ConsoleImagePart.cs:60-64 + :110-114：取不到图元 ⇒ Text = AltText，宽 = 文本度量
         // AltText 文案由 openImg 按 ConsoleImagePart.cs:45-58 的固定次序重建
+        // （IMG-A4 后这条仍钉「宿主缺位 / 查表未命中」的回落：pwPx 的装置宿主不带尺寸源）
         assertEquals("<img src='a.png'>", htmlPrintDocument("<img src='a.png'>").rows.single().runs.single().text)
         assertEquals(153L, pwPx("<img src='a.png'>")) // 17 个半角字符 × 9px
         assertEquals(17L, pwCells("<img src='a.png'>"))
         assertEquals(171L, pwPx("<img src='a.png'>AB")) // 图元段 + 文本段同组相加
         assertEquals(19L, pwCells("<img src='a.png'>AB"))
+    }
+
+    /** IMG-A4 I1：尺寸源查到图元 ⇒ 宽 = `DestBaseSize.Width * num / DestBaseSize.Height`（:69，num = :66 折算高）。 */
+    @Test
+    fun `img 无 width 时按图元宽高比折算`() {
+        // 300×100（宽:高 = 3:1）；height 缺省/0 ⇒ num = FontSize = 18 → 300*18/100 = 54
+        assertEquals(54L, pwLenSized("<img src='a.png'>", 0L))
+        assertEquals(54L, pwLenSized("<img src='a.png' height='0'>", 0L)) // :66 num==0 也回落 FontSize
+        // height='50'（百分比）⇒ num = 18*50/100 = 9 → 27；height='50px' ⇒ num = 50 → 150
+        assertEquals(27L, pwLenSized("<img src='a.png' height='50'>", 0L))
+        assertEquals(150L, pwLenSized("<img src='a.png' height='50px'>", 0L))
+    }
+
+    /** IMG-A4 I1：:70 的亚像素余数照旧进组游标、被后续 shape 吸收（与 width='N' 百分比分支同一条通道）。 */
+    @Test
+    fun `img 宽高比段的亚像素余数被后续 shape 吸收`() {
+        // 333×100、height='30px' ⇒ num=30 → 333*30/100 = 99.9 → Width=99、XsubPixel=0.9（:70）
+        val sizes = { src: String -> if (src == "b.png") ImagePixelSize(333, 100) else null }
+        val len = { html: String ->
+            HtmlStrictParser(html, pwMeasure(18L), { it }, 18L, 0xFFFF00, 0L, collectRows = false, imageSizeOf = sizes)
+                .length().toLong()
+        }
+        assertEquals(99L, len("<img src='b.png' height='30px'>"))
+        // 余数 0.9 + space 1px = 1.9 → (int) 截 1（ConsoleSpacePart.cs:18-23）⇒ 合计 100
+        assertEquals(100L, len("<img src='b.png' height='30px'><shape type='space' param='1px'>"))
+    }
+
+    /** IMG-A4 I1：:83-87 负宽取绝对值；查表未命中 / 宿主缺位回落 AltText（读数与接线前逐位一致）。 */
+    @Test
+    fun `img 宽高比负宽取绝对值 未命中与缺位回落 AltText`() {
+        // height='-90px' ⇒ num=-90 → 300*-90/100 = -270 → destRect.Width<0 → 270
+        assertEquals(270L, pwLenSized("<img src='a.png' height='-90px'>", 0L))
+        // 查表未命中（'c.png' 不在尺寸源里）→ :61-64 Text=AltText → :110-114 文本度量 153px
+        assertEquals(153L, pwLenSized("<img src='c.png'>", 0L))
+        // 宿主缺位（imageSizeOf 缺省 null）同读数 —— 「现状零变化」的钉
+        assertEquals(153L, pwLen("<img src='c.png'>", 0L))
+    }
+
+    /** IMG-A4 I1：生产接线形状 —— 宿主缺省，装饰器现读 aux 的 SpritePool（SPRITE_SLOT 槽）。 */
+    @Test
+    fun `宿主经 aux 的 SpritePool 供图元尺寸`() {
+        val store = VariableStore()
+        val base = PwBaseCtx()
+        base.variables = store
+        store.aux.slot(SPRITE_SLOT) { SpritePool() }
+            .put(SpritePool.Sprite("d.png", 200, 100)) // 登记尺寸即 DestBaseSize（GraphicsBuffer.kt 的 Sprite KDoc）
+        val ctx = BuiltinEvalContext(base, store, object : BuiltinHost {})
+        // 200*18/100 = 36（AuxMacroHost 缺省时现读 aux；查表键归一大写，src 'd.png' 命中 'D.PNG'）
+        val v = ctx.callFunction("HTML_STRINGLEN", listOf(Value.StrV("<img src='d.png'>"), Value.IntV(1))) as Value.IntV
+        assertEquals(36L, v.v)
+        // 未登记名 → 回落量 AltText（17 半角 × 9 = 153）
+        val miss = ctx.callFunction("HTML_STRINGLEN", listOf(Value.StrV("<img src='e.png'>"), Value.IntV(1))) as Value.IntV
+        assertEquals(153L, miss.v)
     }
 
     @Test

@@ -1,0 +1,99 @@
+# erbcc-rs / rust-playable 车道登记：Rust 腿产物装进引擎后的实测读数（Haruki 机）
+# 产法：python devtools/verify_rust_erbc_playable.py all --register（或单独 gate1 / gate1w / gate2 / gate3）
+# 时间：2026-11-01 14:18:54　语料：C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\full\rust\erbc.v1
+# 机相关：读数含产出机绝对路径与 vm 版本；换机（或改 core-vm 源码树/编译器指纹）后重跑刷新，判据不放宽。
+
+## 被破坏的原始产物（Rust 腿全量 erbc.v1；四件套 sha 与闸 1 登记同值）
+erbc-dir C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\full\rust\erbc.v1
+program.erbc 329105851 f12b58f90be90b10ac2eb15d21dff8c2a612e937efdc7512b749a209465295b5
+program.meta 49332018 09a45eba89d7c2f0d0170d92085fe7563c1ba00eb7364647e59d92ea9c92c7d2
+游戏根 C:\DSH\eratw-安卓移植计划\eratw-画蛇添足版eratw4.980（会话装配要用 CSV/emuera.config）
+
+## 逐档读数：期望 → 引擎侧原样报错 + rc
+（probe = 一次性 Java 探针，走 ProgramLoader.loadMapped + BootMetadata.read；vmdbg = desktop.py cmd disasm 0 -n 1，走同一条装载链 + GameSession 装配）
+
+### 档 control-clean-copy：对照：erbc.v1 整目录原样拷贝（不做任何字节改动）
+判据：expect_accept
+篡改：不篡改（原样拷贝；program.erbc 329105851 B sha f12b58f90be90b10… 与闸 1 登记同值）
+check_msg C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\gate3\tamper-control-clean-copy: 产物与语料/编译器一致（容器/侧车/源文件摘要/编译器指纹全对齐，compiler-digest c166fa80b711623417ffb9f0b79be99f78b1eb701556e62a02bd58663086a4b2）
+check_rc 0
+probe_erbc_actual_sha f12b58f90be90b10ac2eb15d21dff8c2a612e937efdc7512b749a209465295b5
+probe_load_ok true
+probe_meta_sha_field f12b58f90be90b10ac2eb15d21dff8c2a612e937efdc7512b749a209465295b5
+probe_rc 0
+probe_statements 1712420
+rejected false
+vmdbg_rc 0
+vmdbg_rejected false
+
+### 档 erbc-truncated：把 program.erbc 截到 3/5（容器段表/记录体必然读不完）
+判据：expect_loader_error
+篡改：program.erbc 329105851 B → 197463510 B（截断，口径同 erbcc_rs_parity 的 truncated 档）
+check_msg:
+    C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\gate3\tamper-erbc-truncated: 2 条新鲜度问题
+      ARTIFACT_SIZE: erbc.v1/program.erbc 实际 197463510 字节，清单登记 329105851 字节（写一半或被截断）
+      CONTAINER_INVALID: erbc.v1/program.erbc 段表不可信: ErbcDecodeException: 偏移 42: 段 4 偏移(218730172)越过文件尾(197463510)
+check_rc 1
+probe_error:
+    Exception in thread "main" com.eratw.port.core.loader.ErbcLoadException: C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\gate3\tamper-erbc-truncated\erbc.v1\program.erbc: 偏移 42: 段 4 偏移(218730172)越过文件尾(197463510)
+    	at com.eratw.port.core.loader.ProgramLoader.withSource(ProgramLoader.kt:899)
+    	at com.eratw.port.core.loader.ProgramLoader.withProbeSource(ProgramLoader.kt:704)
+    	at com.eratw.port.core.loader.ProgramLoader.loadMapped(ProgramLoader.kt:504)
+    	at com.eratw.port.core.loader.ProgramLoader.loadMapped$default(ProgramLoader.kt:488)
+    	at com.eratw.port.core.loader.ProgramLoader.loadMapped(ProgramLoader.kt:468)
+    	at RpLoadProbe.main(RpLoadProbe.java:31)
+    Caused by: com.eratw.port.core.code.ErbcDecodeException: 偏移 42: 段 4 偏移(218730172)越过文件尾(197463510)
+    	at com.eratw.port.core.loader.MappedErbc$Companion.parseHeader(MappedErbc.kt:165)
+    	at com.eratw.port.core.loader.MappedErbc$Companion.open(MappedErbc.kt:97)
+    	at com.eratw.port.core.loader.ProgramLoader.loadMapped$lambda$2(ProgramLoader.kt:504)
+    	at com.eratw.port.core.loader.ProgramLoader.withProbeSource(ProgramLoader.kt:702)
+    	at com.eratw.port.core.loader.ProgramLoader.loadMapped(ProgramLoader.kt:504)
+    	at com.eratw.port.core.loader.ProgramLoader.loadMapped$default(ProgramLoader.kt:488)
+    	at com.eratw.port.core.loader.ProgramLoader.loadMapped(ProgramLoader.kt:468)
+    	at RpLoadProbe.main(RpLoadProbe.java:31)
+    	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+    	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:77)
+    	at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
+    	at java.base/java.lang.reflect.Method.invoke(Method.java:569)
+    	at jdk.compiler/com.sun.tools.javac.launcher.Main.execute(Main.java:419)
+    	at jdk.compiler/com.sun.tools.javac.launcher.Main.run(Main.java:192)
+    	at jdk.compiler/com.sun.tools.javac.launcher.Main.main(Main.java:132)
+probe_rc 1
+rejected true
+vmdbg_error vmdbg: 产物装载失败: C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\gate3\tamper-erbc-truncated\erbc.v1\program.erbc（C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\gate3\tamper-erbc-truncated\erbc.v1\program.erbc: 偏移 42: 段 4 偏移(218730172)越过文件尾(197463510)）
+vmdbg_rc 1
+vmdbg_rejected true
+
+### 档 meta-program-sha：只改 program.meta 的 program-sha256 一位十六进制（容器字节不动）
+判据：expect_any_reject_or_report
+篡改：program.meta 的 program-sha256 末位 5→0（容器字节一字未动）
+check_msg:
+    C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\gate3\tamper-meta-program-sha: 1 条新鲜度问题
+      META_STALE: program.meta 记 f12b58f90be90b10ac2eb15d21dff8c2a612e937efdc7512b749a209465295b0，容器摘要 f12b58f90be90b10ac2eb15d21dff8c2a612e937efdc7512b749a209465295b5（侧车与容器不是一对）
+check_rc 1
+probe_erbc_actual_sha f12b58f90be90b10ac2eb15d21dff8c2a612e937efdc7512b749a209465295b5
+probe_load_ok true
+probe_meta_sha_field f12b58f90be90b10ac2eb15d21dff8c2a612e937efdc7512b749a209465295b0
+probe_rc 0
+probe_statements 1712420
+rejected false
+vmdbg_rc 0
+vmdbg_rejected false
+
+### 档 meta-count-field：把 program.meta 的 functions 计数改成比实际少 1（段与计数不等）
+判据：expect_any_reject_or_report
+篡改：program.meta 第 225648 行 `functions 110072` → `functions 110071`（记录体一字未动）
+check_msg C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\gate3\tamper-meta-count-field: 产物与语料/编译器一致（容器/侧车/源文件摘要/编译器指纹全对齐，compiler-digest c166fa80b711623417ffb9f0b79be99f78b1eb701556e62a02bd58663086a4b2）
+check_rc 0
+probe_error:
+    Exception in thread "main" com.eratw.port.core.loader.BootMetaFormatException: 第 335720 行：期望 global-dims，实际 function
+    	at com.eratw.port.core.loader.BootMetaCodec.run$next(BootMetadata.kt:1419)
+    	at com.eratw.port.core.loader.BootMetaCodec.run(BootMetadata.kt:1609)
+    	at com.eratw.port.core.loader.BootMetaCodec.parseReader(BootMetadata.kt:1376)
+    	at com.eratw.port.core.loader.BootMetadata$Companion.read(BootMetadata.kt:416)
+    	at RpLoadProbe.main(RpLoadProbe.java:34)
+probe_rc 1
+rejected true
+vmdbg_error vmdbg: 侧车读取失败: C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\gate3\tamper-meta-count-field\erbc.v1\program.meta（第 335720 行：期望 global-dims，实际 function）
+vmdbg_rc 1
+vmdbg_rejected true

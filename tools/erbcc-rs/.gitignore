@@ -1,0 +1,9 @@
+/target
+/build
+
+# Cargo.lock 入库：`encoding_rs` 的版本会改变 Shift-JIS 回退的判定结果，而 scan 档的对拍判据
+# 就是「与 Kotlin 逐字节相同」——依赖漂移必须能被复现，不能靠 `~/.cargo` 的当前状态。
+
+# 基准里的容器必须入库：`eratw-android/.gitignore:5` 的 `*.erbc` 会把它挡掉，
+# 而 rust-manifest / rust-kernel 的逐字节闸没有 `program.erbc` 就跑不起来（深一层 .gitignore 优先）。
+!tests/data/**/*.erbc

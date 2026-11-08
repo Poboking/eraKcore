@@ -159,15 +159,22 @@ class RedCCarouselPinTest {
             // 三轮轮播：每轮 TINPUT 超时 → RESULT = 默认值 2（EmueraConsole.cs:1119-1124）
             // → CASE 2 打印轮播标记 → LOOP RESULT 回边（FunctionIdentifier.cs:3437-3440）
             // → DO 体重画。读到 R=0 或轮播标记缺席 = 超时被改成丢弃/清零（红 C 假红同款误读）。
+            //
+            // 每轮 TITLE-PASS 之后那条裸「2」= **超时交付的回显行**，是原版行为：
+            // `endTimer` 用空文本收尾 `RunEmueraProgram("")`（`EmueraConsole.cs:1068`）⇒
+            // `doInputToEmueraProgram` 整数支把默认值写回 `str`（`:1122-1123` `result =
+            // inputReq.DefIntValue; str = result.ToString();`）⇒ 末尾 `Print(str)`（`:1280`）
+            // 打的就是这个「2」。时机同样在脚本恢复之前（`:1094` → `:1096-1097`），
+            // 所以它夹在 `TITLE-PASS n` 与 `AFTER-INPUT R=2` 中间。
             assertEquals(
                 listOf(
-                    "TITLE-PASS 1", "AFTER-INPUT R=2", "TIMEOUT-CAROUSEL",
-                    "TITLE-PASS 2", "AFTER-INPUT R=2", "TIMEOUT-CAROUSEL",
-                    "TITLE-PASS 3", "AFTER-INPUT R=2", "TIMEOUT-CAROUSEL",
+                    "TITLE-PASS 1", "2", "AFTER-INPUT R=2", "TIMEOUT-CAROUSEL",
+                    "TITLE-PASS 2", "2", "AFTER-INPUT R=2", "TIMEOUT-CAROUSEL",
+                    "TITLE-PASS 3", "2", "AFTER-INPUT R=2", "TIMEOUT-CAROUSEL",
                     "TITLE-EXIT",
                 ),
                 s.console.loggedLines(),
-                "超时必须交付默认值 2 并重播，不是吃答案",
+                "超时必须交付默认值 2 并重播，不是吃答案；每次交付各带一条 :1280 的回显行",
             )
             assertEquals(3L, read(s.store, "G_PASS"), "DO 体跑满三轮")
             assertEquals(0L, read(s.store, "RESULT"), "收敛闸把 RESULT 改写为 0，LOOP 退出")
@@ -190,8 +197,11 @@ class RedCCarouselPinTest {
             assertTrue(s0.inputSink.submitInt(0))
             assertTrue(s0.begin(BeginType.TITLE))
             assertEquals(0, s0.inputSink.pendingCount, "答案被 TINPUT 当场消费，不丢不剩")
+            // 「0」= 这条提交的回显行（`EmueraConsole.cs:1280` `Print(str)`：文本提交原样
+            // 过完 switch 落到打印；在 `:1096` state=Running 之前 ⇒ 夹在 TITLE-PASS 与
+            // AFTER-INPUT 中间）。缺失 = QueueInputSink.onEchoInput 没接上。
             assertEquals(
-                listOf("TITLE-PASS 1", "AFTER-INPUT R=0", "MODE-SELECT", "TITLE-EXIT"),
+                listOf("TITLE-PASS 1", "0", "AFTER-INPUT R=0", "MODE-SELECT", "TITLE-EXIT"),
                 s0.console.loggedLines(),
                 "提交 0 → RESULT=0 → CASE 0 分支，LOOP RESULT 退出",
             )
@@ -205,8 +215,9 @@ class RedCCarouselPinTest {
             assertTrue(s1.inputSink.submitInt(1))
             assertTrue(s1.begin(BeginType.TITLE))
             assertEquals(0, s1.inputSink.pendingCount, "答案被 TINPUT 当场消费，不丢不剩")
+            // 「1」同上一条：这次交付的回显行（`EmueraConsole.cs:1280`）。
             assertEquals(
-                listOf("TITLE-PASS 1", "AFTER-INPUT R=1", "SAVE-SLOT", "TITLE-EXIT"),
+                listOf("TITLE-PASS 1", "1", "AFTER-INPUT R=1", "SAVE-SLOT", "TITLE-EXIT"),
                 s1.console.loggedLines(),
                 "提交 1 → RESULT=1 → CASE 1 分支（语料侧进存档槽管理）",
             )

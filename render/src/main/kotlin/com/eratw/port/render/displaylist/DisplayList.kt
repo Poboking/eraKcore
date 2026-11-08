@@ -1,5 +1,7 @@
 package com.eratw.port.render.displaylist
 
+import com.eratw.port.core.host.FontDisplayWidth
+import com.eratw.port.core.host.StaticFontDisplayWidth
 import com.eratw.port.render.DisplayRow
 import com.eratw.port.render.DirtyRect
 import com.eratw.port.render.GlyphKey
@@ -123,6 +125,13 @@ import com.eratw.port.render.TextRun
 class DisplayList(
     val clientWidth: Int,
     maxRows: Int = Grid.MAX_LOG_DEFAULT,
+    /**
+     * 字体感知宽度尺：缺省静态网格（与接线前 [Grid.cellsExpanded] 逐值相同）。
+     * 必须与 [com.eratw.port.render.grid.LineFolder]、[com.eratw.port.render.button.ButtonLayer]
+     * 同一只实例 —— 否则 [DrawCmd.colStart] / [DrawCmd.colEnd] 的列区间会与折行、
+     * 真机逐字形推进分家，`SETFONT` 段出现「画在 A 列、脏区算到 B 列」。
+     */
+    private val fontWidth: FontDisplayWidth = StaticFontDisplayWidth,
 ) {
     /** 保留列表的行数上限（[maxRows] 参数非法时取 `Grid.MAX_LOG_DEFAULT`）。运行期可由 [ensureCapacity] 上抬。 */
     var maxRows: Int = if (maxRows <= 0) Grid.MAX_LOG_DEFAULT else maxRows
@@ -513,7 +522,7 @@ class DisplayList(
             val run = runs[r]
             val graphic = run.graphic
             val text = Grid.expandTabs(run.text)
-            val cells = if (graphic != null) graphic.widthCells else Grid.cellsExpanded(text)
+            val cells = if (graphic != null) graphic.widthCells else fontWidth.cells(text, run.fontName)
             if (cells < 0 && graphic is InlineGraphic.Space) {
                 // 负 space 是原版真实回退：`ConsoleSpacePart.WidthF` 为负（ConsoleSpacePart.cs:18-23），
                 // 排版 `num += part.Width` 把后续部件左移（ConsoleButtonString.cs 的 CalcPointX）。
@@ -557,7 +566,7 @@ class DisplayList(
                 r++
                 continue
             }
-            val visible = visibleSuffix(text, col)
+            val visible = visibleSuffix(text, col, run.fontName)
             val glyphs = glyphKeys(run, visible)
             if (glyphs.isEmpty()) {
                 col += cells
@@ -567,7 +576,7 @@ class DisplayList(
             // 右沿按「实际会画到的列」给：从 start 起铺完 visible 的格数，再夹到 clientWidth。
             // 位移非负时这与旧口径 `min(col + cells, clientWidth)` 逐项相等；
             // 负位移下跨左界的那个码点整格保留，右沿因此比几何右沿多出被裁掉的那点零头。
-            val end = minOf(start + Grid.cellsExpanded(visible), clientWidth)
+            val end = minOf(start + fontWidth.cells(visible, run.fontName), clientWidth)
             out.add(
                 DrawCmd(
                     row, start, end, run.fore, run.back, run.styleMask, run.kind, glyphs,
@@ -589,7 +598,7 @@ class DisplayList(
      * 与 [Grid.cellsExpanded] 对同一段文本的逐码元累加**逐值相等**：[text] 已无 TAB，
      * 所以这里不再为每个码点切一次子串（旧写法每码点分配一个 `String`）。
      */
-    private fun visibleSuffix(text: String, startCol: Int): String {
+    private fun visibleSuffix(text: String, startCol: Int, fontName: String): String {
         if (startCol >= 0) {
             return text
         }
@@ -597,10 +606,9 @@ class DisplayList(
         var col = startCol
         while (index < text.length) {
             val step = if (isSurrogatePair(text, index)) 2 else 1
-            var cells = Grid.cellWidth(text[index])
-            if (step == 2) {
-                cells += Grid.cellWidth(text[index + 1])
-            }
+            // 与 prepare 的段宽同一把尺：按码位问 [fontWidth]，静态实现下与旧的
+            // 「逐码元 Grid.cellWidth 两项之和」逐值相等（合法代理对 4 格 / 孤立代理半 2 格）。
+            val cells = fontWidth.codePointCells(text.codePointAt(index), fontName)
             if (col + cells > 0) {
                 break
             }

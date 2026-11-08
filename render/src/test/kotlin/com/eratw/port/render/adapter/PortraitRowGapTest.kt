@@ -23,7 +23,7 @@ import kotlin.test.assertTrue
  * 所以 PC 上：预留 `ceil(180/18) = 10` 行 × 18px = 180px，图正好吃满，图底与下一行文字
  * 的顶边**齐平**（`LINES_DRAWN = 0`：第一个 `PRINTL` 只结束图那一行，图行算在这 10 行里）。
  *
- * 端口这边行高由 `view/PageFitter` 按屏适应（110 列档 ≈ 41px 字号 / 43px 行高），而 `px`
+ * 端口这边行高由字号/行高配置派生（旧 110 列档 ≈ 41px 字号 / 43px 行高），而 `px`
  * 形态的图此前**不跟着版面缩放**（百分比形态跟：基准换成了真机字号）—— 于是同一张图
  * 只画 180px（4.2 行），预留却是 10 行 × 43px = 430px，空档 = `430 - 180 = 250px`
  * ≈ **5.8 行**。这就是「很突兀」的那段白。
@@ -36,7 +36,7 @@ import kotlin.test.assertTrue
  */
 class PortraitRowGapTest {
 
-    /** 真机 110 列档的一屏（`PageFitter.fit(2400, 1000, 20)` 同解：字号 41 / 行高 43）。 */
+    /** 旧 110 列档的一屏（旧 `PageFitter.fit(2400, 1000, 20)` 的解，值保留作夹具：字号 41 / 行高 43）。 */
     private val deviceMetrics = CellMetrics(41, 43)
 
     /** 语料 `emuera.config:23` 的 `LINE HEIGHT`（PC 行高）与 :22 的 `FONT SIZE` 同值 18。 */

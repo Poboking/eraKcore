@@ -1,0 +1,15 @@
+# TWAIT 20, 0：一次限时等待，第 2 参 0 ⇒ EnterKey 形态（非 0 才是 Void）。
+# 零输入 ⇒ 计时器到点 endTimer 置 isTimeout（:1043）后用空文本推进；
+# ISTIMEOUT 伪变量读该位（VariableData.cs:1075-1087）。EnterKey 形态不写 RESULT。
+case: twait_timeout
+target: REPLAY_TWAIT_TIMEOUT
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:800-824
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1040-1082
+anchor: reference/emuera-cs/MinorShift.Emuera.GameData.Variable/VariableData.cs:1075-1087
+--- inputs
+--- expect-console
+START-TWAIT
+ISTIMEOUT=1
+END-TWAIT
+--- expect-vars
+RESULT:0 = 0

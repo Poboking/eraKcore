@@ -1,0 +1,18 @@
+# MesSkip 快速路径的**提交来源**版：WAIT 吃掉一条 keySkip 提交（PressEnterKey 入口
+# 先置 MesSkip = keySkip，:1373；ReadAnyKey 交付时把它交给 sem 层），随后脚本走到
+# INPUT 42, 0, 1（canSkip 非空）⇒ 不等待、直接把默认值写进 RESULT（:853-857）。
+# 因此全程只需 1 条提交：若投喂线程把 submit-skip 降级成 mesSkip=false，这条 INPUT
+# 会真的去等第二条输入 ⇒ 装置报 STILL_AWAITING。
+case: input_canskip
+target: REPLAY_INPUT_CANSKIP
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1371-1373
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1451-1458
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:853-866
+--- inputs
+submit-skip
+--- expect-console
+START-INPUT-CANSKIP
+INPUT=42
+END-INPUT-CANSKIP
+--- expect-vars
+RESULT:0 = 42

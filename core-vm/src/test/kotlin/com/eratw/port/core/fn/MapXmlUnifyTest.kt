@@ -174,19 +174,19 @@ class MapXmlUnifyTest {
     }
 
     @Test
-    fun `MAP_FROMXML 孤立代理与低位控制符字符引用抛错`() {
+    fun `MAP_FROMXML 孤立代理字符引用抛错、低位控制符放行（dotnet 口径）`() {
         val c = unifyCtx()
         unInt(c, "MAP_CREATE", unS("M"))
         // 代理区 0xD800..0xDFFF：引用必须指向标量值（XmlParser 既有 dotnet 实测闸；
-        // 原 MiniXml 放行孤立代理，随收口修正）。低位控制符 #x1：XML 1.0 Char 集之外
-        // （MiniXml 的 M4 实测结论迁入 XmlParser.appendCharacterRef，MapDataTableMethodsTest
-        // 的 #x0 用例同口径）。
+        // 原 MiniXml 放行孤立代理，随收口修正）。.NET 对二者抛 ArgumentException、
+        // Emuera 不捕获（FunctionMethodCreator.cs:181-184 / :3061-3064）⇒ 移植折化 CodeEE。
         assertFailsWith<CodeEE> {
             unInt(c, "MAP_FROMXML", unS("M"), unS("<map><p><k>&#xD800;</k><v>1</v></p></map>"))
         }
-        assertFailsWith<CodeEE> {
-            unInt(c, "MAP_FROMXML", unS("M"), unS("<map><p><k>&#x1;</k><v>1</v></p></map>"))
-        }
+        // 低位控制符 #x1：dotnet 8.0.425 LoadXml 实测**放行**（XML-FIVE X1 翻案；旧钉按
+        // 拒绝，方向与 .NET 相反，已翻。MapDataTableMethodsTest 的 #x0 用例同口径）。
+        assertEquals(1L, unInt(c, "MAP_FROMXML", unS("M"), unS("<map><p><k>&#x1;</k><v>1</v></p></map>")))
+        assertEquals("1", unStr(c, "MAP_GET", unS("M"), unS("\u0001")))
     }
 
     @Test

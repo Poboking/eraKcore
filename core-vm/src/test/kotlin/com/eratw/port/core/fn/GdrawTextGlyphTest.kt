@@ -268,11 +268,13 @@ class GdrawTextGlyphTest {
         assertEquals(1L, gdtgI(ctx, "GSETFONT", 11, "黑体", 10))
         assertEquals(1L, gdtgI(ctx, "GSETBRUSH", 11, 0x80FF0000L))
         assertEquals(1L, gdtgI(ctx, "GDRAWTEXT", 11, "A", 20, 20))
-        // 中心内部：源 alpha = 128*128/255 = 64；叠在透明目标上 ⇒ A=R=64
-        assertEquals(0x40400000L, gdtgPixel(ctx, 11, 21, 21), "预乘口径 (brushA*cov)/255 整除截尾")
+        // 中心内部：源 alpha = 128*128/255 = 64；叠在透明目标上 ⇒ 直通 (A64,R255)。
+        // 旧钉 (A64,R64) 是预乘形存底 —— 2026-11-07 blendPixel 直通域修正后，
+        // 透明底上存的就是画刷色本身（GDI+ 32bppARGB 的 GetPixel 同为去预乘读出）。
+        assertEquals(0x40FF0000L, gdtgPixel(ctx, 11, 21, 21), "透明底上画刷色直通（覆盖度只进 alpha）")
         // 本侧描边模型是「膨胀 penWidth 减自身」⇒ 掩码**覆盖像素**仍是填充（含四角），
         // 画笔色只落在掩码矩形**外侧**的一圈（同 `实心块掩码 填充加一圈描边`）。
-        assertEquals(0x40400000L, gdtgPixel(ctx, 11, 20, 20), "覆盖角仍是填充（预乘口径）")
+        assertEquals(0x40FF0000L, gdtgPixel(ctx, 11, 20, 20), "覆盖角仍是填充（直通）")
         assertEquals(FORE, gdtgPixel(ctx, 11, 19, 19), "掩码外侧一圈是描边（未设画笔 ⇒ ForeColor）")
         assertEquals(0L, gdtgPixel(ctx, 11, 18, 18))
     }

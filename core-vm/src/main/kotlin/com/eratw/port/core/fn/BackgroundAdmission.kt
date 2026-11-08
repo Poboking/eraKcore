@@ -15,10 +15,13 @@ import com.eratw.port.core.host.SpritePool
  * 都不执行：那层永远不进背景表，之后资源加载上了也不会补画。
  *
  * 三个钉死的口径（原 lambda 注释原样保留）：
- * 1. 「SETBGIMAGE 打在 GCREATE 之前」与 PC 同判：判定要求 [SpritePool.Sprite.isCreated]
- *    （基图已创建，`ASpriteSingle.cs:24-34` 的 `BaseImage != null && BaseImage.IsCreated`）。
- *    基图释放后 sprite 登记项不删、isCreated 转 false（口径见 `ProcessRuntime.kt:2221-2222`），
- *    此时同样不收——不存在「先收下、图到位后补画」的路径。
+     * 1. 「SETBGIMAGE 打在 GCREATE 之前」与 PC 同判：判定要求 [SpritePool.Sprite.isCreated]
+     *    （基图已创建，`ASpriteSingle.cs:24-34` 的 `BaseImage != null && BaseImage.IsCreated`）。
+     *    SpriteG（正号段 G_ID）基图释放后登记项不删、isCreated 转 false，此时不收。
+     *    SpriteF（负号段 CSV 资源父图）的创建态是登记期事实，父图像素被逐出/延迟解码
+     *    降级时仍为 true —— 但下面最后一道「src 矩形覆盖整幅 buffer」在父图 0x0 时
+     *    自然不成立（登记 srcW > 0，buffer.width == 0），准入结果仍是 false，
+     *    不存在「先收下、图到位后补画」的路径。口径见 [SpritePool.Sprite.isCreated] 的 KDoc。
  * 2. 只查 sprite 字典、不回退文件资源：`GetSprite` 就只查字典（spec: `AppContents.cs:39-51`，
  *    键按 `ToUpper(InvariantCulture)` 归一在 :45，未命中返回 null 在 :46-50），原版没有按
  *    文件名兜底的分支。字典查找本身不在本函数内（查找是 app 侧装配细节）：调用方先
@@ -47,7 +50,8 @@ object BackgroundAdmission {
     /**
      * 五态判定表（期望值与 `GameHost.kt:913-918` 的原 lambda 逐条一致）：
      * - null（字典未命中，`GetSprite` 返回 null，`AppContents.cs:46-50`）→ false；
-     * - 未创建（静态 sprite 的 buffer 缺失或宽高为 0，[SpritePool.Sprite.isCreated] false）→ false；
+     * - 未创建（SpriteG 的 buffer 缺失或宽高为 0，[SpritePool.Sprite.isCreated] false）→ false；
+     *   SpriteF 恒 true，改由最后一条「src 覆盖整幅」在 0x0 父图上挡住，结论同为 false；
      * - 动画（[SpritePool.Sprite.isAnime] true；帧表 sprite 不进背景层）→ false；
      * - 部分矩形 src（SPRITECREATE 6/8/10 参形态，src 不覆盖整幅 buffer）→ false；
      * - 整幅 src（`srcX == 0 && srcY == 0 && srcW == buffer.width && srcH == buffer.height`）→ true。

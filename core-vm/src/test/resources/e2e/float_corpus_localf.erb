@@ -1,0 +1,46 @@
+; ---------------------------------------------------------------------------
+; 浮点表达式通道端到端片段（worker g4）。抄真实语料 4.981 的调用点写法，不改真实语料。
+;
+; 证据（真实语料调用点，逐字抄其写法；本路另有按 ERATW_CORPUS 现读原文的锚点用例，
+; 那条才是「原文逐字实跑」，本片段是「无环境也能跑」的同形备份）：
+;   DLC/魔法DLC/使用魔法.ERB:4        #DIM DYNAMIC 经验获取量
+;   DLC/魔法DLC/使用魔法.ERB:1248      LOCALF = 0.0
+;   DLC/魔法DLC/使用魔法.ERB:1249      FOR LOCAL, GET_CURRENT_MAP() * 100, GET_CURRENT_MAP() * 100 +99
+;   DLC/魔法DLC/使用魔法.ERB:1250      LOCALF += YOGORE:(LOCAL) * 0.01
+;   DLC/魔法DLC/使用魔法.ERB:1254      YOGORE:(LOCAL) = 0  ; 设置房间清洁度为最高（YOGORE值越低越干净）
+;   DLC/魔法DLC/使用魔法.ERB:1256      经验获取量 = TOINT(LOCALF)
+;   DIM.ERH:250                        #DIM SAVEDATA YOGORE, 2000
+;
+; 与原文的差别只有三处，都不动浮点口径：
+;   1. `FOR` 的上下界原文由 `GET_CURRENT_MAP()` 决定（装置不装宿主地图），这里取 0..10；
+;      **终值不含**（`FOR LOCAL, 0, 10` 实跑 10 轮，LOCAL = 0..9），与
+;      compile/ForStepErbcRegressionTest「`FOR CNT,0,4` 走满 4 轮」同一口径；
+;   2. 原文 1251-1253 三条（EX/GMF 系）与本通道无关，不进片段；
+;   3. 原文 `#DIM DYNAMIC 经验获取量` 是 `@MAGIC_USE` 的私有局部（文件第 2 行就是标签），
+;      这里同样放在标签**之后**，与原文的声明域一致。
+; 累加式 `YOGORE:(LOCAL) * 0.01`、清零式 `YOGORE:(LOCAL) = 0`、收口式 `TOINT(LOCALF)` 逐字保留。
+;
+; 见证变量用内建整型系统变量 A..D（与 FloatRuntimeE2ETest 同口径），跑完按名读回。
+; 期望真值（IEEE-754 双精度）：10 轮 ×（125 × 0.01）= 10 × 1.25 = 12.5 精确无残差
+; （1.25 是二进制可精确表示的 dyadic 有理数，逐轮累加不产生尾差），
+; 故 TOINT(LOCALF) = 12（向零截断，fork-src Creator.Method.cs:6105-6106 的 (long) 语义）、
+; TOINT(LOCALF * 10) = 125。
+; ---------------------------------------------------------------------------
+
+#DIM SAVEDATA YOGORE, 2000
+
+@SWEEP_LOCALF
+#DIM DYNAMIC 经验获取量
+	FOR LOCAL, 0, 10
+		YOGORE:(LOCAL) = 125
+	NEXT
+	LOCALF = 0.0
+	FOR LOCAL, 0, 10
+		LOCALF += YOGORE:(LOCAL) * 0.01
+		YOGORE:(LOCAL) = 0
+	NEXT
+	经验获取量 = TOINT(LOCALF)
+	A = 经验获取量
+	B = TOINT(LOCALF * 10)
+	C = YOGORE:0
+	D = YOGORE:9

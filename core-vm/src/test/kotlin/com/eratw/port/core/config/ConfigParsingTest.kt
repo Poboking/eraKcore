@@ -254,6 +254,34 @@ class ConfigParsingTest {
         assertEquals("C:b", store.itemOf(ConfigKey.TextEditor).string(), "第 3 段以正斜杠开头 ⇒ 不接回，而第 4 段仍接回 ⇒ 值被折成 C:b。官方形状，原样保留")
     }
 
+    /**
+     * B8（W7-judge 收口）：覆盖表通道的行是 [EmueraConfigParser.toOverrideMap] **摊平再造**的
+     * 移植侧形状（`"$key:$value"`），再按 `ConfigData.cs:534` 的全冒号口径重析会把值里的冒号
+     * 凭空截掉——这不是官方截断（官方只截磁盘文件里的行），是往返自伤。现覆盖表通道只在
+     * **首个**冒号处切一次；主文件链的官方截断（上一条用例）不动。
+     */
+    @Test
+    fun `覆盖表通道不重析值里的冒号（B8），主文件链截断照旧`() {
+        val store = newStore()
+        val r = EmueraConfigParser.loadOverrideMap(
+            store, "host.configOverrides",
+            mapOf(
+                "FONT NAME" to "ＭＳ ゴシック:x86",
+                "TEXT EDITOR" to """D:\tools\ed.exe --log:C:\x""",
+            ),
+        )
+        assertEquals("ＭＳ ゴシック:x86", store.itemOf(ConfigKey.FontName).string(), "非 TextEditor 的含冒号值整段保留（旧实现截成「ＭＳ ゴシック」）")
+        assertEquals("""D:\tools\ed.exe --log:C:\x""", store.itemOf(ConfigKey.TextEditor).string(), "覆盖表通道不再走官方重拼，值原样")
+        assertEquals(2, r.appliedCount)
+
+        // 对照：主文件链仍按官方全冒号切分（ConfigData.cs:534，值取 parts[1]）。
+        val disk = newStore()
+        EmueraConfigParser.loadGameFile(
+            ConfigFile("emuera.config", listOf("FONT NAME:ＭＳ ゴシック:x86")), disk,
+        )
+        assertEquals("ＭＳ ゴシック", disk.itemOf(ConfigKey.FontName).string(), "官方截断怪癖原样保留（ADR-005）")
+    }
+
     @Test
     fun `EditorArgument 绕过 TryParse 保留原空白，且 fixed 文件也钉不住它`() {
         val store = newStore()

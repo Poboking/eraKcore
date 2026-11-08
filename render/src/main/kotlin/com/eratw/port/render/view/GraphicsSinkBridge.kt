@@ -1,6 +1,9 @@
 package com.eratw.port.render.view
 
+import com.eratw.port.core.host.CbgLayerSnapshot
+import com.eratw.port.core.host.CellWidth
 import com.eratw.port.core.host.GraphicsSink
+import com.eratw.port.render.adapter.HtmlRunFlatten
 import com.eratw.port.render.displaylist.InlineGraphic
 import com.eratw.port.render.glyph.CellMetrics
 
@@ -11,7 +14,8 @@ import com.eratw.port.render.glyph.CellMetrics
  * `platform/.../image/AndroidGraphicsSink` 与桌面预览用的
  * `tools/uipreview/.../JvmGraphicsSink`。两份的算式、守卫与 C# 出处完全一致，
  * 唯一差别是「要不要通知宿主重绘」——本类把它收成一个可选回调 [onInvalidate]，
- * 两个模块各自只留一层薄壳。
+ * 两个模块各自只留一层薄壳。另有一个可选的「图要来了」回调 [onImage]，供宿主把
+ * 按名解码挪到后台（预取）；它不改变任何语义，null 时逐字等于接入前。
  *
  * 放在 `render` 的依据（模块图）：`render` 已依赖 `core-vm`（拿 [GraphicsSink]），
  * 而 `platform` 与 `tools/uipreview` 都依赖 `render`；把实现放到 `core-vm` 会反向
@@ -49,13 +53,27 @@ import com.eratw.port.render.glyph.CellMetrics
  * @param scriptFontPixelSize **脚本 `px` 的基准字号**（= 引擎生效 `Config.FontSize`）；
  *                `px` 形态经 [CellMetrics.scriptPixels] 折成设备像素，与 HTML 侧同尺。
  *                缺省 0 = 不折算（恒等），headless 与既有用例逐值不变
+ * @param onImage 一入队就回调资源名（后台预取入口，生产接线是
+ *                `SpriteBitmapSource.prefetchAsync`）。只覆盖「真图」两条：`printImage` 的
+ *                `name` 与 `setBgImage` 的 `name`；按钮图（`nameb`）与取色遮罩图（`namem`）
+ *                不预取（它们不是主显示路径上的整图）。回调在**语句层线程**上同步执行，
+ *                只允许做查表与入队，不得解码。null（缺省）= 不预取，与接入前逐值相同
+ * @param sizeSource `<img>` 缺宽推宽 / 图元 miss 判定的**同一份尺寸源**
+ *                （[HtmlRunFlatten.ImageSizeSource]，生产形状 = `SpriteBitmapSource`）。
+ *                null（缺省）= 判不了「图元在不在」，`printImage` 保持旧的「见方」占位
+ *                （登记偏差）。壳层 `platform/.../AndroidGraphicsSink.kt` 与
+ *                `tools/uipreview/.../JvmGraphicsSink.kt` 都已转发本参数；生产装配点
+ *                `GameHost.installGraphics` 传的是同一个 `SpriteBitmapSource`（与 ConsoleFeed 同源）
  * @param onInvalidate 屏上要变了的通知（null = 不通知，桌面预览靠 `ConsoleFeed.pump`
- *                     检查 `GraphicsLayer.hasPendingInline()` 自己发现）
+ *                     比较 `GraphicsLayer.inlineRevision()` 自己发现）。
+ *                     **保持最后一个参数**：既有调用点用尾随 lambda 传它
  */
 class GraphicsSinkBridge(
     private val layer: GraphicsLayer,
     private val metrics: CellMetrics,
     private val scriptFontPixelSize: Int = 0,
+    private val onImage: ((String) -> Unit)? = null,
+    private val sizeSource: HtmlRunFlatten.ImageSizeSource? = null,
     private val onInvalidate: (() -> Unit)? = null,
 ) : GraphicsSink {
 
@@ -78,34 +96,73 @@ class GraphicsSinkBridge(
         val mapping = namem?.takeIf { it.isNotEmpty() }
         // ConsoleImagePart.cs:66：height 缺省或 0 ⇒ 一行高（FontSize）
         val heightPx = if (height == null || height.first == 0L) fontSize else pixel(height, fontSize)
-        val widthPx = if (width == null || width.first == 0L) {
-            // ConsoleImagePart.cs:67-71：宽按基图纵横比 = DestBaseSize.Width * h / DestBaseSize.Height。
-            // 这里拿不到基图（sink 侧不查表，查表在绘制侧），先按「见方」占位，
-            // 真图由绘制侧按纵横比覆盖：TODO(verify) 缺宽时的占格数与实画宽可能差 1~2 格，
-            // 卡点：`PRINT_IMG` 不带 `width` 的形态在语料里 0 处，没有可取证的对象。
-            heightPx
-        } else {
-            pixel(width, fontSize)
+        // 原版 AltText 重建（ConsoleImagePart.cs:44-59）：命中支也带上，绘制侧缺帧时按它回落。
+        val altText = InlineGraphic.imgAltText(name, button, mapping, height, width, ypos, fontSize)
+        val base = if (name.isEmpty()) null else sizeSource?.destSize(name)
+        val baseHeight = base?.and(0xFFFF) ?: 0
+        // 原版单出口（ConsoleImagePart.cs:60-65）：图元取不到 ⇒ `Text = AltText`，整段尺寸
+        // 计算被 return 跳过（**显式 width/height 都不生效**），节点按文本量宽（:104-115）。
+        // 本类的「取不到」= 注入的 [sizeSource] 查表未命中 / 基图高 ≤ 0；未注入时判不了。
+        val miss = sizeSource != null && (base == null || baseHeight <= 0)
+        val missCells = if (miss) CellWidth.displayCells(altText) else 0
+        val widthPx = when {
+            miss -> {
+                // 宽度按文本度量：本层没有字体度量口，用「格 × 半角步进」折回像素
+                // （与 sink 文本量的等宽兜底同式；格数本身是精确的 AltText 显示格）。
+                missCells * fontSize / 2
+            }
+            width == null || width.first == 0L -> {
+                if (base != null) {
+                    // ConsoleImagePart.cs:67-71：原版这一支按**基图纵横比**推宽
+                    // （`cImage.DestBaseSize.Width * 高 / DestBaseSize.Height`，亚像素余数进
+                    // `XsubPixel`）；`raw_width == null` 与 `raw_width.num == 0` 走同一条支。
+                    (base ushr 16) * heightPx / baseHeight
+                } else {
+                    // 未注入尺寸源：判不了「图元在不在」，保留「见方」占位 —— **移植自创、
+                    // 不是官方同形**，由 `view/GraphicsSinkBridgeImgDefaultTest` 钉住。
+                    // `PRINT_IMG` 语句本体在语料里 0 处（全游戏根 69 行 / 13 个文件全是
+                    // `CALL K63_PRINT_IMG` 同名用户函数、`;` 注释与编辑器关键字帮助），
+                    // 本分支没有可取证的真实调用；注了 [sizeSource] 就走上面的纵横比/AltText。
+                    heightPx
+                }
+            }
+            else -> pixel(width, fontSize)
         }
-        val yOffsetPx = if (ypos == null) 0 else pixel(ypos, fontSize)
+        // miss 支按文本画：原版的 `int num` / `top` 都在那条 `return` **之后**
+        // （`ConsoleImagePart.cs:61-65` vs `:66`/`:81`），因此高度停在构造初值
+        // `bottom = Config.FontSize`（`:37`）、纵向偏移恒 0 —— height / ypos 两个属性
+        // 与 width 一样不生效，翻转归一（`:83-92`）也不适用。
+        val yOffsetPx = if (miss || ypos == null) 0 else pixel(ypos, fontSize)
+        // 负尺寸 = 原版翻转形态（`ConsoleImagePart.cs:83-92`），与 HTML 路同一条处置：
+        // 布局取绝对值 + 翻转标记，交给绘制侧绕目标矩形中线反缩放。PRINT_IMG 语句本体
+        // 语料 0 处（见上），这条只为「脚本写得出来就画得对」的语义完整；此前负宽会落到
+        // `GraphicGeometry.inlineSize` 的「非正 ⇒ 退帧宽」分支，画成一张未缩放的图。
+        val flipX = !miss && widthPx < 0
+        val flipY = !miss && heightPx < 0
+        val layoutW = kotlin.math.abs(widthPx)
+        val layoutH = if (miss) fontSize else kotlin.math.abs(heightPx)
         layer.enqueue(
             InlineGraphic.Image(
                 resource = name,
-                widthPx = widthPx,
-                heightPx = heightPx,
+                widthPx = layoutW,
+                heightPx = layoutH,
                 yOffsetPx = yOffsetPx,
-                widthCells = InlineGraphic.cellsFor(widthPx, halfCellPx),
+                widthCells = if (miss) missCells else InlineGraphic.cellsFor(layoutW, halfCellPx),
+                flipX = flipX,
+                flipY = flipY,
                 buttonResource = button,
                 // 遮罩取色图（srcm）：不进绘制，供命中路径按坐标取色（spec:
                 // ConsoleButtonString.cs:138-152 + ConsoleImagePart.cs:135-157，
                 // 换算入口 InlineGraphic.maskSamplePoint）。本端消费点在
-                // CanvasConsoleView.mappingColor，INPUT(6/3, color) 入队归装配侧接线。
+                // 装配侧已接（MainActivity 长按 → GameHost.submitMappedColor → QueueInputSink.submitMappedColor）。
                 mappingResource = mapping,
                 // sprite 查不到时原版把重建的 img 标签当文本画（spec: ConsoleImagePart.cs:45-59、
-                // :60-64、:175-182）；文案在这里按原始 MixedNum 生成，绘制侧缺帧时回落。
-                altText = InlineGraphic.imgAltText(name, button, mapping, height, width, ypos, fontSize),
+                // :60-64、:175-182）；绘制侧缺帧时按它回落。
+                altText = altText,
             ),
         )
+        // 入队之后才预取：绘制侧要画的是 `name` 这张真图；按钮图/遮罩图不是主显示路径，不预取。
+        onImage?.invoke(name)
         invalidate()
     }
 
@@ -187,6 +244,8 @@ class GraphicsSinkBridge(
                 opacity = (opacity ?: 255L).coerceInt(0, 255),
             ),
         )
+        // 背景图同样是整图（`SETBGIMAGE` 的 name 就是绘制侧要取的那张），入层后预取。
+        onImage?.invoke(name)
         invalidate()
     }
 
@@ -197,6 +256,70 @@ class GraphicsSinkBridge(
 
     override fun clearBgImages() {
         layer.clearBackground()
+        invalidate()
+    }
+
+    /**
+     * `SETIMAGELAYERL`：纯转发进 [GraphicsLayer]（WIRE-3 / C-IMAGE-LAYER@1）。
+     *
+     * 字段口径（`lineNo` = 显示行、`opacity` 原样 0..255、`height <= 0` 的回落与显示行
+     * 口径已由 core 算好）见 `GraphicsSink.setImageLayer` 的 KDoc。不抛；同 depth 覆盖。
+     * `spriteName` 与 [setBgImage] 的 `name` 同口径：入层后预取（绘制侧要画的真图）。
+     */
+    override fun setImageLayer(
+        spriteName: String,
+        depth: Long,
+        lineNo: Int,
+        xpos: Int,
+        ypos: Int,
+        width: Int,
+        height: Int,
+        opacity: Int,
+        followScroll: Boolean,
+    ) {
+        layer.setImageLayer(
+            GraphicsLayer.ImageLayerSnapshot(
+                spriteName = spriteName,
+                depth = depth,
+                lineNo = lineNo,
+                xpos = xpos,
+                ypos = ypos,
+                width = width,
+                height = height,
+                opacity = opacity,
+                followScroll = followScroll,
+            ),
+        )
+        onImage?.invoke(spriteName)
+        invalidate()
+    }
+
+    /**
+     * `TEXT_BGC_ON` / `TEXT_BGC_OFF`：转写进 [GraphicsLayer.textBackground]（WIRE-4 / C-TEXT-BG@1）。
+     *
+     * `rgb < 0`（`TEXT_BGC_OFF` 的 `(-1, 0)` 哨兵）= 清除衬底；否则后续文字段衬底 =
+     * `0xRRGGBB`、alpha = `opacity% × 255 / 100`（alpha 折算在绘制侧 [ImageLayerGeometry]）。
+     * [opacity] 按 specs 口径夹到 0..100（百分比）；不抛。
+     */
+    override fun setTextBgColor(rgb: Long, opacity: Long) {
+        layer.setTextBackground(rgb.coerceToInt(), opacity.coerceInt(0, 100))
+        invalidate()
+    }
+
+    /**
+     * `CBG*` 家族的整表快照 → [GraphicsLayer.setCbgLayers]（CBGSETG / CBGSETSPRITE /
+     * CBGSETBUTTONSPRITE / CBGSETBMAPG / CBGCLEAR / CBGCLEARBUTTON / CBGREMOVEBMAP /
+     * CBGREMOVERANGE 共用一个推送口）。
+     *
+     * 纯转发：字段口径、depth 降序与坐标语义都在 core（`CbgPool.snapshot` 与
+     * `CbgLayerSnapshot` 的 KDoc）。绘制侧消费点是 [ScreenComposer]（headless）与真机
+     * 的 Canvas 层；本类不做排序、不做像素解析。
+     *
+     * 取色图两条（`CBGSETBMAPG` / `CBGREMOVEBMAP`）也走这里：`buttonMapGid` 是快照字段
+     * （每条图层重复携带），不推就停在上一次的 gid 上（见 `GraphicsSink.setCbgLayers`）。
+     */
+    override fun setCbgLayers(layers: List<CbgLayerSnapshot>) {
+        layer.setCbgLayers(layers)
         invalidate()
     }
 

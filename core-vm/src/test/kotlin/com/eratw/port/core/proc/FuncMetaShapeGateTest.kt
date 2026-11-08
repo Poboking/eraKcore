@@ -32,6 +32,7 @@ class FuncMetaShapeGateTest {
         isSingle: Boolean = false,
         isMethod: Boolean = false,
         returnsStr: Boolean = false,
+        returnsFloat: Boolean = false,
     ) = FuncMeta(
         index = index,
         key = key,
@@ -44,6 +45,7 @@ class FuncMetaShapeGateTest {
         isSingle = isSingle,
         isMethod = isMethod,
         returnsStr = returnsStr,
+        returnsFloat = returnsFloat,
     )
 
     // ---- 三条既有语义 ----
@@ -126,7 +128,9 @@ class FuncMetaShapeGateTest {
         assertEquals(
             "FuncMeta(index=3, key=K, name=K, isEvent=false, isMethod=false, isOnly=false, " +
                 "isPri=false, isLater=false, isSingle=false, argIntCount=0, argStrCount=0, " +
-                "localSize=0, localsSize=0, returnsStr=false, defIndex=3, position=ERB/A.ERB:7)",
+                "localSize=0, localsSize=0, floatLocalSize=0, returnsStr=false, " +
+                "returnsFloat=false, defIndex=3, " +
+                "position=ERB/A.ERB:7)",
             m.toString(),
             "装载侧首差文案按 data class 渲染格式对账（SymbolLinkAudit.firstFunctionDiff）",
         )
@@ -143,6 +147,7 @@ class FuncMetaShapeGateTest {
             meta(2, "B", isMethod = true),
             meta(3, "C", isEvent = true, isSingle = true),
             meta(4, "D", returnsStr = true),
+            meta(5, "E", isMethod = true, returnsFloat = true),
         )
         FunctionTable(flags)
         val a = flags[0]
@@ -152,6 +157,9 @@ class FuncMetaShapeGateTest {
         assertEquals(2, flags[2].eventBucket, "isSingle 不改桶位（SINGLE 只影响派发跳过）")
         assertEquals(2, flags[3].eventBucket)
         assertEquals(FunctionTable.TargetKind.NON_EVENT, FunctionTable(flags).classify("d"))
+        assertTrue(flags[4].returnsFloat && flags[4].isMethod)
+        assertEquals(false, flags[4].returnsStr, "浮点为第三种 MethodType，与字符串位互斥")
+        assertEquals(false, flags[0].returnsFloat, "returnsFloat 与会写进侧车 flags 的 7 位互不串位")
     }
 
     @Test

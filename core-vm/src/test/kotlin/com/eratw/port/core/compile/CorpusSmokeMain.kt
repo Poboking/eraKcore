@@ -1,5 +1,6 @@
 package com.eratw.port.core.compile
 
+import com.eratw.port.boot.CorpusProfile
 import com.eratw.port.core.stmt.CorpusValidator
 import java.nio.file.Path
 import kotlin.io.path.Path
@@ -11,18 +12,25 @@ private const val EXIT_RED = 1
 /** 闸口径失效（缺 env / 单文件残留 / LIMITED / 清单不符）：不判语义，只判闸自身。 */
 private const val EXIT_GATE_INVALID = 2
 
-/** FULL 语料清单定值（2026-10-24 基线：3,971 文件，已排除 GOLDEN_* 采集副本）。 */
-private const val FULL_CORPUS_FILES = 3_971
-
-/** FULL 编译切片基线下限（430e5dc9 实测 110,066；只许涨不许缩，缩了就是缩语料或缩编译）。 */
-private const val FULL_SLICES_FLOOR = 110_066
+/**
+ * FULL 语料清单定值与切片下限：随根档案（[CorpusProfile]）取列（corpusroot 波，2026-11-05）。
+ *
+ * 旧实现是 4.981 单列定值（4,258 文件 / 117,055 切片，2026-10-31 升版），而 §5 闸配方把
+ * `ERATW_CORPUS` 指到 4.980 —— 同一变量喂给 `:core-vm:test` 与 corpusSmoke 时后者必红。
+ * 本闸的取根路径其实与测试族一致（都直读 `ERATW_CORPUS`），红因是**常量单列**，不是发现器
+ * 吃错根；现按「DIM.ERH 的 NOW_VERSION 判根 → 取该根列」收口：
+ * - 4.980 = 3,971 文件 / 110,066 切片（2026-11-05 本路 `:core-vm:corpusSmoke` 实跑统计行）；
+ * - 4.981 = 4,258 文件 / 117,055 切片（2026-10-31 基线）。
+ * 判不了根（找不到 DIM.ERH / 版本不在册）⇒ exit 2：语料被换/被改时闸必须报口径失效，
+ * 不许退成「打印一句就退出 0」，也不许拿旧根列蒙过。
+ */
 
 /**
  * 语料编译冒烟命令行入口（gradle JavaExec / 直接 java 均可；不受 test worker 限制）。
  *
  * 环境变量：
  * - `ERATW_CORPUS`：语料根目录（全量模式）。清单**排除** `GOLDEN_*.ERB` 采集副本
- *   （今日混入 ERB 根，属 `fixtures/golden` 的拷贝，非原版语料；基线 3,971 文件口径）。
+ *   （今日混入 ERB 根，属 `fixtures/golden` 的拷贝，非原版语料；4.981 基线 4,258 文件口径）。
  * - `ERATW_CORPUS_FILE`：单文件复现模式（优先级高于 ERATW_CORPUS；仅编译该文件，
  *   跨文件函数引用报"未定义的函数"属预期噪音，只用于最小复现确认）。
  * - `ERATW_LIMIT`：只编译排序后前 N 个文件（调试用；终验禁用——不许缩语料集；
@@ -34,10 +42,11 @@ private const val FULL_SLICES_FLOOR = 110_066
  *   （gradle 场景 cwd=core-vm 模块目录 → 落 core-vm/build/ 下；绝不写仓库路径）。
  *
  * 退出码：
- * - 0 = GATE GREEN：仅 FULL 模式、文件数过定值闸、切片数过下限闸、编译失败 0、解析失败 0 切片/0 行；
+ * - 0 = GATE GREEN：仅 FULL 模式、根档案可判、文件数过该根定值闸、切片数过该根下限闸、编译失败 0、解析失败 0 切片/0 行；
  * - 1 = GATE RED：编译失败 / 解析失败 / 未归类残值（详见 summary.md）；
  * - 2 = 闸口径失效：缺 `ERATW_CORPUS`/`ERATW_CORPUS_FILE`、`ERATW_CORPUS_FILE` 残留、
- *   `ERATW_LIMIT` 受限模式、FULL 文件数 0 或 ≠ 定值（3,971）、切片数 < 基线下限。
+ *   `ERATW_LIMIT` 受限模式、语料根版本判不出（DIM.ERH 缺失或 NOW_VERSION 不在册）、
+ *   FULL 文件数 0 或 ≠ 该根定值（4.980=3,971 / 4.981=4,258）、切片数 < 该根基线下限。
  *   **闸自身失效一律非零退出**，不许「打印一句就 return 0」。
  */
 fun main() {
@@ -45,6 +54,8 @@ fun main() {
     val corpus = System.getenv("ERATW_CORPUS")
     val files: List<Path>
     val root: Path?
+    // FULL 模式的根档案：判不出根（含单文件模式外的所有 FULL 入口）⇒ exit 2，编译都不必开始。
+    var profile: CorpusProfile? = null
     when {
         !single.isNullOrBlank() -> {
             files = listOf(Path(single))
@@ -53,6 +64,10 @@ fun main() {
         }
         !corpus.isNullOrBlank() -> {
             root = Path(corpus)
+            profile = runCatching { CorpusProfile.detect(root) }.getOrElse {
+                println("GATE RED(2)：语料根版本判不出 —— ${it.message}（闸口径失效，禁止退出 0）")
+                exitProcess(EXIT_GATE_INVALID)
+            }
             val limit = System.getenv("ERATW_LIMIT")?.toIntOrNull() ?: Int.MAX_VALUE
             files = CorpusCompileValidator.listCorpusFiles(root).take(limit)
         }
@@ -106,7 +121,8 @@ fun main() {
     val abs = CorpusCompileValidator.writeReport(r, root, outDir)
     println("报告: $abs/summary.md（编译失败明细 $abs/failures.tsv；解析失败归因 $abs/parse-failures.tsv）")
 
-    r.failures.take(30).forEach { println("  失败 ${it.file}:${it.line} [${it.function}] ${it.code} ${it.message}") }
+    // A14：stdout 的失败行给人 1 基、把 0 基内部下标并排列出（与 summary.md §5、failures.tsv 同口径）。
+    r.failures.take(30).forEach { println("  失败 ${it.file}:${it.displayLine}(1基; 0基=${it.line}) [${it.function}] ${it.code} 行号来源 ${it.lineSource.label} ${it.message}") }
     if (r.failures.size > 30) println("  …其余 ${r.failures.size - 30} 条见 failures.tsv")
 
     // ---- A13 交叉核对：语句层 vs 编译层，同一文件清单、同一装置 ----
@@ -135,18 +151,22 @@ fun main() {
         println("GATE RED(2)：受限模式 ${r.runScope}（ERATW_LIMIT）不得判闸 —— 终验必须 FULL")
         exitProcess(EXIT_GATE_INVALID)
     }
-    if (r.files != FULL_CORPUS_FILES) {
-        println("GATE RED(2)：FULL 语料清单 ${r.files} 文件 ≠ 定值 $FULL_CORPUS_FILES（0 文件同样拒收；清单口径漂移即闸失效）")
+    val p = profile ?: run {
+        println("GATE RED(2)：FULL 模式没有根档案（不可达分支被走到，闸自身失效）")
+        exitProcess(EXIT_GATE_INVALID)
+    }
+    if (r.files != p.smokeFileCount) {
+        println("GATE RED(2)：FULL 语料清单 ${r.files} 文件 ≠ ${p.name} 列定值 ${p.smokeFileCount}（0 文件同样拒收；清单口径漂移即闸失效）")
         exitProcess(EXIT_GATE_INVALID)
     }
     val unclassified = r.parseGroups.values.count { it.verdict == CorpusCompileValidator.VERDICT_UNCLASSIFIED }
     if (r.failures.isEmpty() && unclassified == 0 && r.parseFailures == 0 && r.parseFailureLines == 0) {
         // 切片下限只挂在绿路径上：有失败/解析失败时走 RED(1)，不能把真红误报成闸口径失效。
-        if (r.slicesTotal < FULL_SLICES_FLOOR) {
-            println("GATE RED(2)：FULL 编译切片 ${r.slicesTotal} < 基线下限 $FULL_SLICES_FLOOR（缩语料或缩编译）")
+        if (r.slicesTotal < p.smokeSliceFloor) {
+            println("GATE RED(2)：FULL 编译切片 ${r.slicesTotal} < ${p.name} 列基线下限 ${p.smokeSliceFloor}（缩语料或缩编译）")
             exitProcess(EXIT_GATE_INVALID)
         }
-        println("GATE GREEN：编译失败 0、解析失败 0 切片/0 行、残值归因无未归类项")
+        println("GATE GREEN（根档案 ${p.name}：清单 ${p.smokeFileCount} / 切片下限 ${p.smokeSliceFloor}）：编译失败 0、解析失败 0 切片/0 行、残值归因无未归类项")
         exitProcess(EXIT_GREEN)
     }
     println(

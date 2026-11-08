@@ -46,6 +46,14 @@ import java.lang.reflect.Field
  *   [BuiltinMethod.minArgs]/[maxArgs]/[omitStart] 判个数 ——
  *   `PureMethods` 等处的 `int("NAME", min, max)` DSL 最终就落成这三个字段，
  *   读取面即 [BuiltinMethod.checkArity] 的同源口径（`FunctionMethod.cs:182-283`）。
+ *   声明 [BuiltinMethod.variadicGroup] 的再判**成对变参组**（ENGFIX3 B4 遗留①：
+ *   表达式位接线；判据与 erbcc 语句位 `pairedArgLoadWarning` 同源，只读
+ *   [VariadicGroup.violates] 单一声明源。原版两个调用点同走 `CheckArgumentTypeEx`：
+ *   语句位 `ArgumentParser.cs:1119-1127`、表达式位 `IdentifierDictionary.cs:576-585`，
+ *   违例文案 `Lang.Error.ArgsNotFitExpr`，Lang.cs:3958）。
+ *   `CALLFORM` 家族动态名与成对判据**有锚地不适用**：原版 CALL/CALLFORM 名字解析只查
+ *   用户标签表（`CalledFunction.cs:87-115` `GetNonEventLabel`，命中 `IsMethod` 还抛
+ *   `CallToUserFunc`），内建方法（成对判据的声明域）不可达 —— 非静态不可判，是域外。
  *
  * ## 报告通道（归邻波，本类不新造）
  *
@@ -128,6 +136,13 @@ object ArgSignatureCheck {
         program: Program,
         options: Options = Options(),
     ): List<ArgSignatureWarning> {
+        // 基线折回（R7-C1 最小注入，组长授权 2026-11-01）：带基线的补丁段（codeBase /
+        // functionBase 非零，L1 的窗口语义）按 Program.instructionBase / functionBase 折回
+        // 扫描面——扫描只落在本段窗口（[instructionBase, instructionCount)），函数下标按
+        // 绝对下标减 functionBase 折回本段表；base 区间的 `_CALL`（a < functionBase）折回
+        // 为负 → getOrNull 返回 null → 跳过（base 的签名校验归 base 装载面，补丁编译期
+        // 不重扫）。零基线路径（instructionBase == 0 && functionBase == 0）折回量恒 0，
+        // 与改前的无基线扫描逐位相同（erbcc 全量产物指纹不变的自证口径）。
         val out = ArrayList<ArgSignatureWarning>()
         checkUserCalls(program, options, out)
         checkBuiltinCalls(program, out)
@@ -160,10 +175,11 @@ object ArgSignatureCheck {
         val byEntry = fns.sortedBy { it.entryPc }
         val entryPcs = IntArray(byEntry.size) { byEntry[it].entryPc }
         val n = program.instructionCount
-        var pc = 0
+        var pc = program.instructionBase                // 带基线时只扫本段窗口（base 归 base 装载面）
         while (pc < n) {
             if (program.op(pc) == Opcode._CALL) {
-                val fi = fns.getOrNull(program.a(pc))
+                // a 是绝对函数下标；折回本段表（base 区间的下标折回为负 → null → 跳过）。
+                val fi = fns.getOrNull(program.a(pc) - program.functionBase)
                 if (fi != null) {
                     checkOneUserCall(program, pc, fi, program.b(pc) and ARG_MASK, entryPcs, byEntry, options, out)
                 }
@@ -277,7 +293,8 @@ object ArgSignatureCheck {
     // ======================================================================
 
     /**
-     * 遍历表达式池根与语句池，对 [FuncCall] 节点按 [Builtins.registry] 的 arity 元数据判个数。
+     * 遍历表达式池根与语句池，对 [FuncCall] 节点按 [Builtins.registry] 的 arity 元数据判个数、
+     * 按 [BuiltinMethod.variadicGroup] 判成对变参组（判据见类 KDoc 数据面②）。
      *
      * 名字解析口径 = `IdentifierDictionary.cs:548-585`：**用户函数先于内建**
      * （program.functions 命中即跳过，`_CALL` 路径已判或运行期重入），
@@ -313,6 +330,24 @@ object ArgSignatureCheck {
         val n = fc.args.size
         // 规范折叠让同一 FuncCall 实例被多条语句共享：按 (名字, 个数, 行) 去重
         if (!seen.add("$key|$n|$line")) return
+        // ENGFIX3 B4 遗留①（表达式位接线）：成对变参组判据，与 erbcc 语句位
+        // pairedArgLoadWarning 同源（只读 VariadicGroup.violates 单一声明源）。
+        // 命中即收一条、不再下探个数闸：原版 CheckArgumentTypeEx 对该形态记下
+        // ArgsNotFitExpr 后 continue，最终按首个非空错误返回（FunctionMethod.cs:186-193），
+        // 个数闸与成对闸同形态不并报。
+        val vg = m.variadicGroup
+        if (vg != null && vg.violates(n)) {
+            out.add(
+                ArgSignatureWarning(
+                    kind = ArgSignatureWarningKind.VARIADIC_GROUP,
+                    caller = null, line = line, callee = fc.name, position = 0,
+                    argc = n, arity = vg.fixedPrefix,
+                    message = "${fc.name} 函数: 参数个数不成对（:$line：实参 $n 个，" +
+                        "需要 ${vg.fixedPrefix}+${vg.groupSize}n 或数组形态 ${vg.exactFormArgs} 个）",
+                ),
+            )
+            return
+        }
         val kind: ArgSignatureWarningKind
         val message: String
         when {
@@ -436,6 +471,14 @@ enum class ArgSignatureWarningKind {
 
     /** 实参类型与形参不符（`CanNotConvert*`，spec: CalledFunction.cs:174-199）。 */
     TYPE_MISMATCH,
+
+    /**
+     * 成对变参组不满足（`ArgsNotFitExpr`「引数の数が 前置+n ではありません」，
+     * spec: FunctionMethod.cs:186-193、Lang.cs:3958）。判据域 = 声明了
+     * [com.eratw.port.core.fn.VariadicGroup] 的内建方法；ENGFIX3 B4 遗留①起
+     * 同时覆盖语句池与表达式池的 [FuncCall]（表达式位接线）。
+     */
+    VARIADIC_GROUP,
 }
 
 /**

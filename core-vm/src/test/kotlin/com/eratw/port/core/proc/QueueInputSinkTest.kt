@@ -1,6 +1,7 @@
 package com.eratw.port.core.proc
 
 import com.eratw.port.core.host.InputRequest
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -353,6 +354,70 @@ class QueueInputSinkTest {
         t.join(2_000)
         assertFalse(t.isAlive, "计时中的空串直接 InputString(\"\")，不取默认值（EmueraConsole.cs:1190-1194）")
         assertEquals("", ref.get())
+    }
+
+    // ------------------------------------------------------------------
+    // 翻页读数回调（宿主回调必须在输入锁之外触发：回调里的文件 I/O 会挡住 UI 线程的 submit）
+    // ------------------------------------------------------------------
+
+    /**
+     * 2026-10-30 玩家 ANR 的回归哨兵（移动到白玉楼庭院即「无响应」）：
+     * 旧实现在持有输入锁的状态下同步调 [QueueInputSink.onTurnReady]，宿主回调里的
+     * 文件 I/O / 堆采样把 UI 线程的下一次 submit 挡在同一把锁上。这里让回调自己
+     * 开一条探针线程去 submit：回调若仍持锁，探针在窗口内永远进不来 ⇒ 红。
+     */
+    @Test
+    fun `onTurnReady 回调期间其他线程能提交 回调不得持有输入锁`() {
+        val sink = QueueInputSink()
+        val probeDone = CountDownLatch(1)
+        val lockWasFree = AtomicReference<Boolean?>()
+        sink.onTurnReady = { _ ->
+            thread(name = "turn-callback-probe") {
+                sink.submit("probe")
+                probeDone.countDown()
+            }
+            // 旧实现下探针被输入锁挡死，这里只能等满窗口 ⇒ 置 false ⇒ 哨兵红。
+            lockWasFree.set(probeDone.await(500, TimeUnit.MILLISECONDS))
+        }
+        sink.submit("go")
+        sink.readAnyKey() // 抵达等待点 ⇒ 触发回调（新实现：交付时锁已放开）
+        assertEquals(true, lockWasFree.get(), "回调期间其他线程的 submit 拿不到输入锁 ⇒ 回调仍在持锁状态")
+        assertEquals(1, sink.pendingCount, "起点被本次等待消费，探针提交应留在队列里")
+        sink.readAnyKey() // 清场
+        assertEquals(0, sink.pendingCount)
+    }
+
+    /** 触发语义：每次等待点至多一次；起点只被最近的等待点消费，连着的第二个等待点不重复触发。 */
+    @Test
+    fun `onTurnReady 每个等待点至多一次 起点消费后不重复触发`() {
+        val sink = QueueInputSink()
+        val seen = ConcurrentLinkedQueue<Long>()
+        sink.onTurnReady = { seen.add(it) }
+        sink.submit("a")
+        sink.submit("b")
+        sink.readAnyKey() // 抵达第一个等待点：触发一次，消费起点
+        assertEquals(1, seen.size)
+        assertTrue(seen.peek() >= 0L)
+        sink.readAnyKey() // 第二个等待点没有新起点：不重复触发
+        assertEquals(1, seen.size)
+        sink.submitInt(5)
+        assertEquals(5L, sink.waitInput(intRequest()).intValue, "waitInput 路同样在进入等待点时触发")
+        assertEquals(2, seen.size)
+    }
+
+    /** 交付时机 = 进入等待点的那一刻（等待仍阻塞、提交尚未消费），不是提交被消费之后。 */
+    @Test
+    fun `onTurnReady 在进入等待点时即触发 而非提交被消费后`() {
+        val sink = QueueInputSink()
+        val fired = CountDownLatch(1)
+        sink.onTurnReady = { fired.countDown() }
+        sink.submit("x") // 非整数：等待方会丢弃它继续等 ⇒ 回调触发时提交必然还没被消费
+        val t = thread(name = "entry-fire-waiter") { sink.waitInput(intRequest()) }
+        assertTrue(fired.await(2, TimeUnit.SECONDS), "回调应在进入等待点的那一刻触发（等待仍阻塞中）")
+        assertTrue(sink.isAwaiting, "等待方应仍在等待 ⇒ 回调先于提交消费")
+        sink.submitInt(1)
+        t.join(2_000)
+        assertFalse(t.isAlive)
     }
 
     // ------------------------------------------------------------------

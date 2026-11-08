@@ -142,6 +142,7 @@ object GraphicGeometry {
      * @param rowHeight 该行在当前布局里的高度（像素）
      * @param lineHeight 执行行高（`Config.LineHeight` 的落地值，像素）
      * @param rowSpan 合并竖带块的跨行数（0 = 普通图片行）
+     * @see rowScaleOf 绘制/命中两侧共用的入口（含「行是否纯图行」那道门）
      */
     fun artRowScale(drawH: Float, rowHeight: Float, lineHeight: Float, rowSpan: Int): Float {
         if (rowSpan > 0 || rowHeight <= 0f || lineHeight <= 0f) return 1f
@@ -153,6 +154,75 @@ object GraphicGeometry {
 
     /** [artRowScale] 判「行高被压过」时允许的浮点容差（像素）。 */
     private const val ART_ROW_EPSILON_PX = 0.5f
+
+    /**
+     * 该行图形段的**纵向缩放系数 k** 的唯一入口（B1）：绘制侧与命中侧读同一份算式。
+     *
+     * 绘制侧的算式原本是 `CanvasConsoleView.drawImage` 里
+     * `if (pureArtRow) GraphicGeometry.artRowScale(h, rowHeight, lineHeightPx, image.rowSpan)` ——
+     * 本函数只是把「行是不是纯图行」那道门外提进来，核心算式仍然是 [artRowScale] 那一份，
+     * **任何一侧都不许另抄一遍**（两条实现必然漂移，而这里漂移的后果是「画在哪 ≠ 点哪里」）。
+     *
+     * 为什么命中侧也必须读它：压缩行的图实画高 = `heightPx × k`（`drawImage` 的
+     * `place[3] * k`），而命中盒若仍按 `heightPx` 算就比图高出一截 —— 图上方的空白也变成
+     * 可点区（语料形态 `ERB/BODY_INFO/GET_BODY_SETS.ERB:115` 的按钮图落在压缩行上）。
+     *
+     * @param pureArtRow 该行是否**只有图片段**（`RowLayout.Plan.artOnly`）：绘制侧只在这种行
+     *   上才缩图，非纯图行恒 1
+     * @param drawH 图按脚本尺寸算出的目标高（像素）；与绘制侧同一个入参
+     *   （`GraphicGeometry.inlineSize(image.heightPx, frame.height)`）
+     * @param rowHeight 该行在当前布局里的高度（像素，`RowLayout.Plan.heights`）
+     * @param lineHeight 执行行高（`Config.LineHeight` 的落地值，像素）
+     * @param rowSpan 合并竖带块的跨行数（0 = 普通图）
+     */
+    fun rowScaleOf(
+        pureArtRow: Boolean,
+        drawH: Float,
+        rowHeight: Float,
+        lineHeight: Float,
+        rowSpan: Int,
+    ): Float = if (pureArtRow) artRowScale(drawH, rowHeight, lineHeight, rowSpan) else 1f
+
+    /**
+     * 图形段所属行的 k，按段类型取入参：[InlineGraphic.Image] 才可能被绘制侧缩放
+     * （`CanvasConsoleView.drawImage`），[InlineGraphic.Rect] 走 `drawRect`、
+     * [InlineGraphic.Space] 什么都不画 ⇒ 这两类恒 1（给它们套上 k 会让命中盒与色块实际
+     * 覆盖的像素分叉）。
+     */
+    fun nodeRowScale(
+        graphic: InlineGraphic,
+        pureArtRow: Boolean,
+        rowHeight: Float,
+        lineHeight: Float,
+    ): Float = when (graphic) {
+        is InlineGraphic.Image ->
+            rowScaleOf(pureArtRow, graphic.heightPx.toFloat(), rowHeight, lineHeight, graphic.rowSpan)
+        is InlineGraphic.Rect -> 1f
+        is InlineGraphic.Space -> 1f
+    }
+
+    /**
+     * 命中用的纵向盒 `[top, bottom]`（相对行顶，像素）：把节点盒的高度按 [rowScale] 收窄（B1）。
+     *
+     * **上沿不乘 k** —— 这不是笔误：绘制侧的行内起点是 `rowTop + image.yOffsetPx`
+     * （`CanvasConsoleView.drawImage` 的 `top`），`yOffsetPx` 本身**不参与**缩放；被 k 压短的
+     * 只有图高（`place[3] * k`）。上沿也跟着乘会在 `ypos > 0` 的压缩行上算出一段**没有像素**
+     * 的带（错命中），并把真正的图底漏掉（少命中），两头都不对。
+     *
+     * 只收窄、不放大：传入的 k > 1（理论上不该出现）时原样返回底部，命中盒永远不越过
+     * 未压缩时的节点盒。
+     *
+     * @param topPx 节点盒上沿（`ConsoleImagePart.Top` 一类，相对行顶）
+     * @param bottomPx 节点盒下沿（`ConsoleImagePart.Bottom`）
+     * @param rowScale 该行的 k（[rowScaleOf] / [nodeRowScale] 的产物；非正或 NaN 视为不缩）
+     */
+    fun scaledVerticalBox(topPx: Int, bottomPx: Int, rowScale: Float): FloatArray {
+        val top = topPx.toFloat()
+        val height = (bottomPx - topPx).toFloat()
+        if (!(rowScale > 0f) || rowScale.isNaN()) return floatArrayOf(top, bottomPx.toFloat())
+        val scaled = height * rowScale
+        return floatArrayOf(top, top + if (scaled < height) scaled else height)
+    }
 
     /**
      * 行内图形段的纵盒 `(top, bottom)`，**相对行顶**（像素，与段自带的 `yOffsetPx` 同尺）。

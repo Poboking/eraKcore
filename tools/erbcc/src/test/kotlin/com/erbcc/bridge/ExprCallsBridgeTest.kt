@@ -36,6 +36,20 @@ class ExprCallsBridgeTest {
     }
 
     @Test
+    fun `浮点方法绝不进 int 或 str 桶`() {
+        // #FUNCTIONF（4.981 fork）：帧槽没有浮点列，降级成 #EXPR_RET#/#EXPR_RETS# 都会
+        // 静默读错槽/空串 ⇒ 与「类型未知」同桶，保持 FuncCall 交运行期重入通道（_RETF）。
+        val t = buildExprCallTable(
+            listOf(def("FLTM", isMethod = true)),
+            methodTypes = mapOf("FLTM" to OperandType.FLOAT),
+        )
+        assertTrue("FLTM" !in t.intMethods, "浮点方法不得进 int 降级桶")
+        assertTrue("FLTM" !in t.strMethods, "浮点方法不得进 str 降级桶")
+        assertEquals(setOf("FLTM"), t.unknownMethods)
+        assertEquals(ExprCallKind.METHOD_UNKNOWN, t.classify("fltm"))
+    }
+
+    @Test
     fun `不传类型表时全部方法保守不降级`() {
         // LabelDef 现状：`#FUNCTION`/`#FUNCTIONS` 在收集期被合并（Symbols.kt:637），
         // 类型唯一来源是调用方的 methodTypes ⇒ 不给类型就落 unknownMethods（METHOD_UNKNOWN），

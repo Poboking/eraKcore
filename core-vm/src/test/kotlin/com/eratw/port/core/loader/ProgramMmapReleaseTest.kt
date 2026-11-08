@@ -1,20 +1,27 @@
 package com.eratw.port.core.loader
 
 import com.eratw.port.core.code.CodeBuilder
+import com.eratw.port.core.code.ConstantPool
 import com.eratw.port.core.code.ErbcDecodeException
 import com.eratw.port.core.code.ErbcEncodeOptions
 import com.eratw.port.core.code.ErbcFormat
 import com.eratw.port.core.code.ErbcWriter
+import com.eratw.port.core.code.FlatStatements
+import com.eratw.port.core.code.LazyExprSource
+import com.eratw.port.core.code.LazyStatementPool
 import com.eratw.port.core.code.Opcode
 import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.SlotAddr
 import com.eratw.port.core.expr.Binary
+import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.IntLiteral
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.OperatorCode
 import com.eratw.port.core.expr.StrLiteral
 import com.eratw.port.core.expr.VarRef
+import com.eratw.port.core.stmt.ArgInterner
 import com.eratw.port.core.stmt.ArgType
+import com.eratw.port.core.stmt.Statement
 import com.eratw.port.core.stmt.AssignStmt
 import com.eratw.port.core.stmt.ExpressionArgument
 import com.eratw.port.core.stmt.FunctionCode
@@ -473,4 +480,60 @@ class ProgramMmapReleaseTest {
         ((raw[at + 1].toInt() and 0xFF) shl 8) or
         ((raw[at + 2].toInt() and 0xFF) shl 16) or
         ((raw[at + 3].toInt() and 0xFF) shl 24)
+
+    /**
+     * CMP-19 的补门（真机形状：玩几十分钟后凭空一条「映射已关闭」）：语句池与表达式池
+     * **共用同一个产物通道**，而 `LazyStatementRecords.releaseMmap` 只知道自己那两条回读路。
+     * 段 2 的记录窗/局部串表在装载期退成换块形态时（串池超 pin 上限、或 `mapWindow` 当场
+     * 建不出来静默回落），表达式池的运行期取用仍要再 map 一次 ⇒ 关通道必须整体拒绝，
+     * 连语句池那一下都不能叫（一叫就是 `channel.close()`，之后再也补不了块）。
+     */
+    @Test
+    fun `表达式池未 pin 住时整体拒绝关通道（语句池一次都不许被叫到）`() {
+        val pool = ConstantPool()
+        val stmt = RecordingStmtPool()
+        pool.attachLazyStatementPool(stmt)
+        pool.attachLazyExpressions(FakeExprSource(channelFree = false))
+
+        assertFalse(pool.releaseMmap(), "表达式侧还要换块 ⇒ 必须保持通道")
+        assertFalse(stmt.closedCalled, "releaseMmap 一旦被调到就是真把通道关了")
+
+        val pool2 = ConstantPool()
+        val stmt2 = RecordingStmtPool()
+        pool2.attachLazyStatementPool(stmt2)
+        pool2.attachLazyExpressions(FakeExprSource(channelFree = true))
+
+        assertTrue(pool2.releaseMmap(), "两条回读路都 pin 住了 ⇒ 照旧放行")
+        assertTrue(stmt2.closedCalled, "语句池侧的释放动作照常发生")
+    }
+
+    /** 只记「有没有被叫到关通道」，取值面一概不用（本用例只钉判定顺序）。 */
+    private class RecordingStmtPool : LazyStatementPool {
+        var closedCalled = false
+            private set
+
+        override val totalCount: Int get() = 0
+        override val materializedCount: Int get() = 0
+
+        override fun statementAt(index: Int): Statement = throw AssertionError("本用例不取语句")
+
+        override fun releaseRaws() = Unit
+
+        override fun seedInterning(roots: List<Expr?>): ArgInterner.Stats = ArgInterner.Stats(0, 0, 0, 0, 0L)
+
+        override fun buildFlatStatementsRange(from: Int, until: Int): FlatStatements =
+            throw AssertionError("本用例不压扁语句")
+
+        override fun releaseMmap(): Boolean {
+            closedCalled = true
+            return true
+        }
+    }
+
+    /** 表达式侧的判据桩：[channelFree] 模拟段 2 是否整段 pin。 */
+    private class FakeExprSource(private val channelFree: Boolean) : LazyExprSource {
+        override val nodeCount: Int get() = 0
+        override val channelFreeForRuntime: Boolean get() = channelFree
+        override fun node(index: Int): Expr = throw AssertionError("本用例不取节点")
+    }
 }

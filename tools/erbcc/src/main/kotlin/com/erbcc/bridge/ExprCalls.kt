@@ -3,7 +3,7 @@ package com.erbcc.bridge
 import com.eratw.port.core.compile.ExprCallTable
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.erbcc.LabelDef
-import com.eratw.port.erbcc.SymbolTable
+import com.eratw.port.erbcc.LabelTable
 import java.util.Locale
 
 /**
@@ -20,6 +20,10 @@ import java.util.Locale
  * - [LabelDef.isMethod] 且返回类型 **INT**（`#FUNCTION`）→ intMethods（可降级）。
  * - 返回类型 **STR**（`#FUNCTIONS`）→ strMethods：降级走 VM `_RETS` 字符串通道
  *   （合同 M3-A §3 A7：`_CALL` b bit28 + `#EXPR_RETS#<k>` 哨兵）。
+ * - 返回类型 **FLOAT**（`#FUNCTIONF`，4.981 fork）→ unknownMethods：**不降级**（帧槽无浮点
+ *   列，两条哨兵都不适用），运行期按 `FuncMeta.returnsFloat` 走 `_RETF` 重入通道。
+ *   显式分支而不是靠 `else`：浮点落进 int/str 任一路都会静默读错槽，这里把「不许进」
+ *   写成代码断言。
  * - 返回类型**未知**（methodTypes 缺声明）→ unknownMethods：**不降级**，运行期桥显式红。
  *   与 strMethods 分桶的理由：把可能实为 `#FUNCTION` 的方法误降级成字符串通道会
  *   **静默读错值**，而保守只是明确失败。
@@ -65,6 +69,11 @@ fun buildExprCallTable(
             OperandType.INT -> intMethods.add(key)
             // 明确 STR → _RETS 字符串通道（A7）
             OperandType.STR -> strMethods.add(key)
+            // 浮点方法（#FUNCTIONF）：**绝不进 int/str 两桶** —— 帧槽只有整型列/字符串列，
+            // 降级成 `#EXPR_RET#` 读槽或 `#EXPR_RETS#` 读串会静默读错槽/空串。
+            // 与「类型未知」同桶 = 保持 FuncCall 原节点，运行期走重入通道，
+            // 由 FuncMeta.returnsFloat 选 `_RETF`（ProcessRuntime.invokeUserMethod 第三通道）。
+            OperandType.FLOAT -> unknownMethods.add(key)
             // 类型未知 → 不降级（误判通道会静默读错值）
             else -> unknownMethods.add(key)
         }
@@ -78,10 +87,10 @@ fun buildExprCallTable(
 }
 
 /**
- * [SymbolTable] 形态的便捷入口（与 [com.erbcc.bridge.buildFuncDims] 一样吃 `LabelDef` 全集）。
+ * [LabelTable] 形态的便捷入口（与 [com.erbcc.bridge.buildFuncDims] 一样吃 `LabelDef` 全集）。
  * 同键多条定义只看生效者（[com.eratw.port.erbcc.DuplicateGroup.winner] 同口径）。
  */
 fun buildExprCallTable(
-    table: SymbolTable,
+    table: LabelTable,
     methodTypes: Map<String, OperandType> = emptyMap(),
 ): ExprCallTable = buildExprCallTable(table.nameKeys.flatMap { table.defsOf(it) }, methodTypes)

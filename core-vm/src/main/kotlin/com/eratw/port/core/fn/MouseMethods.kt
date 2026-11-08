@@ -87,6 +87,10 @@ fun mouseState(c: BuiltinContext): MouseState = mouseStateOf(c.aux)
  * 其余名字 → `throw new ExeEE("異常な名前")`（:7859）。注册表只把这两个名字指向本类
  * （:9165-9166），故第三条分支在正常装载下不可达；移植侧只保留同样的守卫
  * （本仓 `core/err` 只有 [CodeEE]，故用之，不新增异常类）。
+ *
+ * 单位：原版的窗口像素与脚本 px 是同一把尺（1:1 渲染）；本移植的 [MouseState] 存宿主报的
+ * 设备像素，读数出口折回**脚本 px**（与 `CLIENTWIDTH()` 同尺，注入口见
+ * [MouseState.pointerToScriptPx]）。
  */
 fun mousePositionValue(name: String, state: MouseState): Long = when (name) {
     "MOUSEX" -> state.mouseX()   // :7861
@@ -141,7 +145,7 @@ fun registerMouseMethods(r: BuiltinRegistry) {
     // 恒返回 0L（:8498）——原版就是常量 0，不是「失败返 0」。
     r.register(BuiltinMethod("FLOWINPUT", I, 1, 4) { c, a ->
         val f = flowInputFlagsOf(c.aux)
-        f.flowinputDef = iv(a[0]!!)                                        // :8485（无 != 0 转换，原样存 long）
+        f.flowinputDef = requiredIntArg(a, 0, "FLOWINPUT")                          // :8485（无 != 0 转换，原样存 long）
         if (a.size > 1 && a[1] != null) f.flowinput = iv(a[1]!!) != 0L      // :8486-8489
         if (a.size > 2 && a[2] != null) f.flowinputCanSkip = iv(a[2]!!) != 0L // :8490-8493
         if (a.size > 3 && a[3] != null) f.flowinputForceSkip = iv(a[3]!!) != 0L // :8494-8497
@@ -152,7 +156,7 @@ fun registerMouseMethods(r: BuiltinRegistry) {
     // ArgTypeList{Int,String} 且 OmitStart = 1（:8507-8516）⇒ 1..2 个；恒返回 0L（:8529）。
     r.register(BuiltinMethod("FLOWINPUTS", I, 1, 2) { c, a ->
         val f = flowInputFlagsOf(c.aux)
-        f.flowinputString = iv(a[0]!!) != 0L                               // :8524
+        f.flowinputString = requiredIntArg(a, 0, "FLOWINPUTS") != 0L                // :8524
         if (a.size > 1 && a[1] != null) f.flowinputDefString = sv(a[1]!!)   // :8525-8528
         Value.IntV(0L)                                                     // :8529
     })

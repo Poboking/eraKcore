@@ -153,7 +153,15 @@ class AudioMixer {
      * 挂起动作是 [SoundChannel.suspendForFocus]，只动平台传输，不动 `Playing` / `paused`
      * ⇒ ISPLAYINGSOUND / ISPLAYINGBGM 与 PLAYSOUND 选道读数不受影响（见 [AudioFocusEvent]）。
      *
+     * **逐声道隔离（2026-11-01 稳定性复查）**：`onPaused` / `onResumed` / `stop()` 最终落到
+     * `MediaPlayer`，部分 OEM 在非法状态下抛 `IllegalStateException`。旧写法是一条
+     * `count { ... }`：一号声道抛了，**后面全部声道都不挂起**（后台继续出声），异常还会沿
+     * `AudioFocusSession.deliver` 抛回 AudioManager 回调线程（进程级崩溃）。焦点旁路是移植侧
+     * 新增的、脚本不可见，故按 [SoundChannelTable.closeAll] 的同一口径隔离：失败声道不计入
+     * 返回值，其余声道照常处理，异常不上抛。
+     *
      * @return 本次真正改变了传输状态的声道数（0 = 幂等空转，调用方可据此跳过日志）。
+     *   平台钩子失败的那条不计入（它有没有动传输视失败点而定，见 [SoundChannel.suspendForFocus]）。
      */
     @Synchronized
     fun onFocusEvent(event: AudioFocusEvent): Int {
@@ -176,12 +184,26 @@ class AudioMixer {
         }
     }
 
-    /** 逐个挂起当前挂在混音器上的声道（[inputs] 的快照，避免回调改动集合）。 */
-    private fun suspendInputs(): Int = inputs.toList().count { it.suspendForFocus() }
+    /**
+     * 逐个挂起当前挂在混音器上的声道（[inputs] 的快照，避免回调改动集合）。
+     * 单条声道抛异常只丢它自己（见 [onFocusEvent] 的逐声道隔离）。
+     */
+    private fun suspendInputs(): Int {
+        var changed = 0
+        for (channel in inputs.toList()) {
+            if (runCatching { channel.suspendForFocus() }.getOrDefault(false)) changed++
+        }
+        return changed
+    }
 
     /** 逐个按作用域收尾；`resumeFromFocus` 可能把一次性音效 [SoundChannel.stop]，故先取快照。 */
-    private fun resumeInputs(scope: AudioFocusScope): Int =
-        inputs.toList().count { it.resumeFromFocus(scope) }
+    private fun resumeInputs(scope: AudioFocusScope): Int {
+        var changed = 0
+        for (channel in inputs.toList()) {
+            if (runCatching { channel.resumeFromFocus(scope) }.getOrDefault(false)) changed++
+        }
+        return changed
+    }
 
     /** SoundMixer.cs:73-77 —— `Playing = true` 并挂进混音输入。不清 `paused`（原版不清）。 */
     @Synchronized
@@ -190,7 +212,9 @@ class AudioMixer {
         inputs.add(channel)
         // 焦点挂起期间脚本又起了一条（PLAYSOUND / PLAYBGM）：立刻跟随当前作用域挂起，
         // 否则后台会突然出声。等 GAIN 时与其它声道走同一条恢复路径。
-        if (focusScope != null) channel.suspendForFocus()
+        // 隔离：焦点旁路是移植侧新增的，平台钩子抛异常不许把 PLAYSOUND / PLAYBGM 变成
+        // CodeEE（原版没有这一步，脚本不该看见它）；声道留在混音器里，GAIN 时再收尾。
+        if (focusScope != null) runCatching { channel.suspendForFocus() }
     }
 
     /** SoundMixer.cs:79-83 —— `Playing = false` 并摘掉混音输入。 */
@@ -528,6 +552,13 @@ class SoundChannel(val mixer: AudioMixer = AudioMixer()) {
      *
      * 焦点挂起随之作废（[focusSuspended] 清、位置读数丢）：`stop()` 之后没有可恢复的对象，
      * 迟到的 `GAIN` 不能再把它拉起来。
+     *
+     * **release 必达（2026-11-01 稳定性复查）**：`onStopped` 落到 `MediaPlayer.stop()`，部分 OEM
+     * 在非法状态下抛 `IllegalStateException`。旧写法是顺序两句，`onStopped` 一抛 `release` 就
+     * 被跳过 —— 解码器/播放器句柄留在平台侧，脚本再 `PLAYSOUND` 换流又开一个新的，句柄随次数累积。
+     * 现在 `release` 放在 `finally`：异常**照旧上抛**（语句层 CodeEE 口径见类头），
+     * [decoder] 也照旧保持非 null —— 原版 `stream.Dispose()` 抛出时 `stream` 同样没置 null
+     * （Sound.cs:158-161），下一次 `play` / `stop` 还会再碰它。
      */
     fun stop() {
         focusSuspended = false
@@ -536,8 +567,11 @@ class SoundChannel(val mixer: AudioMixer = AudioMixer()) {
         paused = false
         decoder?.let {
             it.setNaturalEndListener(null)
-            it.onStopped()
-            it.release()
+            try {
+                it.onStopped()
+            } finally {
+                it.release()
+            }
         }
         decoder = null
     }

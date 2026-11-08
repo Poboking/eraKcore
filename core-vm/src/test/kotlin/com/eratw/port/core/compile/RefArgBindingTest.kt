@@ -221,7 +221,8 @@ class RefArgBindingTest {
      * 原版这四个名字是 `LocalVariableToken`，`GetArray()` 返回所属函数的数组本体
      * （spec: LocalVariableToken.cs:17-37）；REF 绑定与用户变量同一条 `SetRef`
      * （ReferenceToken.cs:125-128）。旧实现只查 `VariableStore.userVar`，把这四个名字
-     * 静默跳过 ⇒ 被调首次读就报 `引用变量 … 未绑定目标（EmptyRefVar）`
+     * 静默跳过 ⇒ 被调首次读就报 EmptyRefVar（现取官方逐字
+     * 「引用类型变量"…"缺少引用对象」，见 `core/vars/VarErrorText.kt`）
      * （语料 `qol_skipmove.ERB` 的 `SPLIT_F(…, LOCALS)` 形态）。
      */
     @Test
@@ -761,7 +762,7 @@ class RefArgBindingTest {
         store.declareUserVar(refVar("REF_TGT"), "NOINFO")
         val rt = ProcessRuntime(pb.program, store, FunctionTable(listOf(pb.meta("NOINFO", argInt = 1), pb.meta("MAIN5", argInt = 1))), VmConfig())
         val e = assertFailsWith<CodeEE> { rt.execute() }
-        assertEquals(true, e.message!!.contains("EmptyRefVar"), "实际=${e.message}")
+        assertEquals("引用类型变量\"REF_TGT\"缺少引用对象", e.message, "Error.EmptyRefVar 逐字（Lang.cs:1642 / zhs 两表同文）")
     }
 
     // ------------------------------------------------------------------

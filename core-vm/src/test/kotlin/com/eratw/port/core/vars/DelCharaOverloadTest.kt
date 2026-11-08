@@ -15,6 +15,7 @@ import kotlin.test.Test
 import kotlin.test.assertFailsWith
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
 
 /**
  * M4-M `m-delchara`：DELCHARA 两条重载的分流 + 文案原文 + 官方 bug 复刻
@@ -304,68 +305,135 @@ class DelCharaOverloadTest {
     }
 
     // ------------------------------------------------------------------
-    // 单元 6 · 失败路径的 Dispose 相位：半死态取「不可观测」处置（B）
+    // 单元 6 · 失败路径的半死态（B5 翻案落地，2026-11-06）
     // ------------------------------------------------------------------
 
     /**
-     * **原版 :1266-1272 读完的结论**：原版是「边校验边 `Dispose`、全部校验通过后才
-     * `Remove`」。于是在第 k 个元素抛 CodeEE（越界 `:1259` 或重复 `:1264`）的时刻，
-     * 前 k 个元素**已经 Dispose 但仍在 CharacterList 里**——`CharacterData.Dispose`
-     * （CharacterData.cs:756-770）只把本实例的 dataIntegerArray / dataStringArray /
-     * dataIntegerArray2D 元素置 null，不写共享状态、不动 Count 与顺序。
-     *
-     * 处置 = **B（证明不可观测）**，本侧不表示半死态：
-     * - 异常从 `DoInstruction`（Process.cs:1047）穿出 `runScriptProc`，由 `DoScript` 顶层
-     *   catch（Process.cs:462-476）→ `handleException`（Process.cs:595-643）打印；
-     *   `console.ThrowError`（EmueraConsole.cs:757-768）置 `ConsoleState.Error`，
-     *   `RunEmueraProgram`（EmueraConsole.cs:1090-1100）在 Error 态不再调 `DoScript`
-     *   ⇒ 同一会话里没有下一条语句能读到那半个表；
-     * - 回标题 `GotoTitle`（EmueraConsole.cs:2570-2578）→ `BeginTitle`
-     *   （Process.cs:480-485）→ `vEvaluator.ResetData()` 把半死表整体丢弃。
-     * ⇒ 抛错瞬间唯一可观测的三件事（异常文案、CHARANUM、按编号读角色）在两侧一致。
-     * 本用例钉这个读数（本侧校验期零副作用：前缀角色完好、照常可读）。
-     *
-     * 成功路径两侧等价（`Dispose` 不写共享状态、`Remove` 的次序不影响余表顺序）。
+     * **B5 翻案**（旧断言「本侧校验期零副作用、前缀角色完好可读」废弃，2026-11-06）：
+     * 原版是「边校验边 `Dispose`（:1267）、全部校验通过后才 `Remove`（:1269-1272）」，
+     * 第 k 个元素越界（`:1259`）或重复（`:1264`）抛 CodeEE 时，前 k 个元素**已释放但仍在
+     * CharacterList 里**；`CharacterData.Dispose`（CharacterData.cs:756-770）把
+     * dataIntegerArray / dataStringArray / dataIntegerArray2D 置 null，而 0 维的
+     * dataInteger[2] / dataString[4] 与用户 CVAR（UserDefCVarDataList，:85/:124）**不在
+     * 释放面内**。本侧 [CharacterTable.disposeRow] 半死位在删校验循环内置上、抛错不回滚，
+     * 后续访问按同一释放面分档：
+     * - 0 维（NO/NAME/CALLNAME/…）：照常读旧值 —— 原断言里这些读数**逐条保留**；
+     * - 系统 1 维/2 维（BASE/CSTR/CDFLAG…）：读写皆抛裸 [NullPointerException]
+     *   （.NET NRE 的裸 JVM 映射，口径照 §13.2 分歧 C 先例；新断言）。
+     * 单参路径无此态：`:1243` 判定在 `:1247` Dispose 之前，抛错时没有行被释放。
      */
     @Test
-    fun `失败路径现状钉桩 抛错后前缀角色完好可读 原版此处已释放`() {
+    fun `失败路径半死态 前缀角色仍在表内 0维可读 1维2维读写踩NRE`() {
         val s = storeWith(10, 20, 30)
-        assertFailsWith<CodeEE> { s.deleteCharacters(longArrayOf(0, 1, 9)) }
-        // 前两个位置在原版已被 Dispose（:1267）但仍在表内；本侧零副作用，读数一致
+        val e = assertFailsWith<CodeEE> { s.deleteCharacters(longArrayOf(0, 1, 9)) }
+        assertEquals("试图删除不存在的注册角色(System.Int64[])", e.message)
+        // 半死行仍在表内：CHARANUM 与左移序不变（Remove 循环 :1269 不可达）
         assertEquals(3L, charaNum(s))
         assertEquals(listOf(10L, 20L, 30L), noSequence(s))
+        // 0 维不在 Dispose 释放面（CharacterData.cs:756-770 只置三张 1 维/2 维数组）：
         assertEquals("角色10", s.readStr("NAME", longArrayOf(0)))
+        assertEquals(10L, s.readInt("NO", longArrayOf(0)))
         assertEquals("角色20", s.readStr("NAME", longArrayOf(1)))
+        // 1 维（C_INT1 = dataIntegerArray）读写皆 NRE 等价（:1267 已把 0/1 两行置 null）
+        val nre0 = assertFailsWith<NullPointerException> { s.readInt("BASE", longArrayOf(0, 0)) }
+        assertTrue(nre0.message!!.contains("半死"), nre0.message)
+        assertFailsWith<NullPointerException> { s.writeInt("BASE", longArrayOf(0, 0), 5) }
+        assertFailsWith<NullPointerException> { s.readInt("BASE", longArrayOf(1, 0)) }
+        // 2 维（C_INT2 = dataIntegerArray2D）同面
+        assertFailsWith<NullPointerException> { s.readInt("CDFLAG", longArrayOf(0, 0, 0)) }
+        // 1 维字符串（C_STR1 = dataStringArray）
+        assertFailsWith<NullPointerException> { s.readStr("CSTR", longArrayOf(0, 0)) }
+        // VARSET 整段写同样过闸（原版 CharaVariableToken.SetValueAll 落 dataIntegerArray[i]）
+        assertFailsWith<NullPointerException> { s.setAll("CFLAG", 1, charaPos = 0) }
+        // 第 2 行（未进失败批次）完好
+        assertEquals(0L, s.readInt("BASE", longArrayOf(2, 0)), "活行 1 维照常读（BASE 无模板值，缺省 0）")
         // 单参路径两侧无此分歧：`:1243` 的判定在 `:1247` 之前，抛错时没有任何 Dispose 发生
         assertFailsWith<CodeEE> { s.deleteCharacter(7) }
-        assertEquals(listOf(10L, 20L, 30L), noSequence(s))
+        assertEquals(0L, s.readInt("BASE", longArrayOf(2, 0)), "活行 1 维照常读（BASE 无模板值，缺省 0）")
     }
 
     /**
-     * 半死态（B：不可观测）的**三项可观测面**逐项钉死——失败路径的返回值、后续 CHARANUM、
-     * 后续按编号取角色，以及「后续还能正常删」：
-     * - 返回值：只有 CodeEE，文案走 `:1259` 的固定串（编号丢失，ADR-005）；
-     * - 后续 CHARANUM：`:1269-1272` 的 Remove 循环不可达 ⇒ 不缩表；
-     * - 后续按编号取角色：前缀 0 号在原版已被 Dispose（`:1267`），但原版在 Error 态不会再
-     *   执行任何语句（Process.cs:462-476 / EmueraConsole.cs:757-768 / :1090-1100）⇒ 不可观测；
-     *   本侧该位置完整可读，读数与「未 Dispose」相同；
-     * - 后续删除：表里没有「已死」占位，`DELCHARA 0` 照常成功并左移。
+     * 释放面之外的列族在半死行上照常读写：用户 CVAR（原版 UserDefCVarDataList，
+     * CharacterData.cs:85/:124，Dispose 不触碰）与结构操作（SWAPCHARA 只交换列表引用，
+     * spec: VariableEvaluator.cs:1378-1384；PICKUPCHARA 的交换就位同面）。
      */
     @Test
-    fun `失败路径半死态不可观测 返回值CHARANUM与按编号取角色均不变`() {
+    fun `半死行的用户CVAR照常读写 SWAP不闸`() {
         val s = storeWith(10, 20, 30)
-        val e = assertFailsWith<CodeEE> { s.deleteCharacters(longArrayOf(0, 9)) }
-        assertEquals("试图删除不存在的注册角色(System.Int64[])", e.message)
-        assertEquals(3L, charaNum(s))
-        // 按编号取角色（原版 :1267 已 Dispose 的前缀位）
-        assertEquals(10L, s.readInt("NO", longArrayOf(0)))
-        assertEquals("角色10", s.readStr("NAME", longArrayOf(0)))
-        assertEquals(20L, s.readInt("NO", longArrayOf(1)))
-        assertEquals(30L, s.readInt("NO", longArrayOf(2)))
-        // 表里没有半死占位：后续删除照常
+        s.declareUserVar(DimSpec("CVARX", isStr = false, dims = intArrayOf(3), isCharaData = true))
+        s.writeInt("CVARX", longArrayOf(0, 1), 7)
+        assertFailsWith<CodeEE> { s.deleteCharacters(longArrayOf(0, 9)) }
+        // 半死行（原 0 号）的用户 CVAR 照常读写旧值（释放面外）
+        assertEquals(7L, s.readInt("CVARX", longArrayOf(0, 1)))
+        s.writeInt("CVARX", longArrayOf(0, 1), 8)
+        assertEquals(8L, s.readInt("CVARX", longArrayOf(0, 1)))
+        // SWAPCHARA 不过闸（原版只换列表引用，半死行可被挪位）
+        s.swapCharacters(0, 2)
+        assertEquals(8L, s.readInt("CVARX", longArrayOf(2, 1)), "半死位跟着行走")
+        assertEquals(10L, s.readInt("NO", longArrayOf(2)))
+    }
+
+    /**
+     * 半死行可被后续删除摘除（原版对已 Dispose 的角色再 Dispose 是空操作再 Remove，
+     * :1267/:1269-1272），摘除后**其余半死位跟着左移**（位值随行，不随位置）：
+     * 失败批次 {0,1,9} 释放 0/1 两行后 `DELCHARA 0` 成功，原 1 号（仍半死）落到 0 号位，
+     * 其 1 维变量照旧 NRE、0 维照旧可读。
+     */
+    @Test
+    fun `半死行可被后续删除摘除 且半死位随行走`() {
+        val s = storeWith(10, 20, 30)
+        assertFailsWith<CodeEE> { s.deleteCharacters(longArrayOf(0, 1, 9)) }
         s.deleteCharacter(0)
         assertEquals(2L, charaNum(s))
         assertEquals(listOf(20L, 30L), noSequence(s))
+        assertEquals("角色20", s.readStr("NAME", longArrayOf(0)), "0 维照常")
+        assertFailsWith<NullPointerException>("原 1 号的半死位左移到了 0 号位") { s.readInt("BASE", longArrayOf(0, 0)) }
+        // 未入批次的行照旧完好
+        assertEquals(0L, s.readInt("BASE", longArrayOf(1, 0)), "未入批次的行照旧完好")
+    }
+
+    /**
+     * 成功路径不残留半死位（removeAt 左移把位值随行搬运，被摘行的位出清）：
+     * 全员 1 维变量照常可读。旧断言「成功路径两侧等价」逐字保留。
+     */
+    @Test
+    fun `成功路径不残留半死位 余行1维可读`() {
+        val s = storeWith(10, 20, 30, 40, 50)
+        s.deleteCharacters(longArrayOf(1, 3))
+        assertEquals(listOf(10L, 30L, 50L), noSequence(s))
+        for (i in 0 until 3) assertEquals(0L, s.readInt("BASE", longArrayOf(i.toLong(), 0)))
+        // 失败批次之后来一发成功的（摘的是别的行）：成功批次**只清自己摘走的行**，
+        // 之前失败批次留下的半死位不因此消失（原版同：Remove 不碰别的元素的释放态）——
+        // 这条要钉的是「左移只搬位值，不制造/不清除半死」。
+        val t = storeWith(10, 20, 30, 40)
+        assertFailsWith<CodeEE> { t.deleteCharacters(longArrayOf(0, 9)) }
+        t.deleteCharacters(longArrayOf(2))
+        assertEquals(listOf(10L, 20L, 40L), noSequence(t))
+        assertFailsWith<NullPointerException>("原半死位不受成功批次影响") { t.readInt("BASE", longArrayOf(0, 0)) }
+        assertEquals(0L, t.readInt("BASE", longArrayOf(1, 0)))
+        assertEquals(0L, t.readInt("BASE", longArrayOf(2, 0)))
+        // 单参摘掉半死行后全表无半死位；新加的行走 addBare/resetChar，位值干净
+        t.deleteCharacter(0)
+        assertEquals(0L, t.readInt("BASE", longArrayOf(0, 0)))
+        t.addCharacter(10)
+        assertEquals(0L, t.readInt("BASE", longArrayOf(2, 0)), "新行不是半死")
+    }
+
+    /**
+     * COPYCHARA / ADDCOPYCHARA 的整行搬运过半死闸：原版 `CopyTo`
+     * （CharacterData.cs:239-349）读写 `dataIntegerArray` 一族，源或目标是半死行即
+     * NullReferenceException（:1267 释放面）。此形态在原版同样不可达（TRYC 家族捕不到
+     * DELCHARA 的 CodeEE，见 [deleteCharacters] KDoc 的可观测性口径），构造用例钉闸位。
+     */
+    @Test
+    fun `COPYCHARA 源为半死行时 NRE`() {
+        val s = storeWith(10, 20, 30)
+        assertFailsWith<CodeEE> { s.deleteCharacters(longArrayOf(0, 9)) }
+        assertFailsWith<NullPointerException> { s.copyCharacter(0, 2) }
+        assertFailsWith<NullPointerException> { s.addCopyCharacter(0) }
+        // 活行之间照常拷贝（from=1, to=2）
+        s.copyCharacter(1, 2)
+        assertEquals(20L, s.readInt("NO", longArrayOf(2)))
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.eratw.port.render.view
 
+import com.eratw.port.core.host.CbgLayerSnapshot
 import com.eratw.port.render.displaylist.InlineGraphic
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
@@ -73,10 +74,58 @@ class GraphicsLayer(
         val opacity: Int,
     )
 
+    /**
+     * SETIMAGELAYERL 一条图层的**渲染侧快照**（WIRE-3 / C-IMAGE-LAYER@1）。
+     *
+     * 字段与 `GraphicsSink.setImageLayer` 同名同序；由 [GraphicsSinkBridge] 在 VM 线程构造。
+     * [lineNo] 是**显示行**索引（原版 `GetLineNo`，非 `LINECOUNT`）；[opacity] 原样 0..255。
+     * 屏幕坐标换算见 [ImageLayerGeometry]（公式 `specs/isa.yaml:2574`）。
+     */
+    data class ImageLayerSnapshot(
+        val spriteName: String,
+        val depth: Long,
+        val lineNo: Int,
+        val xpos: Int,
+        val ypos: Int,
+        val width: Int,
+        val height: Int,
+        val opacity: Int,
+        val followScroll: Boolean,
+    )
+
+    /**
+     * TEXT_BGC_ON 的**文字衬底快照**（WIRE-4 / C-TEXT-BG@1 消费面）。
+     *
+     * [rgb] = `0xRRGGBB`；[opacityPercent] = 0..100 百分比（alpha 折算 = `opacity × 255 / 100`，
+     * `specs/isa.yaml:2456`）。清除态（`TEXT_BGC_OFF` / `rgb < 0`）由 [textBackground] 的 null 表达。
+     */
+    data class TextBgSnapshot(val rgb: Int, val opacityPercent: Int)
+
     private val inline = ConcurrentLinkedQueue<InlineGraphic>()
 
     /** 单调水位：内联段入队、背景换代都会推进它，绘制侧据此判断需不需要重画。 */
     val revision: AtomicLong = AtomicLong(0L)
+
+    /**
+     * 内联段的**到达版本**（单调递增，只增不减）：每次 [enqueue] 推进一格，[drainInline] 与
+     * [reset] 都不动它（排空不是到达，清队列也不是）。
+     *
+     * 与 [revision] 的分工：[revision] 是**整层**的水位（内联段 / 背景 / 图层 / 衬底 / CBG 共用），
+     * 绘制侧拿它判「要不要重画」；本值只数**内联段到达**，给消费侧判「有没有已到达但还没发布
+     * 进屏的内联段」。后者原来拿 [hasPendingInline] 这个**队列状态**当代理，而队列由发布方
+     * 自己排空 —— 状态代理与发布水位在「排空了但没交出去」「被 reset 清空」「换了消费侧」
+     * 这些形态上会分叉；版本比较不会。
+     *
+     * 纪律（`ConsoleFeed.publish` 一侧）：读版本在 [drainInline] **之前**，记水位在整帧提交
+     * **成功之后**。反过来（先排空再读）会让两次操作之间到达的段被算进「已发布」，那一批就
+     * 永远交不上去。
+     *
+     * 只由生产线程（VM 线程）推进；读侧（渲染线程）只读。
+     */
+    private val inlineRev = AtomicLong(0L)
+
+    /** 内联段的到达版本（口径与纪律见 [inlineRev] 的 KDoc）。 */
+    fun inlineRevision(): Long = inlineRev.get()
 
     @Volatile
     private var bg: List<BgPlacement> = emptyList()
@@ -84,18 +133,86 @@ class GraphicsLayer(
     /** 当前背景层（**已按 depth 降序**排好，绘制侧直接顺序画即可）。 */
     val background: List<BgPlacement> get() = bg
 
-    /** 有没有待落的内联段（`ConsoleFeed.pump` 用它决定「文字流没动但图来了」也要交）。 */
+    /**
+     * SETIMAGELAYERL 图层表：写侧（VM 线程）维护的按 depth 索引表，同 depth 覆盖。
+     *
+     * 保留口径 = `LinkedHashMap` 的插入序（同 depth 覆盖**保留原插入位置**）。读侧只读
+     * [imageLayers] 的不可变快照，不碰本表。
+     */
+    private val imageLayerIndex = LinkedHashMap<Long, ImageLayerSnapshot>()
+
+    /** 当前图层快照（**不可变**；写侧构造新列表后整体替换，读侧看不到中间态）。 */
+    @Volatile
+    private var imgLayers: List<ImageLayerSnapshot> = emptyList()
+
+    /**
+     * 当前图层列表（按 depth 索引口径 = 写侧 `LinkedHashMap` 的插入序）。
+     *
+     * 生产者是 VM 线程，消费者是渲染线程；与 [background] 同一无锁不可变快照语义。
+     */
+    val imageLayers: List<ImageLayerSnapshot> get() = imgLayers
+
+    /** 当前文字衬底（null = 无衬底）。`setTextBgColor` 与 `TEXT_BGC_OFF` 的落点。 */
+    @Volatile
+    private var textBg: TextBgSnapshot? = null
+
+    /** 当前文字衬底快照；null = 清除态。 */
+    val textBackground: TextBgSnapshot? get() = textBg
+
+    /**
+     * CBG 图层快照（`CBGSETG` / `CBGSETSPRITE` / `CBGSETBUTTONSPRITE` / `CBGCLEAR*` 的落点）。
+     *
+     * 字段与 `com.eratw.port.core.host.CbgLayerSnapshot` 同源（core 侧就是渲染侧的契约 DTO，
+     * 本层不再复制一份，避免两处字段名漂移）；列表**已按 depth 降序**，写侧在 VM 线程
+     * 整体换代，读侧拿到的快照看不到中间态（与 [background] / [imageLayers] 同一纪律）。
+     * 空表 = 没有 CBG 图层。
+     */
+    @Volatile
+    private var cbg: List<CbgLayerSnapshot> = emptyList()
+
+    /** 当前 CBG 图层快照（不可变，按 depth 降序）。 */
+    val cbgLayers: List<CbgLayerSnapshot> get() = cbg
+
+    /**
+     * `GraphicsSink.setCbgLayers` 的落点（VM 线程）：整体换代并推进 [revision]。
+     *
+     * 不做排序、不做拷贝：core 的 `CbgPool.snapshot` 每次给一份新建的只读列表
+     * （已按 depth 降序，`EmueraConsole.cs:645-646` 的 `Add + Sort` 语义）。
+     */
+    fun setCbgLayers(layers: List<CbgLayerSnapshot>) {
+        cbg = layers
+        revision.incrementAndGet()
+    }
+
+    /**
+     * **队列状态**查询：此刻队列里还有没有未排空的段。
+     *
+     * 它回答的是「队列空不空」，**不是**「有没有待发布的内容」—— 发布方自己排空队列，
+     * 所以这个布尔在排空之后就变假，哪怕那一批内容因为提交失败根本没上屏；[reset] 清队列
+     * 也会让它变假。发布判据的唯一权威是 [inlineRevision] 与消费侧记下的发布水位
+     * （`ConsoleFeed.publishedInlineRevision`，见 [com.eratw.port.render.adapter.ConsoleFeed.pump]）。
+     * 本方法保留给测试、预览与诊断路径。
+     */
     fun hasPendingInline(): Boolean = !inline.isEmpty()
 
-    /** 图形语句入队一段（VM 线程）。 */
+    /**
+     * 图形语句入队一段（VM 线程）。
+     *
+     * 顺序写死：先入队、再推进 [inlineRev]、最后推进 [revision]。反过来的话消费侧可能先
+     * 看到新版本、排空时却还没有那一段，水位一记就把这一段永久漏掉（见 [inlineRev] 的 KDoc）。
+     */
     fun enqueue(graphic: InlineGraphic) {
         inline.add(graphic)
+        inlineRev.incrementAndGet()
         revision.incrementAndGet()
     }
 
     /**
      * 排空内联队列（渲染线程，`ConsoleFeed` 提交快照的那一步调）。
      * 返回的列表按入队顺序，空队列返回空表且不分配。
+     *
+     * 不动 [inlineRevision]：排空是消费动作，不是到达（水位只由 [enqueue] 推进）。
+     * 调用方要在**排空之前**读版本，成功上屏之后再记水位。
      */
     fun drainInline(): List<InlineGraphic> {
         if (inline.isEmpty()) return emptyList()
@@ -151,10 +268,45 @@ class GraphicsLayer(
         revision.incrementAndGet()
     }
 
-    /** 整层作废（会话重启 / 读档后重建；清背景也清未落的内联段）。 */
+    /**
+     * `SETIMAGELAYERL`：登记/覆盖一条行锚定图层（VM 线程）。
+     *
+     * 同 depth 覆盖（`LinkedHashMap` 键），写入构造新快照并推进 [revision] —— 与
+     * [background] 的换代同一无锁语义。`height <= 0` 的回落与 `lineNo` 的显示行口径
+     * 已由 core 算好（见 `GraphicsSink.setImageLayer` 的 KDoc），本层原样收下。
+     */
+    fun setImageLayer(snapshot: ImageLayerSnapshot) {
+        imageLayerIndex[snapshot.depth] = snapshot
+        imgLayers = ArrayList(imageLayerIndex.values)
+        revision.incrementAndGet()
+    }
+
+    /**
+     * `TEXT_BGC_ON` / `TEXT_BGC_OFF`：设置/清除文字衬底（VM 线程）。
+     *
+     * `rgb < 0` ⇒ 清除（置 null，`TEXT_BGC_OFF` 的 `(-1, 0)` 哨兵，core 无需另设入口）；
+     * 否则 [rgb] = `0xRRGGBB`、[opacityPercent] = 0..100。写入推进 [revision]。
+     */
+    fun setTextBackground(rgb: Int, opacityPercent: Int) {
+        textBg = if (rgb < 0) null else TextBgSnapshot(rgb and 0xFFFFFF, opacityPercent)
+        revision.incrementAndGet()
+    }
+
+    /**
+     * 整层作废（会话重启 / 读档后重建；清背景也清未落的内联段、图层与文字衬底）。
+     *
+     * 队列里还没被排空的段随会话一起丢弃（既有语义），[inlineRevision] 因此**不推进** ——
+     * 丢弃不是到达。若丢弃的那一刻队列里还有未发布的到达（消费侧水位落后一格），水位会
+     * 停在原地：下一次 `ConsoleFeed.pump` 因此多交一帧幂等快照
+     * （`ConsoleScreen.submitSnapshot` 内容没变返回空脏区），不会漏也不会重画。
+     */
     fun reset() {
         inline.clear()
         bg = emptyList()
+        imageLayerIndex.clear()
+        imgLayers = emptyList()
+        textBg = null
+        cbg = emptyList()
         revision.incrementAndGet()
     }
 

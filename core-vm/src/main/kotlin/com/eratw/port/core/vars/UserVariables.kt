@@ -21,6 +21,7 @@ import com.eratw.port.core.expr.VariableReader
 import com.eratw.port.core.lexer.CharStream
 import com.eratw.port.core.lexer.CurlyBraceSubWord
 import com.eratw.port.core.lexer.ErbLexer
+import com.eratw.port.core.lexer.LangKey
 import com.eratw.port.core.lexer.LexAnalyzeFlag
 import com.eratw.port.core.lexer.LexEndWith
 import com.eratw.port.core.lexer.LexError
@@ -31,6 +32,7 @@ import com.eratw.port.core.lexer.Token
 import com.eratw.port.core.lexer.TripleSymbolSubWord
 import com.eratw.port.core.lexer.YenAtSubWord
 import java.nio.file.Path
+import java.util.Locale
 
 /**
  * `#DIM` / `#DIMS` 声明解析结果。
@@ -51,6 +53,28 @@ class DimSpec(
     val isPrivate: Boolean = false,
     val defaultsInt: LongArray? = null,
     val defaultsStr: List<String>? = null,
+    /**
+     * `#DIMF` 的浮点初值（4.981 fork 的 `DefaultFloat`）。
+     *
+     * **单值、全格广播**：fork-src `UserDefinedVariableData.cs:21` 只有一个
+     * `DefaultFloat` 字段（对比整数/字符串侧的 `DefaultInt[]`/`DefaultStr[]`），
+     * 初值表段 `:317-338` 接受浮点或整数常量、整数按 double 存。因此
+     * `#DIMF X, 5 = 1.5` 的 5 格全部是 1.5，而不是整数侧那种「只填前缀」。
+     * 多值（`= 1.5, 2.5`）在声明期拒绝（见 [DimParser.parse]）。
+     *
+     * null = 没写初值 ⇒ 存储层按 0.0 建列（fork-src `VariableData.cs:668-669`）。
+     * TODO(verify)：fork-src 不在本机；`DefaultFloat` 单值广播与「多值拒绝」按上述
+     * 字段形态与验收口径实现，待真机/真 Emuera 对拍收口。
+     */
+    val defaultsFloat: Double? = null,
+    /**
+     * `#DIMF` 声明的浮点型（4.981 fork 新增；spec: variables.yaml 的 float_vars）。
+     *
+     * 与 [isStr] 互斥，但两者都为 false **不代表**整数 —— 判断顺序必须 `isFloat` 优先，
+     * 见 [toVarDef]。`#DIMF CHARADATA` 在 fork 里会掉进整数分支 ⇒ 本字段为 false
+     * （ADR-005 原样复刻，见 [DimParser.parse] 的 quirk 段）。
+     */
+    val isFloat: Boolean = false,
 ) {
     val dimension: Int get() = dims.size
 
@@ -65,7 +89,11 @@ class DimSpec(
     fun toVarDef(index: Int, chara: Boolean, code: Int): VarDef = VarDef(
         name = name,
         code = code,
-        type = if (isStr) VarType.STR else VarType.INT,
+        type = when {
+            isFloat -> VarType.FLOAT
+            isStr -> VarType.STR
+            else -> VarType.INT
+        },
         storage = Storage.USER,
         index = index,
         dims = if (isRef) IntArray(dims.size) else dims.copyOf(),
@@ -76,7 +104,7 @@ class DimSpec(
     )
 
     override fun toString(): String =
-        "DimSpec($name, str=$isStr, dims=${dims.toList()}, const=$isConst, ref=$isRef, " +
+        "DimSpec($name, str=$isStr, float=$isFloat, dims=${dims.toList()}, const=$isConst, ref=$isRef, " +
             "global=$isGlobal, save=$isSavedata, chara=$isCharaData, static=$isStatic, private=$isPrivate)"
 }
 
@@ -267,15 +295,15 @@ private class PureStaticDimFunctionFolder(
         if (text.isEmpty()) throw CodeEE("関数 GETLINESTR 的第 1 个参数不能为空串")
         if (consoleWidth <= 0) return text
         val sb = StringBuilder(text)
-        var cells = com.eratw.port.core.host.CellWidth.of(text)
+        var cells = com.eratw.port.core.host.CellWidth.displayCells(text)
         if (cells <= 0) return text
         while (cells < consoleWidth) {
             sb.append(text)
-            cells += com.eratw.port.core.host.CellWidth.of(text)
+            cells += com.eratw.port.core.host.CellWidth.displayCells(text)
         }
         while (cells > consoleWidth && sb.isNotEmpty()) {
             sb.deleteCharAt(sb.length - 1)
-            cells = com.eratw.port.core.host.CellWidth.of(sb.toString())
+            cells = com.eratw.port.core.host.CellWidth.displayCells(sb.toString())
         }
         return sb.toString()
     }
@@ -313,7 +341,12 @@ private class PureStaticDimFunctionFolder(
         if (args.size != 1) return null
         val name = (args[0] as? DimFoldArg.StrArg)?.text ?: return null
         if (ColorNames.isTransparent(name)) {
-            throw CodeEE("函数 COLOR_FROMNAME 不支持 transparent（原版 FunctionMethodCreator.cs:3828-3830）")
+            // 官方逐字（lane errtext6）：Error.TransparentUnsupported（Lang.cs:1982 /
+            // reference 表 :450 / 语料根表 :685 两表同文），0 占位符；原版抛点
+            // FunctionMethodCreator.cs:3828-3830（A==0 且名是 transparent → CodeEE，不做 Format）。
+            // 旧自造串把 C# 行号写进屏上文案，本波退役（运行期 COLOR_FROMNAME 支在
+            // fn/PureMethods.kt:1487，非本路文件面 ⇒ 需组长接线）。
+            throw CodeEE(LangKey.TransparentUnsupported.renderZhs())
         }
         // 命中 = (R<<16)+(G<<8)+B（:3824）；未命中 = -1（:3832）——ColorNames 同口径。
         return ColorNames.rgbOrUnknown(name)
@@ -415,9 +448,12 @@ class DimFoldSnapshot(
  * （spec: StrForm.cs:118 / StrFormTerm.cs:27-39）。
  * 未落地（M4-M `m-dimfold` 已接，见下「已接」段；仅比较运算符与 GETNUM/STRLENSU/GETLINESTR
  * 保持失败方向）：
- * - ~~位运算符 `<<`/`>>`/`&`/`|`/`^` 未接~~ 已接 `<<`/`>>`（spec: OperatorMethodManager.cs:523-534
- *   注册 :741 / :509-520 注册 :740，折叠形态 `(long)a << (int)b`；原版 `&`/`|` 是**逻辑**与或
- *   （spec: OperatorMethodManager.cs:375-410），#DIM 行无使用需求，未接，比较运算符同）。
+ * - ~~位运算符 `<<`/`>>`/`&`/`|`/`^` 未接~~ 已接全部：`<<`/`>>`（spec: OperatorMethodManager.cs:523-534
+ *   注册 :741 / :509-520 注册 :740，折叠形态 `(long)a << (int)b`）、`&`/`|`/`^` 按位层与
+ *   `&&`/`||`/`^^`/`!&`/`!|` 逻辑层（4.981 COMF641 波；spec: OperatorMethodManager.cs:467-507
+ *   注册 :737-739 与 :375-465 注册 :732-736。旧注「`&`/`|` 是逻辑与或」系误读——单字符
+ *   `&`/`|` 词法映射 BitAnd/BitOr（LexicalAnalyzer.cs:479-491）且 4.981 随附原版引擎实测
+ *   `1 << 1 | 1 << 2` 折 6；:375-410 是 `&&`/`||` 的 AndIntInt/OrIntInt）。比较运算符仍未接。
  * - ~~装载期可折叠的函数方法未接~~ 已接注入面（[DimParseConfig.functionFolder]；原版
  *   `FunctionMethodTerm.cs:35-56`：`CanRestructure` 且实参全 `SingleTerm` 即折成
  *   `GetValue(exm)`，`GlobalStatic.EMediator` 在 ErhLoader 之前装配（`Process.cs:304-305`），
@@ -457,7 +493,7 @@ object DimParser {
     internal val KEYWORDS = setOf("CONST", "REF", "DYNAMIC", "STATIC", "GLOBAL", "SAVEDATA", "CHARADATA")
 
     /**
-     * @param keyword `#DIM` 或 `#DIMS`
+     * @param keyword `#DIM` / `#DIMS` / `#DIMF`
      * @param body    关键字之后的整行文本（已去掉 `#DIM` 前缀）
      * @param isPrivate 是否位于函数体内（原版 DimLineWC.IsPrivate）
      */
@@ -467,8 +503,19 @@ object DimParser {
         isPrivate: Boolean,
         config: DimParseConfig = DimParseConfig(),
     ): DimSpec {
-        val isStr = when (keyword.uppercase()) {
-            "#DIM" -> false
+        // `#DIMF`（4.981 fork 新增浮点声明）与 `#DIM` 共用整数分支的全部关键字规则：
+        // 原版 `UserDefinedVariable.cs:74` 只是把 dimtype 换成 "#DIMF"，关键字循环
+        // （`UserDefinedVariableData.cs:44-264`）逐条相同，没有浮点专属限制
+        // （spec: variables.yaml 的 float_vars.dimf）。
+        // 关键字归一必须锁 Locale.ROOT：tr/az 默认语言环境下无参 `uppercase()` 会把小写 'i'
+        // 映成带组合点的大写 'İ'（U+0130），于是 `#dimf` 归一成 `#DİMF` ≠ `#DIMF`
+        // ⇒ 命中下面的 else 抛「未知的 #DIM 关键字」，`#DIMF` 静默丢失浮点语义。
+        // 与 SystemVariableBootstrap.splitDeclaration 的 CMP-44 承诺同口径
+        //（装载/编译两侧已由 f88d4801 归一，声明层这一处此前未锁；C-FLOAT-AUTHORITY@1 边界 2）。
+        val normKeyword = keyword.uppercase(Locale.ROOT)
+        val isFloat = normKeyword == "#DIMF"
+        val isStr = when (normKeyword) {
+            "#DIM", "#DIMF" -> false
             "#DIMS" -> true
             else -> throw CodeEE("未知的 #DIM 关键字 $keyword")
         }
@@ -622,9 +669,30 @@ object DimParser {
             i++
         }
 
+        // `#DIMF CHARADATA` 掉进整数分支（fork quirk，见下方 floatType 段）⇒ 它的初值
+        // 必须按整数规则解析，不能走浮点初值支。
+        val floatInit = isFloat && !chara
         var defaultsInt: LongArray? = null
         var defaultsStr: List<String>? = null
-        if (hasEq) {
+        var defaultsFloat: Double? = null
+        if (hasEq && floatInit) {
+            if (ref) throw CodeEE("REF 变量不能设置初值")
+            if (dims.size >= 2) throw CodeEE("多维变量不能设置初值")
+            // spec（fork）: UserDefinedVariableData.cs:317-338 —— 浮点初值接受浮点或整数
+            // 常量（整数按 double 存），只有**一个** `DefaultFloat` 槽 ⇒ 单值广播到全部格子。
+            val folder = Folder(tokens, i, config, keyword, name, lexer)
+            defaultsFloat = folder.reduceFloat()
+            i = folder.i
+            if (tokens.getOrNull(i) is Tok.Sym && (tokens[i] as Tok.Sym).text == ",") {
+                i++
+                // 拖尾逗号沿用整数侧的宽松口径；后面还跟着值就是第二个初值 ⇒ 拒绝
+                // （没有第二个槽可放，静默丢弃会与「每格 1.5」的广播口径冲突）。
+                if (i < tokens.size) {
+                    throw CodeEE("$keyword $name 只能有一个浮点初值（DefaultFloat 是单值，全格广播）")
+                }
+            }
+            if (dims.isEmpty()) dims.add(1)
+        } else if (hasEq) {
             if (ref) throw CodeEE("REF 变量不能设置初值")
             if (dims.size >= 2) throw CodeEE("多维变量不能设置初值")
             if (chara) throw CodeEE("CHARADATA 变量不能设置初值")
@@ -681,11 +749,31 @@ object DimParser {
         if (chara && dims.size > 2) throw CodeEE("CHARADATA 变量最多 2 维")
         if (dims.size > 3) throw CodeEE("变量最多 3 维")
 
+        // `#DIMF` 只建 1 维浮点 token（spec: variables.yaml 的 float_vars.dimf：
+        // fork-src VariableData.cs:469-474 全局/静态、:553-561 私有静态、:586-593 私有动态，
+        // 2D/3D 一律 ExeEE(AbnormalVarDeclaration)）。声明里没有尺寸段时原版在
+        // `UserDefinedVariableData.cs:292-299`（`wc.EOL` 分支）补 `Lengths = [1]`，
+        // 所以 `#DIMF DYNAMIC 倍率` 本身就是 **1 维**，这里只需挡「显式写了两段及以上尺寸」。
+        //
+        // fork quirk（ADR-005 原样复刻）：`CreateUserDefCharaVariable`
+        // （fork-src VariableData.cs:410-429）只有 `TypeIsStr` 与 else(整数) 两支，
+        // 于是 `#DIMF CHARADATA` 掉进**整数**分支 ⇒ 这里把浮点折成 false，不“顺手修好”。
+        // TODO(verify)：fork-src 不在本机；4.981 全语料只有 1 条 `#DIMF`
+        // （`DLC/魔法DLC/魔法相关函数.ERB:3190` `#DIMF DYNAMIC 倍率`），无 CHARADATA 用例可对拍。
+        // 初值段（`#DIMF X = 1.5` / `#DIMF X, 5 = 1.5`）：走 [Folder.reduceFloat]，
+        // 浮点/整数常量都收（整数按 double 存），单值广播到全格 —— 见上方 [defaultsFloat] 与
+        // hasEq 段的 KDoc。多维与 CHARADATA 的初值仍按整数侧规则拒绝。
+        val floatType = floatInit
+        if (floatType && dims.size > 1) {
+            throw CodeEE("$keyword $name 只能是 1 维（2D/3D 一律 ExeEE(AbnormalVarDeclaration)）")
+        }
+
         if (ref) {
             return DimSpec(
                 name = name, isStr = isStr, dims = IntArray(dims.size),
                 isConst = false, isRef = true, isGlobal = false, isSavedata = false,
                 isCharaData = false, isStatic = false, isPrivate = isPrivate,
+                isFloat = floatType,
             )
         }
 
@@ -702,7 +790,8 @@ object DimParser {
             name = name, isStr = isStr, dims = dims.toIntArray(),
             isConst = const, isRef = ref, isGlobal = global, isSavedata = save,
             isCharaData = chara, isStatic = static, isPrivate = isPrivate,
-            defaultsInt = defaultsInt, defaultsStr = defaultsStr,
+            defaultsInt = defaultsInt, defaultsStr = defaultsStr, defaultsFloat = defaultsFloat,
+            isFloat = floatType,
         )
     }
 
@@ -895,6 +984,15 @@ object DimParser {
     private sealed interface Tok {
         data class Word(val text: String) : Tok
         data class Number(val value: Long) : Tok
+
+        /**
+         * 浮点字面量（`#DIMF` 初值段专用，4.981 fork）。
+         *
+         * 只认 `整数部分 '.' 小数部分`（两边都至少一位 ASCII 数字，见 [fastFloatAt]）；
+         * 前导点 `.5`、指数 `1e3` 等其它形态**不**在这一层产生本记号 ⇒ 仍按旧口径失败。
+         * TODO(verify)：fork 的词法面未取证，语料无 `#DIMF` 初值实例。
+         */
+        data class FloatLit(val value: Double) : Tok
         data class Str(val text: String) : Tok
         data class Sym(val text: String) : Tok
 
@@ -913,8 +1011,12 @@ object DimParser {
      * 独立成记号的运算符字符。原版把运算符逐字符交给词法器
      * （spec: LexicalAnalyzer.cs:767-791 运算符分支 + ReadOperator spec: LexicalAnalyzer.cs:404-460），
      * 尺寸/初值段再按运算符优先级折叠，故 `A + 1`、`(A + 1) * 10` 是合法尺寸写法。
+     * `|`/`&`/`^`（4.981 COMF641 波加入）同为独立记号（原版 case '|'/case '&'/'case ^'
+     * 在 LexicalAnalyzer.cs:479-497 与 `% * + - / < = ? ~` 同列），`!` **不**在此列：
+     * 单 `!`（Not 一元）不在折叠面内，`!&`/`!|` 只在记号起点特判（见 [lex]），
+     * `!FOO` 这类仍按旧形态留在 Word 里（失败文案与改动前一致）。
      */
-    private const val SYMS = "+-*/%(),=<>"
+    private const val SYMS = "+-*/%(),=<>|&^~"
 
     private fun isWordBreak(c: Char): Boolean = c.isWhitespace() || c in SYMS || c == '"'
 
@@ -968,6 +1070,29 @@ object DimParser {
     }
 
     /**
+     * 浮点面值快路（[lex] 的数字分支入口，`s[from]` 必是 ASCII 数字）。
+     *
+     * 只认「整数部分 + `.` + 小数部分」且**两侧都至少一位数字**、结尾必须是
+     * [isNumDelimiter] 认可的字符；`1.`、`.5`、`1.5.2`、`1.5e3` 一律返回 null
+     * （落回整数路径，与改动前同样的失败方向）。值经 JDK `toDoubleOrNull` 落地，
+     * 十进制 → 二进制转换与 C# `double.Parse`（不变文化）同用 IEEE-754 最近舍入。
+     *
+     * @return 命中时 (值, 游标下一位)；不命中 null。
+     */
+    private fun fastFloatAt(s: String, from: Int): Pair<Double, Int>? {
+        var i = from
+        while (i < s.length && s[i] in '0'..'9') i++
+        if (i >= s.length || s[i] != '.') return null
+        i++
+        val fracFrom = i
+        while (i < s.length && s[i] in '0'..'9') i++
+        if (i == fracFrom) return null
+        if (i < s.length && !isNumDelimiter(s[i])) return null
+        val v = s.substring(from, i).toDoubleOrNull() ?: return null
+        return v to i
+    }
+
+    /**
      * 数字面值后面**允许**出现的分隔符：空白、[SYMS] 里的运算符、字符串定界符与
      * 行内注释起手段 `;`（[lex] 自己把 `;` 当行尾）。其余字符（`x`/`b`/`p`/`e`/全角数字…）
      * 说明这条面值不是「纯十进制 + 分隔符」形态，退回词法器。
@@ -1012,6 +1137,10 @@ object DimParser {
         '%' -> SYM_PERCENT
         '<' -> SYM_LT
         '>' -> SYM_GT
+        '|' -> SYM_BIT_OR
+        '&' -> SYM_BIT_AND
+        '^' -> SYM_BIT_XOR
+        '~' -> SYM_TILDE
         else -> Tok.Sym(c.toString())
     }
 
@@ -1028,6 +1157,15 @@ object DimParser {
     private val SYM_GT = Tok.Sym(">")
     private val SYM_SHL = Tok.Sym("<<")
     private val SYM_SHR = Tok.Sym(">>")
+    private val SYM_BIT_AND = Tok.Sym("&")
+    private val SYM_BIT_OR = Tok.Sym("|")
+    private val SYM_BIT_XOR = Tok.Sym("^")
+    private val SYM_TILDE = Tok.Sym("~")
+    private val SYM_LAND = Tok.Sym("&&")
+    private val SYM_LOR = Tok.Sym("||")
+    private val SYM_LXOR = Tok.Sym("^^")
+    private val SYM_NAND = Tok.Sym("!&")
+    private val SYM_NOR = Tok.Sym("!|")
 
     /**
      * `#DIM` 行首关键字识别（**零分配**版，mem6 2026-10-28）。
@@ -1122,9 +1260,34 @@ object DimParser {
                         i++
                     }
                 }
-                c in "+-*/%()" -> {
+                c in "+-*/%()~" -> {
                     out.add(symOf(c))
                     i++
+                }
+                // 按位/逻辑层算符（4.981 COMF641 波）：词法贪长匹配对齐
+                // LexicalAnalyzer.cs:479-497 —— `&&`→And、`&`→BitAnd；`||`→Or、`|`→BitOr；
+                // `^^`→Xor、`^`→BitXor。单字符进优先级 80 的按位层、双字符进 64 的逻辑层，
+                // 折叠面见 [com.eratw.port.core.vars.UserVariables.Folder] 的 bitExpr/orAndExpr。
+                c == '|' || c == '&' || c == '^' -> {
+                    if (i + 1 < s.length && s[i + 1] == c) {
+                        out.add(
+                            when (c) {
+                                '&' -> SYM_LAND
+                                '|' -> SYM_LOR
+                                else -> SYM_LXOR
+                            },
+                        )
+                        i += 2
+                    } else {
+                        out.add(symOf(c))
+                        i++
+                    }
+                }
+                // `!&`/`!|`（Nand/Nor，spec: LexicalAnalyzer.cs:440-452 `!` 分支的双字符支）。
+                // 单 `!`（Not 一元）不在折叠面 ⇒ 不进 SYMS，`!FOO` 落回 Word 分支保持旧失败形态。
+                c == '!' && i + 1 < s.length && (s[i + 1] == '&' || s[i + 1] == '|') -> {
+                    out.add(if (s[i + 1] == '&') SYM_NAND else SYM_NOR)
+                    i += 2
                 }
                 c == '"' -> {
                     val sb = StringBuilder()
@@ -1155,14 +1318,22 @@ object DimParser {
                 // 数字起头 = 字面量（spec: LexicalAnalyzer.cs:755-765 的 case '0'..'9'；
                 // 全角数字在原版本走标识符分支，故入口只认 ASCII 数字）。
                 c in '0'..'9' -> {
-                    val fast = fastDecimalAt(s, i)
-                    if (fast != null) {
-                        out.add(Tok.Number(fast.first))
-                        i = fast.second
+                    // 浮点字面量优先（`#DIMF X = 1.5`）：只有 `数字.数字` 形态才命中，
+                    // 其余（含 `1.`、`1e3`）原样落回整数分支，旧失败方向不变。
+                    val fl = fastFloatAt(s, i)
+                    if (fl != null) {
+                        out.add(Tok.FloatLit(fl.first))
+                        i = fl.second
                     } else {
-                        val (v, next) = readInt64At(s, i, lexer)
-                        out.add(Tok.Number(v))
-                        i = next
+                        val fast = fastDecimalAt(s, i)
+                        if (fast != null) {
+                            out.add(Tok.Number(fast.first))
+                            i = fast.second
+                        } else {
+                            val (v, next) = readInt64At(s, i, lexer)
+                            out.add(Tok.Number(v))
+                            i = next
+                        }
                     }
                 }
                 else -> {
@@ -1267,10 +1438,17 @@ object DimParser {
      * 时函数调用与变量引用不是** `SingleTerm`（spec: ExpressionParser.cs:543-560 标识符后跟
      * `(`/`[` 走 `GetFunctionMethod`，返回 `FunctionMethodTerm`），保持失败口径。
      *
-     * 覆盖的算子（M4-M 收口）：`+ - * / %`、一元 `-`、括号、位移 `<<`/`>>`
-     * （spec: OperatorMethodManager.cs:523-534 / :509-520，优先级按 C# 位于加减之上）、
-     * 字符串 `+` 链（spec: OperatorMethodManager.cs:28-33 + :41-44）；
-     * `&`/`|` 在原版是逻辑与或（spec: OperatorMethodManager.cs:375-410）而非按位，未接。
+     * 覆盖的算子（M4-M 收口 + 4.981 COMF641 波）：`+ - * / %`、一元 `-`、括号、
+     * 位移 `<<`/`>>`（spec: OperatorMethodManager.cs:523-534 / :509-520，优先级按 C# 位于
+     * 加减之上）、按位 `&`/`|`/`^`（优先级 80，spec: OperatorMethodManager.cs:467-507 注册
+     * :737-739）、逻辑 `&&`/`||`/`^^`/`!&`/`!|`（优先级 64，spec: OperatorMethodManager.cs:375-465
+     * 注册 :732-736）、字符串 `+` 链（spec: OperatorMethodManager.cs:28-33 + :41-44）。
+     * 单字符 `&`/`|` 是**按位**不是逻辑——「:375-410 是逻辑与或」的旧注是误读，那段是
+     * `&&`/`||` 的实现类（AndIntInt/OrIntInt）；单 `&`/`|` 的词法映射在
+     * LexicalAnalyzer.cs:479-491（`&`→BitAnd、`|`→BitOr），且 4.981 随附原版引擎
+     * （1824+v24+EMv18+EEv56+Skiav16）实测 `#DIM CONST` 初值 `1 << 1 | 1 << 2` 折 **6**、
+     * `0 | 2` 折 **2**、`5 & 3 | 8` 折 **9**、`1 << 0 | 1 << 1 | 1 << 2` 折 **7**（emuera.log
+     * 取证，2026-11-04），与 core/expr 的既有审计钉桩（OperatorAuditTest「单与号是位运算」）一致。
      * 函数调用折叠经 [DimParseConfig.functionFolder] 注入（spec: FunctionMethodTerm.cs:35-56）。
      */
     private class Folder(
@@ -1298,9 +1476,133 @@ object DimParser {
 
         /** 整数段折叠；返回后调用方自行处理分隔符。 */
         fun reduceInt(): Long {
-            val v = shiftExpr()
+            val v = orAndExpr()
             if (!atEnd()) throw fail("的尺寸/初值表达式有多余内容（原版 cs:325-326 HasNotExpressionAfterComma）")
             return v
+        }
+
+        /**
+         * 浮点初值段折叠（`#DIMF X = 1.5`，4.981 fork）。
+         *
+         * 与 [reduceInt] 同形但值域是 double：支持 `+ - * / %`、一元 `±`、括号、
+         * 浮点/整数字面量与整数常量（整型常量按 double 提升）。位移、函数调用、
+         * 字符串在浮点段不成立（原版 [defaultsFloat] 只收单值常量）。
+         *
+         * TODO(verify)：fork-src 的折叠实现未取证（`UserDefinedVariableData.cs:317-338`
+         * 是 1.824 的整数/字符串形态）；本实现按「与整数段同构 + double 值域」落地，
+         * 结果仍要求整段是**单个常量**（`atEnd()` 判据），语料无该形态可对拍。
+         */
+        fun reduceFloat(): Double {
+            val v = floatAdditive()
+            if (!atEnd()) throw fail("的初值表达式有多余内容（浮点初值必须是单个常量）")
+            return v
+        }
+
+        private fun floatAdditive(): Double {
+            var v = floatMultiplicative()
+            while (true) {
+                when {
+                    isSym("+") -> { i++; v += floatMultiplicative() }
+                    isSym("-") -> { i++; v -= floatMultiplicative() }
+                    else -> return v
+                }
+            }
+        }
+
+        private fun floatMultiplicative(): Double {
+            var v = floatUnary()
+            while (true) {
+                when {
+                    isSym("*") -> { i++; v *= floatUnary() }
+                    isSym("/") -> {
+                        i++
+                        val d = floatUnary()
+                        // IEEE-754：0.0 除 → ±Inf / NaN，不抛（C# double 同语义）。
+                        v /= d
+                    }
+                    isSym("%") -> {
+                        i++
+                        val d = floatUnary()
+                        v %= d
+                    }
+                    else -> return v
+                }
+            }
+        }
+
+        private fun floatUnary(): Double {
+            if (isSym("-")) { i++; return -floatUnary() }
+            if (isSym("+")) { i++; return floatUnary() }
+            return floatPrimary()
+        }
+
+        private fun floatPrimary(): Double {
+            val t = toks.getOrNull(i) ?: throw fail("的初值不能为空")
+            when (t) {
+                is Tok.Number -> { i++; return t.value.toDouble() }
+                is Tok.FloatLit -> { i++; return t.value }
+                is Tok.Word -> { i++; return constInt(t.text).toDouble() }
+                is Tok.Sym -> {
+                    if (t.text != "(") throw fail("的初值只能是浮点或整数常量")
+                    if (nesting > MAX_NESTING) throw fail("尺寸/初值表达式嵌套过深")
+                    i++
+                    val inner = floatAdditive()
+                    if (!isSym(")")) throw fail("缺少右括号（原版 cs:325 Restructure 不成立）")
+                    i++
+                    return inner
+                }
+                else -> throw fail("的初值只能是浮点或整数常量")
+            }
+        }
+
+        /**
+         * 优先级 80 层（比位移 112 松、比逻辑 64 紧）：`&`（BitAnd）/`|`（BitOr）/`^`（BitXor）
+         * **按位**运算，同层左结合。原版三层同优先级（`OperatorCode.cs:29-31` 的
+         * BitAnd=134736 / BitOr=134992 / BitXor=135248 低字节都是 80）⇒ `a | b ^ c` 折成
+         * `(a | b) ^ c`，与 C 的 `&` > `^` > `|` 三层不同，不许照 C 抄。
+         * 判值式 = core/expr Expr.kt 的 `l and r` / `l or r` / `l xor r`（同一份语义，
+         * spec: OperatorMethodManager.cs:467-479 BitAndIntInt / :481-493 BitOrIntInt /
+         * :495-507 BitXorIntInt，注册 :737-739）；4.981 COMF641 的
+         * `1 << 戦闘補助 | 1 << 技能補助` 就在这一层折成 6（原版引擎实测，emuera.log 取证）。
+         */
+        private fun bitExpr(): Long {
+            var v = shiftExpr()
+            while (true) {
+                when {
+                    isSym("&") -> { i++; v = v and shiftExpr() }
+                    isSym("|") -> { i++; v = v or shiftExpr() }
+                    isSym("^") -> { i++; v = v xor shiftExpr() }
+                    else -> return v
+                }
+            }
+        }
+
+        /**
+         * 优先级 64 层（`__BINARY__` 族最松，比按位 80 松）：`&&`（And）/`||`（Or）/
+         * `^^`（Xor）/`!&`（Nand）/`!|`（Nor）**逻辑**运算，非 0 判真、结果只取 0/1，
+         * 同层左结合（OperatorCode.cs:24-28 + Nand/Nor 的低字节同为 64；注册
+         * OperatorMethodManager.cs:732-736）。判值式与 core/expr Expr.kt 的二元求值逐式相同
+         * （禁第二份实现）：And spec :375-391、Or :393-409、Xor :411-429（两侧先取值再判
+         * 「恰一个非零」）、Nand :431-447、Nor :449-465。
+         *
+         * 与 [com.eratw.port.core.expr] 运行期求值的一处**已记录差异**：原版 Restructure 对
+         * `0 && 1/0` 这类「左侧已判死、右侧求值会炸」的式子靠短路活下来（AndIntInt.GetIntValue
+         * 先判左再取右）；本层解析与求值融合，右侧记号必须消费、右值必须折出 ⇒ 右侧折叠期
+         * 异常（除 0 / POWER 越界一类）不会被左侧短路掉。仅此形态与原版不同，语料 DIM 行无
+         * 此写法（TODO(verify)：无对拍样本，卡点=原版 Restructure 短路可观测性需构造复现）。
+         */
+        private fun orAndExpr(): Long {
+            var v = bitExpr()
+            while (true) {
+                when {
+                    isSym("&&") -> { i++; val r = bitExpr(); v = if (v == 0L) 0L else if (r != 0L) 1L else 0L }
+                    isSym("||") -> { i++; val r = bitExpr(); v = if (v != 0L) 1L else if (r != 0L) 1L else 0L }
+                    isSym("^^") -> { i++; val r = bitExpr(); v = if ((v == 0L) != (r == 0L)) 1L else 0L }
+                    isSym("!&") -> { i++; val r = bitExpr(); v = if (v == 0L) 1L else if (r == 0L) 1L else 0L }
+                    isSym("!|") -> { i++; val r = bitExpr(); v = if (v != 0L) 0L else if (r == 0L) 1L else 0L }
+                    else -> return v
+                }
+            }
         }
 
         /**
@@ -1365,6 +1667,10 @@ object DimParser {
         private fun unary(): Long {
             if (isSym("-")) { i++; return -unary() }
             if (isSym("+")) { i++; return unary() }
+            // 一元 `~`（4.981 fork `BitNotInt`，spec: OperatorMethodManager.cs:573-580 / 注册 :1086；
+            // `BitNot = 70144` 带 `__UNARY__` 标记，spec: OperatorCode.cs:7 / :33）。
+            // 语料 ERH DIM 行零使用（2026-11-04 普查，唯一 `~` 在注释里），为第三方口上预留。
+            if (isSym("~")) { i++; return unary().inv() }
             return primary()
         }
 
@@ -1377,7 +1683,9 @@ object DimParser {
                     if (t.text == "(") {
                         if (nesting > MAX_NESTING) throw fail("尺寸/初值表达式嵌套过深")
                         i++
-                        val v = shiftExpr()
+                        // 括号内是完整表达式：从最松层（优先级 64）起折，`(...)` 里可以有
+                        // 任意已接算子（原版括号走整棵表达式树，spec: ExpressionParser.cs:543-560）。
+                        val v = orAndExpr()
                         if (!isSym(")")) throw fail("缺少右括号（原版 cs:325 Restructure 不成立）")
                         i++
                         return v
@@ -1585,6 +1893,26 @@ abstract class UserVar(val spec: DimSpec, val def: VarDef) {
 
     /** 持久化用原始数组（LongArray / IntArray 池下标），M4 存档层使用。 */
     open fun rawArray(): Any? = null
+
+    /**
+     * 复位链的串表压实（`VariableStore.compactStringPool`）用：把本变量**自有**的
+     * 「[StringTable] 下标载体」逐个交给 [sink]。
+     *
+     * 为什么要单独开这个口：槽里存的是 Int 下标而不是串引用，压实时凡是还握着下标的
+     * 数组都必须被登记进存活集并就地改写，漏一个就把那一处打成悬空/错别名
+     * （契约见 [StringTable.compact] 第 3 条）。三类容易漏的：
+     * - [StaticStrUserVar.defaults]：`DEFAULT` 初值的**下标缓存**，复位后任何一次
+     *   [setDefault] 都会把它抄回数据区（不登记 ⇒ 复位后赋初值即错）；
+     * - [DynamicStrUserVar.stack]：出作用域但还没丢弃的实例（REF 可能还绑着它）；
+     * - [RefUserVar.targetStr] / 其作用域栈里的串目标：目标数组本体由持有者登记，
+     *   这里重复交一次由调用方按**对象身份**去重（改写必须逐格只做一次）。
+     *
+     * **不许**把形状/尺寸数组（`targetDims`、`VarDef.dims`）交出去 —— 它们不是下标载体，
+     * 被就地改写会把多维 REF 的形状乘平（比悬空更坏）。
+     * 整数族与 CHARADATA 族（走 [CharacterTable] 的列）没有自有串数组 ⇒ 默认空实现，
+     * 由调用方另外登记角色表的列。
+     */
+    open fun visitStrIds(sink: (IntArray) -> Unit) {}
 }
 
 /** 静态整数用户变量（含 GLOBAL/SAVEDATA）。spec: VariableData.cs:1295-1386 */
@@ -1599,8 +1927,23 @@ class StaticIntUserVar(spec: DimSpec, def: VarDef) : UserVar(spec, def) {
 
     override fun readInt(charPos: Int, elem: Int): Long = arr()[elem]
 
+    /**
+     * 单格写。**本层没有常量闸**（B5，2026-11-07 相位搬迁）。
+     *
+     * 官方存储层的写入口逐字看：`VariableData.cs:1340-1344` 的
+     * `StaticInt1DVariableToken.SetValue` 只有 `IfNullInitArray(); array[arguments[0]] = value;`，
+     * 全文件唯一的 `IsConst` 读点是 `:4089`（存档装载白名单，与本路径无关）。
+     * 原版对常量的拦截全在**解析期**的实参校验：`ArgumentBuilder.cs:92-105`
+     * （可变实参位）、`ArgumentParser.cs:372-376` / `:640-644`（ARRAYSORT 目标）、
+     * `:903-907`（赋值左值 LeftIsConst）、`:1784-1788`（VARSET）、`:2197-2201`（SAVEVAR 目标）；
+     * 移植侧同形闸在 `stmt/ArgBuilders.kt`（changeable :243-248、set :1768、
+     * sortArray :839、varset :1213、savevar :1435）。
+     *
+     * 因此这一层再拦一次只会挡掉官方允许的写 —— CALLSHARP 的变量实参回写
+     * （`FunctionIdentifier.cs:1219-1231`）不经过解析期校验，官方连 `#DIMS CONST` 实参也写回
+     * （4.981 `ERB/DLC/AI对话补丁/对话调用.erb:35` 的三个 `#DIMS CONST` 实参即此形态）。
+     */
     override fun writeInt(charPos: Int, elem: Int, value: Long) {
-        if (spec.isConst) throw CodeEE("变量 ${def.name} 是常量，不能赋值")
         arr()[elem] = value
     }
 
@@ -1631,8 +1974,14 @@ class StaticStrUserVar(spec: DimSpec, def: VarDef, private val pool: StringTable
 
     override fun readStr(charPos: Int, elem: Int): String = pool.lookup(arr()[elem])
 
+    /**
+     * 单格写。常量闸的相位同 [StaticIntUserVar.writeInt]：官方
+     * `VariableData.cs:1614-1618` 的 `StaticStr1DVariableToken.SetValue` 只有
+     * `IfNullInitArray(); array[arguments[0]] = value;`，无常量闸；拦截在解析期
+     * （`ArgumentBuilder.cs:92-105`、`ArgumentParser.cs:903-907` / `:2197-2201`，移植侧
+     * `stmt/ArgBuilders.kt` 同形），CALLSHARP 的常量实参回写是官方允许的写。
+     */
     override fun writeStr(charPos: Int, elem: Int, value: String) {
-        if (spec.isConst) throw CodeEE("变量 ${def.name} 是常量，不能赋值")
         arr()[elem] = pool.intern(value)
     }
 
@@ -1650,6 +1999,18 @@ class StaticStrUserVar(spec: DimSpec, def: VarDef, private val pool: StringTable
     }
 
     override fun rawArray(): Any = arr()
+
+    /**
+     * 数据区 + **初值下标缓存** [defaults] 都要登记（后者是 `DEFAULT` 串的 Int 下标形态，
+     * 复位后第一次 [setDefault] 会把它抄进数据区）。
+     * 只交**已分配**的：`data == null` 时读到的恒是 0（空串），`defaults == null` 时
+     * [defaultIds] 会在下一次用到时现 `intern` —— 两条都不需要占存活位，也不能为登记而
+     * 触发懒分配（那会把「从没写过」的列白白分配出来）。
+     */
+    override fun visitStrIds(sink: (IntArray) -> Unit) {
+        data?.let(sink)
+        defaults?.let(sink)
+    }
 }
 
 /** 私有动态整数变量：栈式嵌套作用域。spec: VariableData.cs:1820-1901 */
@@ -1711,6 +2072,12 @@ class DynamicStrUserVar(spec: DimSpec, def: VarDef, private val pool: StringTabl
     override fun setDefault() {}
 
     override fun rawArray(): Any? = data
+
+    /** 当前实例 + 作用域栈上尚未丢弃的实例（REF 可能还绑着栈里那一份）。 */
+    override fun visitStrIds(sink: (IntArray) -> Unit) {
+        data?.let(sink)
+        for (arr in stack) sink(arr)
+    }
 }
 
 /**
@@ -1776,18 +2143,19 @@ class RefUserVar(spec: DimSpec, def: VarDef, private val pool: StringTable) : Us
     fun boundLength(): Int? = targetInt?.size ?: targetStr?.size
 
     private fun intTarget(): LongArray {
-        val t = targetInt ?: throw CodeEE("引用变量 ${def.name} 未绑定目标（EmptyRefVar）")
+        val t = targetInt ?: throw emptyRefVar(def.name)
         return t
     }
 
     private fun strTarget(): IntArray {
-        val t = targetStr ?: throw CodeEE("引用变量 ${def.name} 未绑定目标（EmptyRefVar）")
+        val t = targetStr ?: throw emptyRefVar(def.name)
         return t
     }
 
     private fun checkBound(size: Int, elem: Int) {
         if (elem < 0 || elem >= size) {
-            throw CodeEE("引用变量 ${def.name} 的下标 $elem 越界（目标长度 $size）")
+            // 与 VariableStore.refElem 同一条官方文案（Error.OoRVarArg，压平通道只有第 1 个实参）。
+            throw oorVarArg(def.name, 1, elem.toLong())
         }
     }
 
@@ -1842,6 +2210,21 @@ class RefUserVar(spec: DimSpec, def: VarDef, private val pool: StringTable) : Us
         targetInt = null
         targetStr = null
         targetDims = null
+    }
+
+    /**
+     * 只交**串**目标：当前绑定的 [targetStr] 与作用域栈里的串目标（[saved] 的
+     * **第二元**；第一元是 `LongArray` 目标、第三元是**形状**，两者都不是下标载体，
+     * 见 [visitStrIds] 的「不许交形状」）。
+     * 目标数组本体通常已由持有者（系统列 / 局部实例 / 用户变量）登记过一次，
+     * 调用方按对象身份去重；这里仍要交，是因为绑定可以把「已经从所有变量表里摘掉」
+     * 的实例留在栈快照里 —— 不交就漏。
+     * REF 绑的是数组**对象**（spec: ReferenceToken.cs:125-128），压实时原地改写元素、
+     * 不换对象 ⇒ 绑定关系本身不动。
+     */
+    override fun visitStrIds(sink: (IntArray) -> Unit) {
+        targetStr?.let(sink)
+        for (s in saved) s.second?.let(sink)
     }
 }
 

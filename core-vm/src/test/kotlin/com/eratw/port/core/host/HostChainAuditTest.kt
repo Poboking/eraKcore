@@ -26,11 +26,23 @@ class HostChainAuditTest {
      * → `line.ChangeStr(旧按钮 + 新按钮)` → `displayLineList.Add(line)`；`IsLogicalLine`
      * 只在构造时赋值，ConsoleDisplayLine.cs:12、:45）。
      *
-     * 直接后果：CLEARLINE 只删掉刚结束的那一个逻辑行，前一续行留在屏上
-     * （`deleteLine` 按逻辑行计数，EmueraConsole.cs:3014-3021）。
+     * 直接后果（W8 刀一改钉，2026-11-01）：并入那一步走的是 `deleteLine(1)` **本体**，
+     * 而 `deleteLine` 的循环按**逻辑行**计数 —— 折行尾段 `IsLogicalLine=false`
+     * （`ButtonsToDisplayLines` 的 `firstLine` 只有第一排为真，PrintStringBuffer.cs:193/206），
+     * 所以摘掉末排后 `num` 仍为 0，会继续摘到本逻辑行首排才停（EmueraConsole.cs:3007-3021）。
+     * ⇒ 并入把整条折行一起吃掉，`line.ChangeStr(旧末排按钮 + 新行按钮)` 只留住末排内容，
+     * 首排文本整体消失。`line.ShiftPositionX(...)`（:2955）的「接在旧行末尾」意图因此落空，
+     * 但这就是原版的实际行为（ADR-005 复刻，不许「顺手」留下首排）。
      *
-     * 注：本用例不断言 LINECOUNT 的**数值**与原版逐值相等 —— 原版在「PRINTN 折行」上会
-     * 首段误计 1、并入后再计 1（同名 KDoc 已登记），本移植按「逻辑行真正结束」计。
+     * 旧断言（并入后 `size=2`、首排仍留）钉的是移植侧裸 `removeAt(末排)` 的漂移：
+     * 它把「只删一排」当成了 `deleteLine(1)` 的语义。
+     *
+     * 注：本用例逐值钉 LINECOUNT 与原版一致（2026-11-02 AUD-h3-linecount 收口）——
+     * 原版在「PRINTN 折行」的待决窗口里就把组内首排计一次（折行的中间排带的是构造缺省
+     * `IsLineEnd=true`，ConsoleDisplayLine.cs:16/:32/:47；`Flush` 只改写末排，
+     * PrintStringBuffer.cs:183；计数门是「首排 ∧ 行尾」，EmueraConsole.cs:2971-2977），
+     * 并入时 `deleteLine(1)` 从末排吃到首排把那枚扣回（:3014-3021），结行后再加回 1
+     * ⇒ 窗口内 1、稳态 1。旧写法把每一排都写成 `isLineEnd=false`，窗口内读成 0。
      */
     @Test
     fun wrappedPrintnMergedLineAdoptsIncomingRowIdentity() {
@@ -42,27 +54,23 @@ class HostChainAuditTest {
         assertEquals(2, s.snapshot().size)
         assertTrue(s.snapshot()[0].isLogicalLine, "折行首段 = 逻辑行起点（PrintStringBuffer.cs:193,206）")
         assertFalse(s.snapshot()[1].isLogicalLine, "折行尾段不是逻辑行起点")
-        assertFalse(s.snapshot()[0].isLineEnd, "PRINTN 未收尾：整组都不算行结束")
-        assertFalse(s.snapshot()[1].isLineEnd)
-        assertEquals(0L, s.lineCount)
+        assertTrue(s.snapshot()[0].isLineEnd, "折行的中间排带构造缺省 true（ConsoleDisplayLine.cs:16）")
+        assertFalse(s.snapshot()[1].isLineEnd, "只有末排被 Flush 改写成 isLastLineEnd=false（PrintStringBuffer.cs:183）")
+        assertEquals(1L, s.lineCount, "待决窗口内原版计 1（:2971-2977 只认组内首排的行尾标志）")
 
         s.print("x") // 默认 lineEnd=true
         s.newLine()
 
-        assertEquals(2, s.snapshot().size, "只把新组的第一行并进末条显示行（EmueraConsole.cs:2947-2967）")
-        val merged = s.snapshot()[1]
-        assertEquals("あx", s.textOf(merged))
+        assertEquals(1, s.snapshot().size, "deleteLine(1) 按逻辑行计数，整条折行（首排+尾排）一起出列")
+        val merged = s.snapshot()[0]
+        assertEquals("あx", s.textOf(merged), "只留住末排内容（:2952-2953 的旧行引用）+ 新行")
         assertTrue(merged.isLogicalLine, "并入后保留的是新行对象 ⇒ isLogicalLine 取新行（:2966、:2969）")
         assertTrue(merged.isLineEnd)
-        assertFalse(s.snapshot()[0].isLineEnd, "前一续行原样留着（并入只吃末行）")
         assertEquals(1L, s.lineCount)
 
         s.deleteLine(1)
 
-        assertEquals(1, s.snapshot().size, "只删掉刚结束的逻辑行；前一续行仍在（:3014-3021 按逻辑行计数）")
-        assertEquals("あああああ", s.textOf(s.snapshot()[0]))
-        assertTrue(s.snapshot()[0].isLogicalLine, "剩下的是原折行首段（逻辑行起点）")
-        assertFalse(s.snapshot()[0].isLineEnd)
+        assertEquals(0, s.snapshot().size, "并入后的那一条就是唯一的逻辑行，删掉即空")
         assertEquals(0L, s.lineCount)
     }
 

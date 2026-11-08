@@ -24,8 +24,11 @@ import com.eratw.port.core.code.LineBlockSource
 import com.eratw.port.core.code.LineTable
 import com.eratw.port.core.code.Opcode
 import com.eratw.port.core.code.Program
+import com.eratw.port.core.code.ProgramBase
+import com.eratw.port.core.diag.LockWatch
 import com.eratw.port.core.expr.Binary
 import com.eratw.port.core.expr.Expr
+import com.eratw.port.core.expr.FloatLiteral
 import com.eratw.port.core.expr.FormConversion
 import com.eratw.port.core.expr.FormPart
 import com.eratw.port.core.expr.FormStringTerm
@@ -324,6 +327,15 @@ internal class SectionWindow private constructor(
      * 之后就再也换不了块。覆盖判定用 `pinnedFrom + limit`（pin 的真实区间），
      * 不是本窗口的 `[start,end)` —— 惰性档的段 pin 从段首铺起，而串池偏移表在记录区之前。
      */
+    /**
+     * 本窗口是不是**整段 pin**（一次映射铺满，运行期取值不再换块）。
+     *
+     * 这是 [closeUnderlying] 安全性的唯一判据：非整段 pin 的窗口每次跳读都可能要
+     * `channel.map` 一次，通道关掉之后就再也补不了块 ⇒ 运行期取用当场抛「映射已关闭」。
+     * 与 [pinnedCovers] 的区别：本属性只回答「窗口自己不换块」，不涉及具体区间。
+     */
+    internal val isPinnedWhole: Boolean get() = pinned != null
+
     internal fun pinnedCovers(
         from: Int,
         u32Count: Int,
@@ -905,6 +917,11 @@ fun interface LoadStageMark {
  * 流式副本：段 7 调用点实参表。与 `ErbcReader.kt:readCallArgs` 逐条判定一致
  * （`ErbcCursor` → `StreamCursor`，`ErbcStringView` → `StreamStringTable`）。
  *
+
+ * 站点 pc 是**绝对** pc（写侧按 CodeBuilder.declareCallArgs 的原值落盘），合法区间是
+ * `[pcFrom, pcFrom + instructionCount)`；无基线（[pcFrom] = 0）时与 `[0, instructionCount)`
+ * 逐位相同（`ErbcReader.readCallArgs` 的同一条区间口径）。
+ *
  * **MEM9 刀 1：建的是 [CallArgIndex.Builder]，不是 `LinkedHashMap`。**
  * 判定/报错/读序与 `ErbcReader` 那份逐字相同（每条 `cur.*` 的顺序、位置、文案一个字节没动），
  * 换掉的只是「登记容器」：旧写法把 151,120 个站点登记进 `LinkedHashMap<Int, List<CallArg>>`
@@ -916,6 +933,8 @@ fun interface LoadStageMark {
  */
 private fun readCallArgs(
     cur: StreamCursor,
+    /** 合法 pc 下界（本段第一条指令的绝对 pc；全量产物 = 0，与 `ErbcReader.readCallArgs` 同参）。 */
+    pcFrom: Int,
     instructionCount: Int,
     stats: DecodeStats? = null,
 ): CallArgIndex {
@@ -928,7 +947,7 @@ private fun readCallArgs(
     for (i in 0 until siteCount) {
         val at = cur.pos
         val pc = cur.u32()
-        if (pc < 0 || pc >= instructionCount) {
+        if (pc < pcFrom || pc >= pcFrom + instructionCount) {
             throw ErbcDecodeException(at, "第 $i 个调用点 pc=$pc 越界（指令数 $instructionCount）")
         }
         if (pc <= prevPc) {
@@ -1098,6 +1117,14 @@ private class MappedFunctionTable(
     private val recordOffsets: IntArray,
     private val strings: StreamStringTable,
     private val paramNames: ParamNameTable?,
+    /**
+     * 记录校验趟的绝对 pc 下界（R7 基线；全量产物 = 0）。
+     *
+     * 接口 `LazyFunctionTable.validateRecords(instructionCount)` 只带**上界**（code 层接缝，
+     * 不随基线扩参），带基线时下界由实现自持：entryPc 与标签 pc 都是绝对 pc，合法区间是
+     * `[pcFrom, instructionCount)`（与 `ErbcReader.validate` 的窗口判界同口径）。
+     */
+    private val pcFrom: Int,
 ) : AbstractList<FunctionInfo>(), LazyFunctionTable {
     private val cache = arrayOfNulls<FunctionInfo>(recordOffsets.size)
 
@@ -1170,6 +1197,13 @@ private class MappedFunctionTable(
     fun nameAt(index: Int): String = strings[StreamCursor(window, recordOffsets[index], fileSize).u32()]
 
     /**
+     * 段 8 的只读形参名视图（与 [decode] 里喂给 `FunctionInfo` 的是同一份数据，
+     * 但**不构造** `FunctionInfo`、不写惰性缓存）；无段 8 = 空表。
+     */
+    override fun paramNamesAt(index: Int): List<String> =
+        if (index in recordOffsets.indices) paramNames?.namesOf(index) ?: emptyList() else emptyList()
+
+    /**
      * 只读记录里的标签 pc 数组（函数名下标与标签名下标都跳过、不解串）。
      *
      * 返回 null = 记录区本身畸形（标签数越界）：这类畸形归 [validateRecords] 在跳转校验
@@ -1232,7 +1266,7 @@ private class MappedFunctionTable(
         if (workers <= 1) {
             for (i in 0 until n) {
                 // 不写回缓存：校验趟的对象解完即弃，装载完 materializedCount 仍是 0。
-                validateFunctionRecord(cache[i] ?: decode(i), instructionCount)
+                validateFunctionRecord(cache[i] ?: decode(i), instructionCount, pcFrom)
             }
             return
         }
@@ -1246,7 +1280,7 @@ private class MappedFunctionTable(
                     val win = window.fork()
                     val str = strings.threadView()
                     for (i in lo until hi) {
-                        validateFunctionRecord(cache[i] ?: decodeInto(i, win, str), instructionCount)
+                        validateFunctionRecord(cache[i] ?: decodeInto(i, win, str), instructionCount, pcFrom)
                     }
                 } catch (t: Throwable) {
                     errors[w] = t
@@ -1282,6 +1316,7 @@ private class MappedFunctionTable(
             strings: StreamStringTable,
             paramNames: ParamNameTable?,
             fileSize: Int,
+            pcFrom: Int,
         ): MappedFunctionTable {
             val offsets = IntArray(funcCount)
             val seen = HashSet<String>(funcCount)
@@ -1306,7 +1341,7 @@ private class MappedFunctionTable(
                     cur.i32()
                 }
             }
-            return MappedFunctionTable(cur.window, fileSize, offsets, strings, paramNames)
+            return MappedFunctionTable(cur.window, fileSize, offsets, strings, paramNames, pcFrom)
         }
     }
 }
@@ -1339,7 +1374,7 @@ private class JumpScan(
     private var pendingMes: String? = null
 
     /** 指令趟逐条喂（pc 必须严格递增）。 */
-    fun observe(pc: Int, op: Int, a: Int, b: Int) {
+    fun observe(pc: Int, op: Int, a: Int, b: Int, c: Int) {
         // 推进到「entryPc ≤ pc 的最后一个函数」：重复 entryPc 时前者区间为空（end == start），
         // 与字节路的 `if (end <= start) continue` 同口径，由后者独占该区间。
         while (cursor + 1 < order.size && starts[cursor + 1] <= pc) cursor++
@@ -1350,6 +1385,8 @@ private class JumpScan(
         when (op) {
             Opcode._JUMP -> consider(start, end, pc, op, pc.toLong() + 1 + a)
             Opcode._JUMP_IF_FALSE, Opcode._JUMP_IF_TRUE -> consider(start, end, pc, op, pc.toLong() + 1 + b)
+            // 条件位融合超指令（246，MODERN-T1）：偏移在 c，与 `_JUMP_IF_FALSE` 同一档。
+            Opcode._EVAL_INT_JZ -> consider(start, end, pc, op, pc.toLong() + 1 + c)
             Opcode._JUMP_DYN -> {
                 val labels = labelsOf(order[cursor]) ?: return
                 if (a < 0 || a >= labels.size) {
@@ -1393,12 +1430,14 @@ private class JumpScan(
     }
 }
 
-/** 函数记录的装载期判界（整池档与惰性档共用同一句话，M11-MEM）。 */
+/** 函数记录的装载期判界（整池档与惰性档共用同一句话，M11-MEM；判据与 `ErbcReader.validate` 同款）。 */
 private fun validateFunctionRecord(
     f: FunctionInfo,
     instructionCount: Int,
+    /** 绝对 pc 区间下界（R7 基线；全量产物 = 0，与 `ErbcReader.validate` 的 pcFrom 同口径）。 */
+    pcFrom: Int,
 ) {
-    if (f.entryPc !in 0 until instructionCount) {
+    if (f.entryPc !in pcFrom until instructionCount) {
         throw ErbcDecodeException(0, "函数 ${f.name} 的 entryPc=${f.entryPc} 越界（指令数 $instructionCount）")
     }
     if (f.arity < 0 || f.slotCount < 0) {
@@ -1416,7 +1455,7 @@ private fun validateFunctionRecord(
     }
     for (i in 0 until f.labelCount) {
         val pc = f.labelPcs[i]
-        if (pc !in 0 until instructionCount) {
+        if (pc !in pcFrom until instructionCount) {
             throw ErbcDecodeException(0, "函数 ${f.name} 的标签 \$${f.labelNames[i]} 的 pc=$pc 越界（指令数 $instructionCount）")
         }
     }
@@ -1802,7 +1841,17 @@ internal class LazyStatementRecords(
             throw IndexOutOfBoundsException("语句池下标越界: $index（共 ${recordOffsets.size} 条）")
         }
         cached.get(index)?.let { return it }
-        synchronized(materializeLock) {
+        // OBS2-L2 探针（**只加探针**，锁的粒度/顺序/语义一字未动）：被观察的还是
+        // [materializeLock] 这一把、还是「双检 + 解码 + 去重 + 写回」这一段；把块的值交出来
+        // 只为了让记录点落在监视器**外侧**（LockWatch 类 KDoc 的叶锁不变式，形状照
+        // `core/loader/MappedErbc.kt:843` 的 program 段）。未挂载时 watch == null ⇒ 不取时钟、
+        // 不进 LockWatch、零分配。锁内双检的「别的线程已物化」早退**不记样本**（同 MappedErbc 口径）。
+        val watch = LockWatch.handleOrNull()
+        val enterNs = if (watch === null) 0L else System.nanoTime()
+        var acquiredNs = 0L
+        var decodedCount = 0L
+        val created = synchronized(materializeLock) {
+            if (watch !== null) acquiredNs = System.nanoTime()
             // 双检：并发的第二个线程在锁外可能也看到 null，这里必须再查一次（CMP-56）。
             cached.get(index)?.let { return it }
             val s = arena.readStatement(StreamCursor(window, recordOffsets.get(index), fileSize))
@@ -1811,8 +1860,38 @@ internal class LazyStatementRecords(
             if (rawsReleased) s.releaseRaw()
             cached.set(index, s)
             materializedCount++
-            return s
+            // tag = 本段在锁内解码的语句条数（逐条物化恒 1；装载趟压扁段 = 本趟条数）。
+            if (watch !== null) decodedCount = 1L
+            s
         }
+        if (watch !== null) {
+            watch.noteSegment(
+                LockWatch.ID_ERBC_MATERIALIZE_LOCK, enterNs, acquiredNs, System.nanoTime(), decodedCount,
+            )
+        }
+        return created
+    }
+
+    /**
+     * CALLSHARP 装载趟扫描（CSHARP-WIRE C2）：逐条记录读**首字节**判语句标签
+     * （记录布局 `u8 StmtTag + i32 line + u32 raw + u32 codeName + …`，写序
+     * `ErbcWriter.stmtHead`、读序 [RecordSource.readStatement] 同源），命中
+     * `StmtTag.CALL_SHARP` 的记录下标升序返回。**不物化任何语句** —— 候选的解码、
+     * 规范化与身份保证都归 [statementAt]（调用方对候选逐条走它）。
+     *
+     * 成本：全量语料 1,716,636 条记录的一趟标签字节扫（顺序映射读，语句段窗口
+     * 装载期已整段 pin，生产档不换块、不碰通道），语句对象零常驻。持
+     * [materializeLock] 是为了与逐条物化共用同一份窗口游标状态（非 pin 档的
+     * `byteAt` 会重映射换块）；生产调用点在会话装配段（VM 线程、无竞争），锁零等待。
+     */
+    override fun sharpStatementIndices(): IntArray {
+        val out = ArrayList<Int>()
+        synchronized(materializeLock) {
+            for (i in 0 until recordOffsets.size) {
+                if (window.byteAt(recordOffsets.get(i)) == StmtTag.CALL_SHARP) out.add(i)
+            }
+        }
+        return out.toIntArray()
     }
 
     /**
@@ -1830,8 +1909,20 @@ internal class LazyStatementRecords(
      * 节点重建走**迭代**补链（[RecordSource.setLoadReplayIterative]）：装载线程的栈尺寸
      * 不受 core 控制，递归下降在 128 KiB 小栈上会 StackOverflowError（`StreamEnsureDepthTest`）。
      */
-    override fun buildFlatStatementsRange(from: Int, until: Int): FlatStatements =
-        synchronized(materializeLock) {
+    override fun buildFlatStatementsRange(from: Int, until: Int): FlatStatements {
+        // OBS2-L2 探针（**只加探针**）：装载/建片趟整段持 [materializeLock]，是这一把锁**最长**
+        // 的一段持有（一整段的语句解码都在里面），与 [statementAt] 的逐条物化共用同一个挂载点 id
+        // （`erbc.materialize.lock`，靠线程名分槽：装载工作线程 vs VM 线程）。
+        // 锁的粒度/顺序/语义一字未动：块的值就是原来 `return builder.build()` 的那个实例，
+        // `try/finally` 的 `setLoadReplayIterative(false)` 复原照旧在锁内、异常路径不变；
+        // 只是把记录点挪到监视器**外侧**（LockWatch 类 KDoc 的叶锁不变式）。
+        // 抛异常的路径不记样本（与既有四处挂载同口径）。
+        val watch = LockWatch.handleOrNull()
+        val enterNs = if (watch === null) 0L else System.nanoTime()
+        var acquiredNs = 0L
+        var builtCount = 0L
+        val built = synchronized(materializeLock) {
+            if (watch !== null) acquiredNs = System.nanoTime()
             val builder = FlatStatements.Builder(initialStatements = until - from)
             // 复用同一个元素表，避免 171.7 万次 List 分配（`interner.run` 只吃 Iterable）
             val one = ArrayList<Statement>(1)
@@ -1848,8 +1939,17 @@ internal class LazyStatementRecords(
             } finally {
                 arena.setLoadReplayIterative(false)
             }
-            return builder.build()
+            // tag = 本段在锁内解码的语句条数（逐条物化恒 1；装载趟压扁段 = 本趟条数）。
+            if (watch !== null) builtCount = (until - from).toLong()
+            builder.build()
         }
+        if (watch !== null) {
+            watch.noteSegment(
+                LockWatch.ID_ERBC_MATERIALIZE_LOCK, enterNs, acquiredNs, System.nanoTime(), builtCount,
+            )
+        }
+        return built
+    }
 
     /** 已物化的当场释放；未物化的由 [statementAt] 在解出来时立刻释放（口径同整池遍历）。 */
     override fun releaseRaws() {
@@ -1930,6 +2030,21 @@ internal class ErbcStreamDecoder private constructor(
      * 由宿主失败屏的「兼容模式重试」传入 true。
      */
     private val serialPhases: Boolean = false,
+    /**
+     * 本段基线（R7-L8 的映射路同步；[ProgramBase.NONE] = 全量产物口径，六个基线全 0，
+     * 全部判定与改造前逐位相同）。
+     *
+     * 非零时本产物是绝对下标空间上的**本段窗口**（补丁产物）：池按基线重灌
+     * （`ConstantPool.add*` 返回 `base + 本池序号`、四个 `*Count` 报绝对口径）、
+     * [Program] 六基线原样传入、段 7 的站点 pc 合法区间是
+     * `[instructionBase, instructionBase + 本段条数)`、[validate] 的指令趟与
+     * entryPc/标签 pc 判界同区间、`_CALL` 的 a 按 `functionBase` 折回 —— 判据与
+     * `ErbcReader` 的基线装载逐字同源（L8 的 17 处「本段 vs 绝对」口径）。
+     * 池/语句/函数表的**惰性视图零改动**：`ConstantPool` 在池内折回
+     * （`exprAt`/`statementAt` 的 `index - *Base`），[MappedExprSource] /
+     * [LazyStatementRecords] 收到的仍是窗口内下标 ⇒ 带基线装载不物化任何池条目。
+     */
+    private val base: ProgramBase = ProgramBase.NONE,
 ) {
     private val header: ErbcHeader = file.header
     private val fileSize: Int = file.byteSize
@@ -1979,8 +2094,10 @@ internal class ErbcStreamDecoder private constructor(
             stmtOffsets: SidecarOffsets?,
             maxEnsureDepth: Int = MAX_ENSURE_DEPTH,
             serialPhases: Boolean = false,
+            /** 本段基线（[ProgramBase.NONE] = 全量产物口径；见类构造参数 [ErbcStreamDecoder.base]）。 */
+            base: ProgramBase = ProgramBase.NONE,
         ): Program =
-            ErbcStreamDecoder(file, stages, mark, lazyStatements, stmtOffsets, maxEnsureDepth, serialPhases)
+            ErbcStreamDecoder(file, stages, mark, lazyStatements, stmtOffsets, maxEnsureDepth, serialPhases, base)
                 .decodeProgram()
     }
 
@@ -2084,6 +2201,7 @@ internal class ErbcStreamDecoder private constructor(
             funcStrings,
             paramNames,
             fileSize,
+            pcFrom = base.instructionBase,
         )
         return FunctionsBundle(functions, entryFunction, globalSlots)
     }
@@ -2182,7 +2300,7 @@ internal class ErbcStreamDecoder private constructor(
      */
     private fun decodeCallArgsTable(instructionCount: Int, stats: DecodeStats?): CallArgIndex =
         if (header.hasSection(ErbcFormat.SECTION_CALL_ARGS)) {
-            readCallArgs(cursorAt(ErbcFormat.SECTION_CALL_ARGS), instructionCount, stats)
+            readCallArgs(cursorAt(ErbcFormat.SECTION_CALL_ARGS), base.instructionBase, instructionCount, stats)
         } else {
             CallArgIndex.EMPTY
         }
@@ -2480,6 +2598,12 @@ internal class ErbcStreamDecoder private constructor(
                         stmt3.join()
                     }
                     stmt3Failure?.let { t.addSuppressed(it) }
+                    // 4. 段 4/6/7 的预取线程是**同一窗口**里的第二条读者：它读的也是这份映射，
+                    //    失败路径同样必须收口（CMP-11）。join 同样不许带超时：段 4 索引趟 +
+                    //    段 6/7 逐条读都是固定条数的有限步，必然返回。
+                    prefetchThread.interrupt()
+                    prefetchThread.join()
+                    prefetchFailure?.let { f -> if (f !== t) t.addSuppressed(f) }
                     throw t
                 }
             }
@@ -2496,7 +2620,14 @@ internal class ErbcStreamDecoder private constructor(
             // `LazyStatementDecodeTest` 拿同一批字节（含变异畸形件）在两条档之间做差分。
             // 段 3 的工作线程在段 2 解码期间已经跑完/在跑：这里 join 收口。
             stmt3Thread?.join()
-            stmt3Failure?.let { throw it }
+            stmt3Failure?.let { failure ->
+                // 段 3 失败时预取线程还在跑（它的 join 在段 3 之后）：失败路径统一收口（CMP-11），
+                // 主异常原样上抛，预取的异常只作 suppressed。
+                prefetchThread.interrupt()
+                prefetchThread.join()
+                prefetchFailure?.let { f -> if (f !== failure) failure.addSuppressed(f) }
+                throw failure
+            }
             // 线程私有统计并回主口径（两边不同时写 ⇒ 合并等价于串行累加）。
             stats?.let { s ->
                 s.stringDecodes += stmt3Stats.stringDecodes
@@ -2508,68 +2639,78 @@ internal class ErbcStreamDecoder private constructor(
             val stmts: List<Statement> = if (!header.hasSection(ErbcFormat.SECTION_STATEMENTS)) {
                 emptyList()
             } else {
-                val cur = stmt3Cur!!
-                val arena = stmt3Arena!!
-                val nodeOffsets = stmt3NodeOffsets!!
-                val stmtCount = stmt3Counts!![1]
-                stage(LoadStages.STMT_NODES)
-                if (lazyStatements) {
-                    val sectionFrom = header.offsets[ErbcFormat.SECTION_STATEMENTS]
-                    val sectionEnd = file.endOf(ErbcFormat.SECTION_STATEMENTS)
-                    val recordRegionFrom = cur.pos
-                    val regionBytes = sectionEnd - recordRegionFrom
-                    // 整段一次映射（堆内 0、通道可关）先立起来，随即开启惰性节点重放：
-                    // 节点表来自工作线程的边界扫描（M-MEM1），**表是空的** —— 下面两条回放路
-                    // 的节点都由 [RecordSource.lazyEnsure] 按偏移现补：侧车档只补抽查 12 条的
-                    // 子树，回落档才会扫到全部可达节点（终态在收尾 [RecordSource.discardBuiltNodes] 归零）。
-                    val pinned = file.mapWindow(sectionFrom, sectionEnd)
-                    val win = SectionWindow(file, recordRegionFrom, sectionEnd, pinned, sectionFrom)
-                    arena.enableLazyNodes(win, nodeOffsets, fileSize)
-                    // MEM7 刀 C：整段 pin 已经铺好 ⇒ 段 3 局部串池那张 1,680,720 项的偏移表
-                    // 就地改接映射页的稀疏分块（6.4 MiB 常驻 → 0），取值路径与数据块同源。
-                    arena.mapStringOffsetsFrom(win)
-                    val hinted = stmtRecordOffsetsHint
-                    // 侧车放行判据（CMP-01/CMP-03）：v2 头配对（recordBytes + 记录区 CRC32）
-                    // + 单调/首条为 0/末条收在段尾 + 首尾与 1/8 条带起点的回放抽查。
-                    // 任一不成立 ⇒ 回落逐条扫描（错表绝不静默生效），并打「不可信」分段标记。
-                    val trusted = hinted != null && hinted.count == stmtCount && stmtCount > 0 &&
-                        validateRecordOffsets(hinted, regionBytes, recordRegionFrom, sectionEnd, arena)
-                    val recordOffsets = if (trusted) {
-                        // 打断点标记照发（8 次几乎零成本），logcat 的分段口径保持不变。
-                        for (k in 1..BLOCK_MARKS) markBlock(LoadStages.STMT_RECORDS, k)
-                        // M13-MEM10 刀 E：不再把 171 万条偏移拷成 IntArray（6.5 MiB 堆），
-                        // 直接持侧车映射 + 记录区起点，取用时一次 4 B 映射读。
-                        hinted!!.absolute(recordRegionFrom)
+                // 段 3 收尾（侧车校验/回落扫描、整池逐条解码）仍在 `erbc-prefetch` 的窗口内：
+                // 任何失败都必须先收口预取线程再上抛 —— 它读的是同一份映射，调用方下一帧就
+                // close（CMP-11）。join 不带超时：预取是有限步（段 4 索引趟 + 段 6/7 逐条读）。
+                try {
+                    val cur = stmt3Cur!!
+                    val arena = stmt3Arena!!
+                    val nodeOffsets = stmt3NodeOffsets!!
+                    val stmtCount = stmt3Counts!![1]
+                    stage(LoadStages.STMT_NODES)
+                    if (lazyStatements) {
+                        val sectionFrom = header.offsets[ErbcFormat.SECTION_STATEMENTS]
+                        val sectionEnd = file.endOf(ErbcFormat.SECTION_STATEMENTS)
+                        val recordRegionFrom = cur.pos
+                        val regionBytes = sectionEnd - recordRegionFrom
+                        // 整段一次映射（堆内 0、通道可关）先立起来，随即开启惰性节点重放：
+                        // 节点表来自工作线程的边界扫描（M-MEM1），**表是空的** —— 下面两条回放路
+                        // 的节点都由 [RecordSource.lazyEnsure] 按偏移现补：侧车档只补抽查 12 条的
+                        // 子树，回落档才会扫到全部可达节点（终态在收尾 [RecordSource.discardBuiltNodes] 归零）。
+                        val pinned = file.mapWindow(sectionFrom, sectionEnd)
+                        val win = SectionWindow(file, recordRegionFrom, sectionEnd, pinned, sectionFrom)
+                        arena.enableLazyNodes(win, nodeOffsets, fileSize)
+                        // MEM7 刀 C：整段 pin 已经铺好 ⇒ 段 3 局部串池那张 1,680,720 项的偏移表
+                        // 就地改接映射页的稀疏分块（6.4 MiB 常驻 → 0），取值路径与数据块同源。
+                        arena.mapStringOffsetsFrom(win)
+                        val hinted = stmtRecordOffsetsHint
+                        // 侧车放行判据（CMP-01/CMP-03）：v2 头配对（recordBytes + 记录区 CRC32）
+                        // + 单调/首条为 0/末条收在段尾 + 首尾与 1/8 条带起点的回放抽查。
+                        // 任一不成立 ⇒ 回落逐条扫描（错表绝不静默生效），并打「不可信」分段标记。
+                        val trusted = hinted != null && hinted.count == stmtCount && stmtCount > 0 &&
+                            validateRecordOffsets(hinted, regionBytes, recordRegionFrom, sectionEnd, arena)
+                        val recordOffsets = if (trusted) {
+                            // 打断点标记照发（8 次几乎零成本），logcat 的分段口径保持不变。
+                            for (k in 1..BLOCK_MARKS) markBlock(LoadStages.STMT_RECORDS, k)
+                            // M13-MEM10 刀 E：不再把 171 万条偏移拷成 IntArray（6.5 MiB 堆），
+                            // 直接持侧车映射 + 记录区起点，取用时一次 4 B 映射读。
+                            hinted!!.absolute(recordRegionFrom)
+                        } else {
+                            if (hinted != null) {
+                                mark?.onStage("program.段3 语句偏移表不可信（回落扫描）")
+                            }
+                            // 回落逐条扫描在**调用线程**上迭代补链（M-MEM1）：装载线程的栈尺寸不由
+                            // core 决定，守卫递归在小栈上会先于上限打穿（判据见 loadReplayIterative
+                            // 字段 KDoc）。这一档终态会把全部可达节点物化 —— 与改造前 eager 整表同
+                            // 形状、不新增峰值；稠密前缀扫描（buildPrefixThrough）把它保持在 O(N)，
+                            // 装载收尾统一弃掉。
+                            arena.setLoadReplayIterative(true)
+                            try {
+                                RecordOffsets.heap(
+                                    arena.buildRecordOffsets(cur, stmtCount) { index, _, _ ->
+                                        markBlock(LoadStages.STMT_RECORDS, index)
+                                    },
+                                )
+                            } finally {
+                                arena.setLoadReplayIterative(false)
+                            }
+                        }
+                        // 装载返回前把回放摸过的节点（抽查 12 条 / 回落扫描的全部可达节点）
+                        // 从 `nodes[]` 弃掉 —— 终态与改造前「先建全表、enableLazyNodes 清空」一致：
+                        // 之后 child() 按节点自己的偏移重放、statementAt() 按记录偏移重放。
+                        arena.discardBuiltNodes()
+                        lazyPool = LazyStatementRecords(arena, win, fileSize, recordOffsets)
+                        emptyList()
                     } else {
-                        if (hinted != null) {
-                            mark?.onStage("program.段3 语句偏移表不可信（回落扫描）")
-                        }
-                        // 回落逐条扫描在**调用线程**上迭代补链（M-MEM1）：装载线程的栈尺寸不由
-                        // core 决定，守卫递归在小栈上会先于上限打穿（判据见 loadReplayIterative
-                        // 字段 KDoc）。这一档终态会把全部可达节点物化 —— 与改造前 eager 整表同
-                        // 形状、不新增峰值；稠密前缀扫描（buildPrefixThrough）把它保持在 O(N)，
-                        // 装载收尾统一弃掉。
-                        arena.setLoadReplayIterative(true)
-                        try {
-                            RecordOffsets.heap(
-                                arena.buildRecordOffsets(cur, stmtCount) { index, _, _ ->
-                                    markBlock(LoadStages.STMT_RECORDS, index)
-                                },
-                            )
-                        } finally {
-                            arena.setLoadReplayIterative(false)
+                        ArrayList<Statement>(stmtCount).apply {
+                            repeat(stmtCount) { add(arena.readStatement(cur)) }
                         }
                     }
-                    // 装载返回前把回放摸过的节点（抽查 12 条 / 回落扫描的全部可达节点）
-                    // 从 `nodes[]` 弃掉 —— 终态与改造前「先建全表、enableLazyNodes 清空」一致：
-                    // 之后 child() 按节点自己的偏移重放、statementAt() 按记录偏移重放。
-                    arena.discardBuiltNodes()
-                    lazyPool = LazyStatementRecords(arena, win, fileSize, recordOffsets)
-                    emptyList()
-                } else {
-                    ArrayList<Statement>(stmtCount).apply {
-                        repeat(stmtCount) { add(arena.readStatement(cur)) }
-                    }
+                } catch (t: Throwable) {
+                    prefetchThread.interrupt()
+                    prefetchThread.join()
+                    prefetchFailure?.let { f -> if (f !== t) t.addSuppressed(f) }
+                    throw t
                 }
             }
             stage(LoadStages.STMT_RECORDS)
@@ -2629,7 +2770,15 @@ internal class ErbcStreamDecoder private constructor(
             stage(LoadStages.CALL_ARGS)
 
             // ---- 池重灌 + 下标保真校验 ----------------------------------------
-            val pool = ConstantPool()
+            // 池基线只影响「绝对下标」的起点：`add*` 返回 `base + 本池序号`，`*Count` 报绝对口径。
+            // 故漂移校验要比的是**本池序号**（`*Count - base`），比绝对口径会把基线段算成本段条目
+            // （与 `ErbcReader.decodeProgram` 的重灌同口径；无基线时折减量恒 0、文案逐字不变）。
+            val pool = ConstantPool(
+                longBase = base.longBase,
+                stringBase = base.stringBase,
+                exprBase = base.exprBase,
+                statementBase = base.statementBase,
+            )
             for (s in strings) pool.addString(s)
             for (l in longs) pool.addLong(l)
             val lazyExprs = lazyExprSource
@@ -2646,24 +2795,24 @@ internal class ErbcStreamDecoder private constructor(
             } else {
                 for (s in stmts) pool.addStatement(s)
             }
-            if (pool.stringCount != strings.size) {
-                throw ErbcDecodeException(0, "字符串池重灌后下标漂移（${strings.size} → ${pool.stringCount}）")
+            if (pool.stringCount - base.stringBase != strings.size) {
+                throw ErbcDecodeException(0, "字符串池重灌后下标漂移（${strings.size} → ${pool.stringCount - base.stringBase}）")
             }
-            if (pool.longCount != longs.size) {
-                throw ErbcDecodeException(0, "常量池重灌后下标漂移（${longs.size} → ${pool.longCount}）")
+            if (pool.longCount - base.longBase != longs.size) {
+                throw ErbcDecodeException(0, "常量池重灌后下标漂移（${longs.size} → ${pool.longCount - base.longBase}）")
             }
             val expectedExprCount = lazyExprs?.nodeCount ?: exprRoots.size
-            if (pool.exprCount != expectedExprCount) {
+            if (pool.exprCount - base.exprBase != expectedExprCount) {
                 throw ErbcDecodeException(
                     0,
-                    "表达式池重灌后下标漂移（$expectedExprCount → ${pool.exprCount}）：文件里有结构相等的重复表达式，" +
+                    "表达式池重灌后下标漂移（$expectedExprCount → ${pool.exprCount - base.exprBase}）：文件里有结构相等的重复表达式，" +
                         "v1 的池下标契约要求它们本就同一条目",
                 )
             }
             // 惰性档的这条判定恒真（表长就是段头声明的 stmtCount，索引趟逐条解到过），
             // 保留给整池档 —— 两条档共用同一段代码，不另立判据。
-            if (lazyStmt == null && pool.statementCount != stmts.size) {
-                throw ErbcDecodeException(0, "语句池重灌后下标漂移（${stmts.size} → ${pool.statementCount}）")
+            if (lazyStmt == null && pool.statementCount - base.statementBase != stmts.size) {
+                throw ErbcDecodeException(0, "语句池重灌后下标漂移（${stmts.size} → ${pool.statementCount - base.statementBase}）")
             }
             stage(LoadStages.POOL_REFILL)
 
@@ -2680,6 +2829,12 @@ internal class ErbcStreamDecoder private constructor(
                 } else {
                     CallArgSource.ERBC_V1
                 },
+                codeBase = base.codeBase,
+                statementBase = base.statementBase,
+                stringBase = base.stringBase,
+                longBase = base.longBase,
+                exprBase = base.exprBase,
+                functionBase = base.functionBase,
             )
             // ---- 语句实参规范化去重与引用范围校验**重叠**（2026-10-24 装载提速）----
             //
@@ -2713,7 +2868,19 @@ internal class ErbcStreamDecoder private constructor(
                 }, "erbc-intern-seed")
                 internThread.isDaemon = true
                 internThread.start()
-                validate(program, flags)
+                try {
+                    validate(program, flags)
+                } catch (t: Throwable) {
+                    // CMP-11（失败路径收口）：校验抛错时去重线程可能还在整池遍历，异常一旦
+                    // 离开本方法，调用方（`MappedErbc.toProgram` / `loadMappedHandle`）下一帧
+                    // 就 close 映射。与段 2/段 3 同口径：interrupt + **无超时** join
+                    // （去重是有限步，必然返回），主异常原样上抛，去重异常只作 suppressed
+                    // —— 失败屏的类型与文案逐字不变。
+                    internThread.interrupt()
+                    internThread.join()
+                    internFailure?.let { f -> if (f !== t) t.addSuppressed(f) }
+                    throw t
+                }
                 stage(LoadStages.VALIDATE)
                 internThread.join()
                 internFailure?.let { throw it }
@@ -2742,6 +2909,9 @@ internal class ErbcStreamDecoder private constructor(
                 throw ErbcDecodeException(0, "入口函数下标越界: ${program.entryFunction}（共 ${program.functions.size} 个）")
             }
             val count = program.instructionCount
+            // 本段窗口（R7 基线，与 `ErbcReader.validate` 的 pcFrom 同口径）：pc 是**绝对**口径，
+            // `0 until count` 会把 base 段也扫进来（越界读）——base 段的字不在本产物的窗口里。
+            val pcFrom = program.instructionBase
             val hasExpr = (flags and ErbcFormat.FLAG_HAS_EXPRESSIONS) != 0
             val hasStmt = (flags and ErbcFormat.FLAG_HAS_STATEMENTS) != 0
             // 指令趟保持**串行**（2026-10-24 实测：把它切成 8 条带并行反而没赚 —— 480 万条
@@ -2752,24 +2922,31 @@ internal class ErbcStreamDecoder private constructor(
             // 分段 mark（M10-MEM）：这一趟要过 480 万条指令、把 CODE 段的映射页全部碰一遍，
             // 是装载期最后一个「峰值可能落在这里」的长段；按 1/8 条带报一次，
             // 失败屏的峰值行才说得出到底卡在哪一段（M8-DEVICE-BOOT 的痛点）。
+            // 条带按**本段序号**算（`pc - pcFrom` / `count - pcFrom`）：无基线时与旧式
+            // `pc >= count*k/8` 逐位相同；带基线时打点均匀落在本段窗口上。
             var nextBlock = 1
             // 跳转归属（CMP-55 映射路）：惰性函数表建一个**无物化**扫描器，随指令趟一起判 ——
             // 不额外多走一遍 480 万条指令，也不把 110,072 条 FunctionInfo 拖进堆。
+            // 归属区间端点与跳转目标都是绝对 pc（`jumpScan` 的 `starts/ends` 与 `_JUMP`
+            // 的 `pc+1+a` 同处一个空间），带基线时自洽、无需折回。
             val jumpScan = (program.functions as? MappedFunctionTable)?.jumpScan(count)
-            for (pc in 0 until count) {
-                if (nextBlock <= BLOCK_MARKS && pc >= (count.toLong() * nextBlock / BLOCK_MARKS).toInt()) {
+            for (pc in pcFrom until count) {
+                if (nextBlock <= BLOCK_MARKS &&
+                    (pc - pcFrom) >= ((count - pcFrom).toLong() * nextBlock / BLOCK_MARKS).toInt()
+                ) {
                     markBlock(LoadStages.VALIDATE, nextBlock)
                     nextBlock++
                 }
                 val op = program.op(pc)
                 val a = program.a(pc)
                 val b = program.b(pc)
-                jumpScan?.observe(pc, op, a, b)
+                val c = program.c(pc)
+                jumpScan?.observe(pc, op, a, b, c)
                 when (op) {
                     Opcode._SET_INT -> requirePool(op, b, program.constantCount, pc, "常量池")
                     Opcode._SET_STR -> requirePool(op, b, program.stringCount, pc, "字符串池")
                     Opcode._PRINT_LITERAL -> requirePool(op, a, program.stringCount, pc, "字符串池")
-                    Opcode._EVAL_INT, Opcode._EVAL_STR -> {
+                    Opcode._EVAL_INT, Opcode._EVAL_STR, Opcode._EVAL_INT_JZ -> {
                         if (!hasExpr) {
                             throw ErbcDecodeException(
                                 0,
@@ -2779,8 +2956,35 @@ internal class ErbcStreamDecoder private constructor(
                         requirePool(op, a, program.exprCount, pc, "表达式池")
                     }
 
+                    // 浮点返回追加段（244）：a 是**表达式池下标**，NONE_REF = 无返回值
+                    // （分类见 code.OpcodeRelocation 的 EXPR_NULLABLE）。M2-1 前这里整条漏判：
+                    // `isStackOp(244)` 为假、marker 区间只到 197 ⇒ 零基线模块带 `_RETF`
+                    // 链接后 a 不平移，运行期就地求值 **base 段**的表达式（返回别人的值，
+                    // 装载期零报错）。哨兵不判界也不平移，与 `_RETS` 的 NONE 槽同口径。
+                    // 文案与 `ErbcReader.validate` 的逐字副本保持一致（等价性对拍要求同一句）。
+                    Opcode._RETF -> {
+                        if (a != ErbcFormat.NONE_REF) {
+                            if (!hasExpr) {
+                                throw ErbcDecodeException(
+                                    0,
+                                    "本文件声明不含表达式池，但 pc=$pc 的 ${Opcode.nameOf(op)} 需要表达式下标 $a",
+                                )
+                            }
+                            requirePool(op, a, program.exprCount, pc, "表达式池")
+                        }
+                    }
+
                     Opcode._CALL -> {
-                        if (a !in program.functions.indices) {
+                        // `_CALL` 的 a 是**绝对**函数下标，functions 只持有本段条目 ⇒ 折回判界分两支：
+                        // - a < functionBase：base 区段的绝对下标（补丁调用 base 公共函数，R7 主流场景，
+                        //   本段产物里没有那条记录可查）⇒ 放行，函数解析落 overlay 拼接后的 base 区段；
+                        // - a ≥ functionBase：折回 a - functionBase 查本段 functions，越界才拒。
+                        // 文案与 `ErbcReader.validate` 的逐字副本保持一致（等价性对拍要求同一句），故只
+                        // 换判据不换措辞：`functions.size` 是本段条数，无基线时与绝对条数相同、判定与
+                        // 改造前的 `a !in functions.indices` 逐位相同。
+                        if (a < 0 ||
+                            (a >= program.functionBase && a - program.functionBase !in program.functions.indices)
+                        ) {
                             throw ErbcDecodeException(0, "pc=$pc 的 _CALL 引用函数下标 $a，越界（共 ${program.functions.size} 个）")
                         }
                     }
@@ -2804,9 +3008,10 @@ internal class ErbcStreamDecoder private constructor(
             val fns = program.functions
             if (fns is LazyFunctionTable) {
                 // 惰性表：走一遍不缓存的校验趟（与下面整池档共用同一个判界函数）。
+                // 下界（pcFrom）由 MappedFunctionTable 自持（接口只带上界，见其构造参数）。
                 fns.validateRecords(count)
             } else {
-                for (f in fns) validateFunctionRecord(f, count)
+                for (f in fns) validateFunctionRecord(f, count, pcFrom)
                 // 整池档：与字节路**同一份**实现（跳转归属）。
                 ErbcReader.requireJumpTargets(program)
             }
@@ -2898,6 +3103,11 @@ internal class ErbcStreamDecoder private constructor(
 
                 ExprTag.STR_LITERAL -> {
                     strings.checkIndex(cur.u32()); cur.i32(); cur.i32()
+                }
+
+                ExprTag.FLOAT_LITERAL -> {
+                    // f64 = i64 raw bits：与 [RecordSource.readNode] 的 cur.f64() 逐字节对齐。
+                    cur.i64(); cur.i32(); cur.i32()
                 }
 
                 ExprTag.NULL_TERM -> {
@@ -3067,6 +3277,23 @@ private class MappedExprSource(
     private val source: String,
 ) : LazyExprSource {
     private val roots = BlockU32s(win.fork(), rootsFrom, poolCount)
+
+    /**
+     * 关通道前的**表达式侧判据**（CMP-19 的补门）：本池运行期只剩两条回读路 ——
+     * 池根/节点的记录区（[win]）与段 2 的局部串表（[arena] 里那张 [StreamStringTable]）。
+     * 两条都必须是「装载期就 pin 好、之后不再 `channel.map`」的形态，否则
+     * `Program.releaseMmap()` 关掉共享通道后，第一次取用某个没物化过的节点就会撞
+     * 「映射已关闭」—— 症状是玩到几十分钟后凭空一条 Java 异常，而不是装载期失败。
+     *
+     * 装载期用的是 `readStringTable(pinWhole = true)`，数据块超过 128 MiB 或映射建不出来时
+     * 会静默退成分块窗口（见 [pinnedSibling] 返回 null），[win] 同理可能不是整段 pin；
+     * 两条都在这里如实上报，由上层决定「宁可多留 1 fd」。
+     */
+    override val channelFreeForRuntime: Boolean
+        get() = winPinned && arena.stringsChannelFree()
+
+    /** 装载期的 [win] 是否整段 pin（构造期一次读定，运行期零判断）。 */
+    private val winPinned: Boolean = win.isPinnedWhole
 
     override val nodeCount: Int get() = poolCount
 
@@ -3454,6 +3681,7 @@ internal class RecordSource(
         val e: Expr = when (tag) {
             ExprTag.INT_LITERAL -> IntLiteral(cur.i64(), cur.i32(), cur.i32())
             ExprTag.STR_LITERAL -> StrLiteral(str(cur.u32()), cur.i32(), cur.i32())
+            ExprTag.FLOAT_LITERAL -> FloatLiteral(cur.f64(), cur.i32(), cur.i32())
             ExprTag.NULL_TERM -> NullTerm(cur.bool(), cur.i32(), cur.i32())
             ExprTag.VAR_REF -> {
                 val name = str(cur.u32())
@@ -3565,6 +3793,7 @@ internal class RecordSource(
     private fun operandType(wire: Int): OperandType = when (wire) {
         WireEnum.OPERAND_INT -> OperandType.INT
         WireEnum.OPERAND_STR -> OperandType.STR
+        WireEnum.OPERAND_FLOAT -> OperandType.FLOAT
         else -> throw ErbcDecodeException(0, "未知 OperandType 线值: $wire")
     }
 

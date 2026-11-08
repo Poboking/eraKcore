@@ -1,0 +1,17 @@
+# INPUTANY 的整数支：long.TryParse 成功 ⇒ 只 process.InputInteger(456)（写 RESULT:0），
+# **不写 RESULTS**（:1256-1274）。脚本先把 RESULTS:0 预置成 KEEP，
+# ANY_INT_RESULTS=KEEP 即「RESULTS 没被动过」的实测证据。
+case: input_any_int
+target: REPLAY_INPUT_ANY_INT
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:2095-2110
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1256-1274
+--- inputs
+submit 456
+--- expect-console
+START-INPUT-ANY-INT
+ANY_INT_RESULT=456
+ANY_INT_RESULTS=KEEP
+END-INPUT-ANY-INT
+--- expect-vars
+RESULT:0 = 456
+RESULTS:0 = "KEEP"

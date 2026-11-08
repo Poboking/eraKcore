@@ -46,14 +46,11 @@ import java.util.Locale
  *
  * @property defaultFore 默认前景 `0xRRGGBB`（Config.ForeColor 默认 192,192,192，
  *   ConfigData.cs:68；HM :130）
- * @property defaultBack 默认背景（Config.BackColor 默认黑，ConfigData.cs:69；
- *   原版每段不带背景，背景是全局量，这里落进 [TextRun.back] 供显示列表直接使用）
  * @property defaultFontName 默认字体名（Config.FontName 默认「ＭＳ ゴシック」，
  *   ConfigData.cs:65；HM :138、StringStyle.cs:22-31）
  */
 class MiniHtml(
     val defaultFore: Int = FORE_DEFAULT,
-    val defaultBack: Int = BACK_DEFAULT,
     val defaultFontName: String = FONT_DEFAULT,
 ) {
 
@@ -170,14 +167,19 @@ class MiniHtml(
         var pos = 0
 
         fun run(): MiniHtmlDoc {
-            // 注释与换行都是「整串预判」开关（HM :534-535），没有就不看
+            // 注释与换行都是「整串预判」开关（HM :534-535），没有就不看。
+            // 换行用**只前进的游标**：pos 单调不减，所以「pos 之后的第一个换行」要么是
+            // 已找到的 nextNl，要么在其被跨过（nextNl < pos）后重扫一次；
+            // 绝不能每个标签都从 pos 重扫到串尾 —— 那是「多标签 + 尾部换行」的 O(n²)。
             val hasComment = html.contains("<!--")
-            val hasReturn = html.indexOf('\n') >= 0
+            var nextNl = html.indexOf('\n')
             while (pos < html.length) {
                 var cut = html.indexOf('<', pos)
-                if (hasReturn) {
-                    val nl = html.indexOf('\n', pos)
-                    if (nl >= 0 && (cut < 0 || cut > nl)) cut = nl
+                if (nextNl >= 0 && nextNl < pos) {
+                    nextNl = html.indexOf('\n', pos)
+                }
+                if (nextNl >= 0 && (cut < 0 || cut > nextNl)) {
+                    cut = nextNl
                 }
                 if (cut < 0) {
                     // 尾文本（:556-569）：先入段，再按 FlagPClosed / FlagNobrClosed 抛
@@ -231,7 +233,17 @@ class MiniHtml(
                 return gt
             }
             var i = start
-            while (i < html.length && html[i] != '>' && !html[i].isWhitespace()) i++
+            // 标签名扫描在 '/' 处停下（R-F4）：原版名读取 = LexicalAnalyzer.ReadSingleIdentifier，
+            // 其截断字符集 _searchValues（LexicalAnalyzer.cs:28）含 '/'，`<br/>` 读出的名是
+            // "br"、游标停在 '/'（:315-329）；随后 HtmlManager.cs:1049-1050 见 Current != '>'
+            // 就调 Analyse，'/' 被当成一元运算符装进属性集（LexicalAnalyzer.cs:780 case '/'、
+            // :791 ret.Add(OperatorWord(ReadOperator(...)))，ReadOperator 的 '/' 支在
+            // LexicalAnalyzer.cs:425-426 返回 Div 且不吞后面的 '>'）⇒ 属性集**非空**。
+            // 于是样式位自闭合在原版落 AttributeSetToTag（HtmlManager.cs:1082-1085 的 br 支、
+            // :1071-1074 的 b/i/u/s 支、:1089-1092 的 nobr 支），而不是本层原先的 TAG_ERROR
+            // （名 "br/" 不认识）。属性消费标签（p/font/img）则在词元走查处断、直落
+            // :1677 HtmlTagError —— 见 [readAttributes] 的自封闭哨兵。
+            while (i < html.length && html[i] != '>' && html[i] != '/' && !html[i].isWhitespace()) i++
             val rawName = html.substring(start, i)
             i = skipWs(i)
             var attrs: List<Pair<String, String>>? = null
@@ -316,8 +328,10 @@ class MiniHtml(
             if (attrs == null) throw MiniHtmlException(MiniHtmlErrorKind.P_WITHOUT_ATTRIBUTE, html)
             if (!lineHead) throw MiniHtmlException(MiniHtmlErrorKind.TAG_NOT_AT_LINE_HEAD, html)
             if (flagNobr) throw MiniHtmlException(MiniHtmlErrorKind.DUPLICATE_TAG, html)
-            // 原版要求「identifier = literal」恰好一个属性后立刻 EOL（:1117-1125）
-            if (attrs.size != 1) throw MiniHtmlException(MiniHtmlErrorKind.TAG_ERROR, html)
+            // 自封闭哨兵撞在走查第一环 ⇒ 原版 null-cast 断链、直落 :1677 HtmlTagError。
+            if (attrs.size != 1 || attrs[0].first.isEmpty()) {
+                throw MiniHtmlException(MiniHtmlErrorKind.TAG_ERROR, html)
+            }
             val (key, value) = attrs[0]
             if (!key.equals("align", ignoreCase = true)) {
                 throw MiniHtmlException(MiniHtmlErrorKind.UNKNOWN_P_ATTRIBUTE, html)
@@ -349,7 +363,11 @@ class MiniHtml(
                         if (frame.face != null) throw MiniHtmlException(MiniHtmlErrorKind.DUPLICATE_ATTRIBUTE, html)
                         frame.face = value
                     }
-                    else -> throw MiniHtmlException(MiniHtmlErrorKind.UNKNOWN_ATTRIBUTE, html)
+                    // 空名 = 自封闭哨兵：原版走查在该词元处 null-cast 断链 → :1677 HtmlTagError
+                    else -> throw MiniHtmlException(
+                        if (key.isEmpty()) MiniHtmlErrorKind.TAG_ERROR else MiniHtmlErrorKind.UNKNOWN_ATTRIBUTE,
+                        html,
+                    )
                 }
             }
             // 缺省属性从外层帧继承（HM :1651-1667）
@@ -372,6 +390,7 @@ class MiniHtml(
             var yPos: Int? = null
             var widthPx = false
             var heightPx = false
+            var yPosPx = false
             for ((key, rawValue) in attrs) {
                 val value = unescape(rawValue)
                 when (key.lowercase(Locale.ROOT)) {
@@ -401,9 +420,18 @@ class MiniHtml(
                     }
                     "ypos" -> {
                         if (yPos != null) throw MiniHtmlException(MiniHtmlErrorKind.DUPLICATE_ATTRIBUTE, html)
-                        yPos = mixedNum(value).first
+                        // 与 width/height 同一形态收 Pair（数值 + isPx）：原版这里存的是完整
+                        // MixedNum（HtmlManager.cs:1213 的 ParseMixedNum(ref num11, ...)），
+                        // 消费侧才分岔（ConsoleImagePart.cs:81 的 isPx ? num : num * FontSize / 100）。
+                        val parsed = mixedNum(value)
+                        yPos = parsed.first
+                        yPosPx = parsed.second
                     }
-                    else -> throw MiniHtmlException(MiniHtmlErrorKind.UNKNOWN_ATTRIBUTE, html)
+                    // 空名 = 自封闭哨兵：原版走查在该词元处 null-cast 断链 → :1677 HtmlTagError
+                    else -> throw MiniHtmlException(
+                        if (key.isEmpty()) MiniHtmlErrorKind.TAG_ERROR else MiniHtmlErrorKind.UNKNOWN_ATTRIBUTE,
+                        html,
+                    )
                 }
             }
             if (src == null) throw MiniHtmlException(MiniHtmlErrorKind.IMG_SRC_MISSING, html)
@@ -418,7 +446,8 @@ class MiniHtml(
                     yPos = yPos,
                     widthIsPx = widthPx,
                     heightIsPx = heightPx,
-                    run = TextRun("", fore, defaultBack, styleMask, currentFont(), RunKind.HTML),
+                    yPosIsPx = yPosPx,
+                    run = TextRun("", fore, null, styleMask, currentFont(), RunKind.HTML),
                 )
             )
         }
@@ -480,11 +509,28 @@ class MiniHtml(
          * 属性词法：`name = 'literal'` 三元组表（原版 `LexicalAnalyzer.Analyse` :1049
          * 产 WordCollection，font/img 按三元组循环消费，如 :1612-1621）。
          * 结构不合语法统一落 [MiniHtmlErrorKind.TAG_ERROR]（对应 :1677 的 break 路径）。
+         *
+         * 自封闭裸 `/`（R-F4）：原版 `Analyse` 把标签名后（或属性之间）的 `/` 收成
+         * 一个 `OperatorWord(Div)` 装进属性集（LexicalAnalyzer.cs:780/:791、
+         * ReadOperator 的 '/' 支 :425-426），属性集因此非空但含非法词元 ——
+         * 样式位标签判「属性集 != null」直接抛 AttributeSetToTag
+         * （HtmlManager.cs:1082-1085 等三支，本层用 `attrs != null` 同判）；
+         * p/font/img 的三元组走查撞上该词元后 null-cast 断链
+         * （font :1618-1621、img :1170-1173、p :1123-1129 的合取判据），switch 的
+         * `break` 直落 :1677 HtmlTagError。本层在**出现的位置**记一枚空名哨兵
+         * （空名在真语法里不可达：下方 nameStart 判空先抛 TAG_ERROR），两侧口径同覆。
          */
         private fun readAttributes(from: Int): Pair<List<Pair<String, String>>, Int> {
             val out = ArrayList<Pair<String, String>>()
             var i = from
             while (i < html.length && html[i] != '>') {
+                if (html[i] == '/') {
+                    out.add(SELF_CLOSING_MARK)
+                    // 原版 Analyse 在词元之间一律先跳空白（LexicalAnalyzer.cs:741-744
+                    // '\t'/' ' 支），`<br / >` 的 '/' 后还能跟空白再到 '>'。
+                    i = skipWs(i + 1)
+                    continue
+                }
                 val nameStart = i
                 while (i < html.length && !html[i].isWhitespace() && html[i] != '=' && html[i] != '>') i++
                 if (i == nameStart) throw MiniHtmlException(MiniHtmlErrorKind.TAG_ERROR, html)
@@ -519,7 +565,7 @@ class MiniHtml(
             val text = unescape(chunk)
             segments.add(
                 HtmlSegment.Text(
-                    TextRun(text, currentFore(), defaultBack, styleMask, currentFont(), RunKind.TEXT)
+                    TextRun(text, currentFore(), null, styleMask, currentFont(), RunKind.TEXT)
                 )
             )
         }
@@ -550,11 +596,15 @@ class MiniHtml(
     }
 
     companion object {
+        /**
+         * 自封闭裸 `/` 的属性位哨兵（R-F4，见 Parser.readAttributes 的文档）：
+         * 空名在 `name = 'literal'` 真语法里不可达，故可安全充当「属性集非空但含
+         * 非法词元」的记号 —— 对应原版词元流里的 `OperatorWord(Div)`。
+         */
+        internal val SELF_CLOSING_MARK: Pair<String, String> = "" to ""
+
         /** Config.ForeColor 默认（ConfigData.cs:68，192,192,192）。 */
         const val FORE_DEFAULT: Int = 0xC0C0C0
-
-        /** Config.BackColor 默认（ConfigData.cs:69，黑）。 */
-        const val BACK_DEFAULT: Int = 0x000000
 
         /**
          * Config.FocusColor 默认（ConfigData.cs:70），与 [TextRun.DEFAULT_FOCUS_COLOR] 同一来源。

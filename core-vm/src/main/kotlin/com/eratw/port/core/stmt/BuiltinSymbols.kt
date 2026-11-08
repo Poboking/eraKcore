@@ -22,6 +22,8 @@ data class VarSpec(
  * `varTokenDic.Add`，含 DITEMTYPE/DA..DE/TA/TB 多维数组、GAMEBASE_AUTHER 旧拼、
  * 条件注册的 __FILE__/__FUNCTION__/__LINE__），不再做「按需裁剪」；原先误登记的
  * FILE / FUNCTION / LINE（原版 varTokenDic 里不存在，对应物是 __FILE__ 系列）已删除。
+ * 4.981 fork 的浮点局部名 LOCALF / ARGF 另由 fork-src VariableData.cs:376-379 登记，
+ * 与上表区间不重叠，按同一口径补入（见 [variables] 内该段注释）。
  * TODO(verify): 各条 `isConst` 目前按 `VariableCode.__UNCHANGEABLE__` 位取真
  * （VariableToken.cs:44），未逐 token 复核 SetValue 覆盖（MONEYLABEL/DRAWLINESTR 的
  * 可写性由 VariableToken.SetValue 决定，与本位不同轴）；符号层就绪后以 VariableToken 全量为准。
@@ -32,6 +34,15 @@ object BuiltinSymbols {
         VarSpec("ABL", OperandType.INT, 1, isCharacterData = true, isConst = false),
         VarSpec("ABLNAME", OperandType.STR, 1, isCharacterData = false, isConst = true),
         VarSpec("ARG", OperandType.INT, 1, isCharacterData = false, isConst = false),
+        // ---- 4.981 fork 新增：浮点局部数组（LOCALF / ARGF）----
+        // 登记源：fork-src VariableData.cs:376-379 的 varTokenDic.Add（FloatLocalVariableToken /
+        // FloatArgVariableToken），**不在**类 KDoc 所说的 VariableData.cs:2962-3200 区间内。
+        // 尺寸：默认各 10（ConstantData.cs:211-217 的 LocalFloats / ArgFloats 槽），可被
+        // VARIABLESIZE.CSV 改写（ConstantData.cs:532-533），函数内 `#LOCALFSIZE` 按函数拉大
+        // （fork-src LogicalLineParser.cs:257-266）。本表只承载解析期类型与维数：两者均
+        // **1 维**（fork-src VariableToken.cs:1894-1895 的 GetFloatValue(arguments) 取 1 下标），
+        // 具体容量归 VariableStore（spec: variables.yaml:99-100 的 local_vars）。
+        VarSpec("ARGF", OperandType.FLOAT, 1, isCharacterData = false, isConst = false),
         VarSpec("ARGS", OperandType.STR, 1, isCharacterData = false, isConst = false),
         VarSpec("ASSI", OperandType.INT, 1, isCharacterData = false, isConst = false),
         VarSpec("ASSIPLAY", OperandType.INT, 1, isCharacterData = false, isConst = false),
@@ -109,6 +120,7 @@ object BuiltinSymbols {
         VarSpec("LASTLOAD_VERSION", OperandType.INT, 0, isCharacterData = false, isConst = true),
         VarSpec("LINECOUNT", OperandType.INT, 0, isCharacterData = false, isConst = true),
         VarSpec("LOCAL", OperandType.INT, 1, isCharacterData = false, isConst = false),
+        VarSpec("LOCALF", OperandType.FLOAT, 1, isCharacterData = false, isConst = false),
         VarSpec("LOCALS", OperandType.STR, 1, isCharacterData = false, isConst = false),
         VarSpec("LOSEBASE", OperandType.INT, 1, isCharacterData = false, isConst = false),
         VarSpec("M", OperandType.INT, 1, isCharacterData = false, isConst = false),
@@ -140,6 +152,12 @@ object BuiltinSymbols {
         VarSpec("RANDDATA", OperandType.INT, 1, isCharacterData = false, isConst = false),
         VarSpec("RELATION", OperandType.INT, 1, isCharacterData = true, isConst = false),
         VarSpec("RESULT", OperandType.INT, 1, isCharacterData = false, isConst = false),
+        // 4.981 浮点结果寄存器：0 维标量（`dataFloat[VarCodeInt=1]` 的包装，fork-src
+        // VariableData.cs:182；VariableToken.cs:947-971）。METHOD 语句按表达式类型写它，
+        // 读入口 VariableEvaluator.RESULTF（VariableEvaluator.cs:3105-3108）；与同表其它
+        // varTokenDic 条目一样按系统变量名登记（`#DIM RESULTF` 应被拒），脚本可直写。
+        // 容量归 VariableStore 的 floatScalars。
+        VarSpec("RESULTF", OperandType.FLOAT, 0, isCharacterData = false, isConst = false),
         VarSpec("RESULTS", OperandType.STR, 1, isCharacterData = false, isConst = false),
         VarSpec("S", OperandType.INT, 1, isCharacterData = false, isConst = false),
         VarSpec("SAVEDATA_TEXT", OperandType.STR, 0, isCharacterData = false, isConst = false),
@@ -304,6 +322,24 @@ object BuiltinSymbols {
         "GDRAWLINE" to OperandType.INT,
         "GDRAWSPRITE" to OperandType.INT,
         "GDRAWTEXT" to OperandType.INT,
+        "GETANIMETIMER" to OperandType.INT,
+        // ---- SQL 族（4.981 fork 自加 16 条，见 sql/SqlMethods.kt 与 specs/builtin-functions.yaml）----
+        "SQL_CONNECT" to OperandType.INT,
+        "SQL_ESCAPE" to OperandType.STR,
+        "SQL_EXECUTE_NONQUERY" to OperandType.INT,
+        "SQL_EXECUTE_READER" to OperandType.INT,
+        "SQL_EXECUTE_SCALAR_LONG" to OperandType.INT,
+        "SQL_EXECUTE_SCALAR_STRING" to OperandType.STR,
+        "SQL_IMPORT_MAP_XML" to OperandType.INT,
+        "SQL_P_EXECUTE_NONQUERY" to OperandType.INT,
+        "SQL_P_EXECUTE_READER" to OperandType.INT,
+        "SQL_P_EXECUTE_SCALAR_LONG" to OperandType.INT,
+        "SQL_P_EXECUTE_SCALAR_STRING" to OperandType.STR,
+        "SQL_READER_CLOSE" to OperandType.INT,
+        "SQL_READER_GET_LONG" to OperandType.INT,
+        "SQL_READER_GET_STRING" to OperandType.STR,
+        "SQL_READER_ISNULL" to OperandType.INT,
+        "SQL_READER_READ" to OperandType.INT,
         "GETBGCOLOR" to OperandType.INT,
         "GETBIT" to OperandType.INT,
         "GETCHARA" to OperandType.INT,
@@ -327,6 +363,7 @@ object BuiltinSymbols {
         "GETNUM" to OperandType.INT,
         "GETNUMB" to OperandType.INT,
         "GETPALAMLV" to OperandType.INT,
+        "GETPLATFORM" to OperandType.INT,
         "GETSECOND" to OperandType.INT,
         "GETSOUNDORBGMINFO" to OperandType.INT,
         "GETSPCHARA" to OperandType.INT,
@@ -380,14 +417,18 @@ object BuiltinSymbols {
         "MAP_CLEAR" to OperandType.INT,
         "MAP_CREATE" to OperandType.INT,
         "MAP_EXIST" to OperandType.INT,
+        "MAP_FINDKEY" to OperandType.STR,
         "MAP_FROMXML" to OperandType.INT,
         "MAP_GET" to OperandType.STR,
         "MAP_GETKEYS" to OperandType.STR,
         "MAP_HAS" to OperandType.INT,
+        "MAP_MERGE" to OperandType.INT,
         "MAP_RELEASE" to OperandType.INT,
         "MAP_REMOVE" to OperandType.INT,
+        "MAP_REMOVEIF" to OperandType.INT,
         "MAP_SET" to OperandType.INT,
         "MAP_SIZE" to OperandType.INT,
+        "MAP_TOSTRING" to OperandType.STR,
         "MAP_TOXML" to OperandType.STR,
         "MATCH" to OperandType.INT,
         "MAX" to OperandType.INT,
@@ -421,6 +462,8 @@ object BuiltinSymbols {
         "SOUNDCONTROL" to OperandType.INT,
         "SPRITEANIMEADDFRAME" to OperandType.INT,
         "SPRITEANIMECREATE" to OperandType.INT,
+        // 4.981 fork 新增（画蛇又添足版自改emuera相关说明.txt:236-239）：动画精灵帧数查询。
+        "SPRITEANIMEFRAME" to OperandType.INT,
         "SPRITECREATE" to OperandType.INT,
         "SPRITECREATED" to OperandType.INT,
         "SPRITEDISPOSE" to OperandType.INT,
@@ -444,12 +487,15 @@ object BuiltinSymbols {
         "SUBSTRINGU" to OperandType.STR,
         "SUMARRAY" to OperandType.INT,
         "SUMCARRAY" to OperandType.INT,
+        "TOFLOAT" to OperandType.FLOAT,
         "TOFULL" to OperandType.STR,
         "TOHALF" to OperandType.STR,
         "TOINT" to OperandType.INT,
         "TOLOWER" to OperandType.STR,
         "TOSTR" to OperandType.STR,
         "TOUPPER" to OperandType.STR,
+        "UNCHECKED_ADD" to OperandType.INT,
+        "UNCHECKED_MUL" to OperandType.INT,
         "UNICODE" to OperandType.STR,
         "UNICODEBYTE" to OperandType.INT,
         "VARSETEX" to OperandType.INT,
@@ -583,6 +629,24 @@ object BuiltinSymbols {
         "GDRAWLINE",
         "GDRAWSPRITE",
         "GDRAWTEXT",
+        "GETANIMETIMER",
+        // ---- SQL 族（16 条，与上方 functions 表逐名对齐）----
+        "SQL_CONNECT",
+        "SQL_ESCAPE",
+        "SQL_EXECUTE_NONQUERY",
+        "SQL_EXECUTE_READER",
+        "SQL_EXECUTE_SCALAR_LONG",
+        "SQL_EXECUTE_SCALAR_STRING",
+        "SQL_IMPORT_MAP_XML",
+        "SQL_P_EXECUTE_NONQUERY",
+        "SQL_P_EXECUTE_READER",
+        "SQL_P_EXECUTE_SCALAR_LONG",
+        "SQL_P_EXECUTE_SCALAR_STRING",
+        "SQL_READER_CLOSE",
+        "SQL_READER_GET_LONG",
+        "SQL_READER_GET_STRING",
+        "SQL_READER_ISNULL",
+        "SQL_READER_READ",
         "GETBGCOLOR",
         "GETBIT",
         "GETCHARA",
@@ -606,6 +670,7 @@ object BuiltinSymbols {
         "GETNUM",
         "GETNUMB",
         "GETPALAMLV",
+        "GETPLATFORM",
         "GETSECOND",
         "GETSOUNDORBGMINFO",
         "GETSPCHARA",
@@ -659,14 +724,18 @@ object BuiltinSymbols {
         "MAP_CLEAR",
         "MAP_CREATE",
         "MAP_EXIST",
+        "MAP_FINDKEY",
         "MAP_FROMXML",
         "MAP_GET",
         "MAP_GETKEYS",
         "MAP_HAS",
+        "MAP_MERGE",
         "MAP_RELEASE",
         "MAP_REMOVE",
+        "MAP_REMOVEIF",
         "MAP_SET",
         "MAP_SIZE",
+        "MAP_TOSTRING",
         "MAP_TOXML",
         "MATCH",
         "MAX",
@@ -700,6 +769,8 @@ object BuiltinSymbols {
         "SOUNDCONTROL",
         "SPRITEANIMEADDFRAME",
         "SPRITEANIMECREATE",
+        // 4.981 fork 新增帧数查询（同 functions 表；见画蛇又添足版自改emuera相关说明.txt:236-239）。
+        "SPRITEANIMEFRAME",
         "SPRITECREATE",
         "SPRITECREATED",
         "SPRITEDISPOSE",
@@ -723,12 +794,15 @@ object BuiltinSymbols {
         "SUBSTRINGU",
         "SUMARRAY",
         "SUMCARRAY",
+        "TOFLOAT",
         "TOFULL",
         "TOHALF",
         "TOINT",
         "TOLOWER",
         "TOSTR",
         "TOUPPER",
+        "UNCHECKED_ADD",
+        "UNCHECKED_MUL",
         "UNICODE",
         "UNICODEBYTE",
         "VARSETEX",
@@ -755,6 +829,25 @@ object BuiltinSymbols {
 
     fun variable(name: String): VarSpec? = variables[name.uppercase()]
     fun function(name: String): OperandType? = functions[name.uppercase()]
+
+    /**
+     * 4.981 fork 里声明为「静态整型、但任一实参是浮点就返回浮点」的内建方法
+     * （`FunctionMethod.CanReturnFloat`）。
+     *
+     * 判据与用法：`FunctionMethodTerm.GetEraType()`（spec: FunctionMethodTerm.cs:44-56）——
+     * 在 `CanReturnFloat` 为真的方法上，**任一实参 `EraType.Float` 即整体返回 Float**。
+     * 本表目前只有 `POWER`：`PowerMethod` 声明 `ReturnType = EraType.Integer` +
+     * `CanReturnFloat = true`，两个实参都是 `ArgType.Any`（spec: FunctionMethodCreator.cs:5418-5436），
+     * 求值按 `HasFloatArg`（spec: :13434-13444）分流（spec: :5470-5477）。
+     *
+     * 名单只收**运行期真能返回 `Value.FloatV`** 的方法（[com.eratw.port.core.fn.PureMethods]
+     * 里已按实参类型分流的那几个）；漏收会让 `POWER(0.95, X)` 被钉成 INT 后在
+     * `iv()` 上抛「函数参数类型错误：需要数值」（2026-11-03 上报端点 SOURCE_DOWNBASE 行625），
+     * 多收则会在没接浮点分支的方法上抛「返回了非浮点结果」，两者都不许。
+     */
+    fun canReturnFloat(name: String): Boolean = name.uppercase() in CAN_RETURN_FLOAT
+
+    private val CAN_RETURN_FLOAT: Set<String> = setOf("POWER")
 
     /**
      * 原版 `nameDic` 的 `SystemVariable` 类全集（CORE-06 的 `#DIM` 保留名判据）。

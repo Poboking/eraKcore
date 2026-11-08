@@ -44,23 +44,40 @@ import java.util.IdentityHashMap
  *   的子级通配步命中 `c`）。本实现按 [defaultNamespaceUri] 计算元素的生效命名空间 URI 来钉这条。
  * - 属性不受默认命名空间影响（`<r xmlns="urn:d" a="1">` 上 `@a` 仍可及，dotnet 8 实测），
  *   故属性名测试只做字面名比较。
+ * - **xmlns 声明不属属性步**（XML-FIVE X5 复刻，dotnet 8.0.425 实测）：解析器虽把
+ *   `xmlns`/`xmlns:p` 存成普通属性（OuterXml 序列化需要），但 XPath 属性轴与属性谓词把
+ *   它们当 namespace 节点排除——`<r xmlns:p="urn:x" a="1">` 的 `/r/@*` = 1（只 `a`）、
+ *   `/r/@xmlns` = 0、`/r[@xmlns]` = 0、`/r[@xmlns='…']` = 0；默认 `xmlns` 情形经根通配步
+ *   抵达（无前缀名步受默认命名空间约束）后属性通配同口径 = 1。`@xmlns:p` 带前缀走
+ *   「缺 namespace manager」报错，与本条正交。
  *
- * 未实现（基准与语料都没有这些形态，遇到即抛 [XmlPathException]，调用方包成 CodeEE；
+ * 未实现（`KNOWN_DIVERGENCE`，语料不可达；遇即抛 [XmlPathException]，调用方包成 CodeEE；
  * `.NET` 对非法 XPath 抛 XPathException，原版再包成 `Lang.Error.XmlXPathParseError`）：
- * - 轴：`preceding`、`following`、`namespace`（.NET 支持，本实现未做）；
- * - 节点测试：`processing-instruction()`；
- * - 谓词函数：`last()` 以外的（`position()`、`contains()`、`starts-with()` 等）；
+ * - 轴：`preceding`、`following`、`namespace`（dotnet 8.0.425 `SelectNodes` 单参实测**支持**：
+ *   `preceding::a` / `following::a` 返回节点、`namespace::*` 返回 xmlns 与 xml 命名空间节点）；
+ * - 节点测试：`processing-instruction()`（dotnet 实测 `/r/processing-instruction()` 返回 PI 节点）；
+ * - 谓词函数：`last()` 以外的（`position()`、`contains()`、`starts-with()`、`not()` 等，dotnet 均支持）；
  * - 运算符：`<`、`>`、`!=`。
+ * 判定不可达：4.981 语料 `XML_GET*` 实到形态仅元素名 / `*` 步 / `/text()` / `[n]` / `[@a="v"]`
+ * （`グラフィック特殊効果.ERB:94-113`、`宴会.ERB:64-70`、`TEMP_CHARA_LIST_BY_DT.ERB:194-230`）。
  *
- * 已知与 dotnet 的残差（登记分歧，语料无 xmlns 声明故不可观测，TODO(verify)）：
- * - `@*` 属性通配：.NET 不把 `xmlns`/`xmlns:p` 声明当属性节点（`<r xmlns:p="urn:x"><c/></r>`
- *   的 `/r/@*` = 0），本实现的解析器把声明存成普通属性，故 `@*` 会把声明带进结果；未过滤。
- * - 畸形限定名（空前缀 `:c`、空前缀尾随 `:`、空本地名 `a:`、多冒号 `a:b:c`、含空格的
- *   `a: b`）：.NET 抛 XPathException 且文案带**位置**（形如 `'/a:b:c' has an invalid token.` /
- *   `... has an invalid qualified name.`）；本实现拿不到整串路径的偏移，按冒号切分处给近似的
- *   `'<name> has an invalid token/qualified name'`，只钉「报错」这一行为不逐字钉文案。
- * - 只有 `InnerText` 赋值产生的纯空白片段在原版是 `#whitespace` 节点（`Name` 不同，
- *   `XML_GET` style=4 可观测），本实现统一用 `#text`。
+ * 原「已知有意分歧 / 已知残差」四条已于 XML-FIVE（2026-11-06）按 dotnet 8.0.425 复探
+ * 全部翻案复刻，旧登记见 verify-notes §27：
+ * - **X2 谓词通配**：`[*]` / `[@*]` 按 dotnet 语义「有子元素」/「有属性」（存在即真，
+ *   与名字无关）。实测 `<root><a x='1'><b/></a><a/></root>` 的 `/root/a[*]`、`/root/a[@*]`
+ *   各命中 1；注释/PI/纯文本子的元素对 `[*]` 命中 0，只有 xmlns 声明的元素对 `[@*]` 命中 0。
+ *   旧实现按「名为 `*` 的子元素/属性」测试 ⇒ 恒 0，方向错误。
+ * - **X3 畸形限定名**：报错文案带**整串查询原文**且分两族（dotnet 8.0.425 实测）——
+ *   多冒号 / 空前缀（`':c'`、`':'`）⇒ `'<全文>' has an invalid token.`；空本地名
+ *   （`'a:'`、`'@a:'`、`'[a:]'`）与名字含空白（`'a: b'`、`'@a: b'`）⇒
+ *   `'<全文>' has an invalid qualified name.`；引号里是整串 XPath 原文（含前导空白、
+ *   谓词方括号、联合竖线，如 `'/root/a[a: b]'`）。旧实现只钉「报错」且 `[/a: b]`
+ *   （.NET=qualified name）与 `[/:]`（.NET=token）两支判反，均已修正。
+ * - **X4 纯空白片段**：`InnerXml` 赋值的纯空白片段在原版是 `#whitespace` 节点
+ *   （`Name` 不同，`XML_GET` style=4 可观测）；`text()` / `node()` 选中它，
+ *   `[*]` 不计。旧台账把产生路径登记成 `InnerText` 赋值——复探实测 `InnerText`
+ *   赋值（含纯空白值）**一律**建 `#text`，已按复探结论翻案（见 [XmlWhitespace] KDoc）。
+ * - **X5 xmlns 过滤**：见上方命名空间段第三条。
  */
 class XmlPathException(message: String) : Exception(message)
 
@@ -70,20 +87,25 @@ object XmlPath {
     fun select(doc: XmlDocument, path: String): List<XmlNode> {
         val branches = splitUnion(path)
         val order = DocOrder(doc)
-        if (branches.size == 1) return selectPath(doc, branches[0], order)
+        if (branches.size == 1) return selectPath(doc, branches[0], path, order)
         val collected = ArrayList<XmlNode>()
-        for (b in branches) collected.addAll(selectPath(doc, b, order))
+        for (b in branches) collected.addAll(selectPath(doc, b, path, order))
         return order.sort(collected)
     }
 
     /**
      * 单条路径求值：逐步把上下文节点集换成下一层节点集。
      * 每步先取轴上的候选（按轴方向），再套节点测试，再按**该上下文节点**套谓词。
+     *
+     * [fullPath] 是调用方拿到的**整串查询原文**（含联合分支），只用于畸形限定名的
+     * 报错文案——.NET 把原文整串放进 XPathException（XML-FIVE X3，dotnet 8.0.425 实测
+     * `/root/a[a: b]` 报 `'/root/a[a: b]' has an invalid qualified name.`、联合
+     * `/a:b:c|/b` 报 `'/a:b:c|/b' has an invalid token.`）。
      */
-    private fun selectPath(doc: XmlDocument, path: String, order: DocOrder): List<XmlNode> {
+    private fun selectPath(doc: XmlDocument, path: String, fullPath: String, order: DocOrder): List<XmlNode> {
         // XPath "/" 选中的是文档节点本身（.NET SelectNodes("/") 返回 1 个节点）
         if (path.trim() == "/") return listOf(doc)
-        val steps = parse(path)
+        val steps = parse(path, fullPath)
         var ctx: List<XmlNode> = listOf(doc)
         for (step in steps) {
             val merged = ArrayList<XmlNode>()
@@ -134,9 +156,15 @@ object XmlPath {
              * `宴会_SUB.ERB:201` 的 `preceeding-sibling::` 就少一个 e）抛 XPathException，
              * 原版 `XmlGetMethod` 再包成 CodeEE（`FunctionMethodCreator.cs:186-192`）。
              * 所以拼错必须报错，不能静默 0 命中（ADR-005 复刻原版行为）。
+             * 文案（XML-FIVE X3 同族，dotnet 8.0.425 实测逐字）：未知轴名与 `a::b` 一类的
+             * 非轴名加双冒号同属 invalid token 族、引**整串查询原文**——实测
+             * `/root/preceeding-sibling::a` ⇒ `'/root/preceeding-sibling::a' has an
+             * invalid token.`、`/a::b` ⇒ `'/a::b' has an invalid token.`、
+             * `/root[preceeding-sibling::a]` ⇒ 同形（谓词里的轴走 qualifiedNameMessage
+             * 的多冒号分支，同文案）。旧实现的自拟中文文案已按探针翻案。
              */
-            fun ofName(name: String): Axis = BY_NAME[name] ?: throw XmlPathException(
-                "不支持的 XPath 轴：$name（XPath 1.0 没有这个轴名）",
+            fun ofName(name: String, fullPath: String): Axis = BY_NAME[name] ?: throw XmlPathException(
+                "'$fullPath' has an invalid token.",
             )
         }
     }
@@ -166,6 +194,12 @@ object XmlPath {
         object Last : Predicate()
         data class HasAttr(val name: String) : Predicate()
         data class HasChild(val name: String) : Predicate()
+
+        /** `[*]`：存在**任意**子元素即真（dotnet 8.0.425 实测语义，XML-FIVE X2）。 */
+        object HasAnyChildElement : Predicate()
+
+        /** `[@*]`：存在**任意**属性即真（xmlns 声明不算，XML-FIVE X2 + X5）。 */
+        object HasAnyAttr : Predicate()
         object HasText : Predicate()
         data class AttrCompare(val name: String, val value: CompareValue) : Predicate()
         data class TextCompare(val value: CompareValue) : Predicate()
@@ -202,7 +236,7 @@ object XmlPath {
         return parts
     }
 
-    private fun parse(path: String): List<Step> {
+    private fun parse(path: String, fullPath: String): List<Step> {
         val s = path.trim()
         if (s.isEmpty()) throw XmlPathException("XPath 为空")
         val steps = ArrayList<Step>()
@@ -243,7 +277,7 @@ object XmlPath {
             if (quote != null) throw XmlPathException("XPath 引号未闭合")
             val seg = s.substring(start, i)
             if (seg.isEmpty()) throw XmlPathException("XPath 出现空的步")
-            steps.add(parseStep(seg))
+            steps.add(parseStep(seg, fullPath))
             if (i < s.length) {
                 if (i + 1 < s.length && s[i + 1] == '/') {
                     steps.add(Step(Axis.DESCENDANT_OR_SELF, NodeTest.AnyNode, emptyList()))
@@ -257,7 +291,7 @@ object XmlPath {
         return steps
     }
 
-    private fun parseStep(seg: String): Step {
+    private fun parseStep(seg: String, fullPath: String): Step {
         if (seg == ".") return Step(Axis.SELF, NodeTest.AnyNode, emptyList())
         if (seg == "..") return Step(Axis.PARENT, NodeTest.AnyNode, emptyList())
         var k = 0
@@ -267,7 +301,7 @@ object XmlPath {
         val firstBracket = seg.indexOf('[')
         val dc = seg.indexOf("::").let { if (it >= 0 && (firstBracket < 0 || it < firstBracket)) it else -1 }
         if (dc >= 0) {
-            axis = Axis.ofName(seg.substring(0, dc).trim())
+            axis = Axis.ofName(seg.substring(0, dc).trim(), fullPath)
             explicitAxis = true
             k = dc + 2
             if (k >= seg.length) throw XmlPathException("XPath 轴缺少节点测试：$seg")
@@ -280,11 +314,11 @@ object XmlPath {
         if (k >= seg.length) throw XmlPathException("XPath 步缺少名字")
         val bracket = seg.indexOf('[', k)
         val testEnd = if (bracket < 0) seg.length else bracket
-        val nodeTest = parseNodeTest(seg.substring(k, testEnd).trim(), seg)
-        return Step(axis, nodeTest, parsePredicates(seg, testEnd))
+        val nodeTest = parseNodeTest(seg.substring(k, testEnd).trim(), seg, fullPath)
+        return Step(axis, nodeTest, parsePredicates(seg, testEnd, fullPath))
     }
 
-    private fun parseNodeTest(raw: String, seg: String): NodeTest = when (raw) {
+    private fun parseNodeTest(raw: String, seg: String, fullPath: String): NodeTest = when (raw) {
         "" -> throw XmlPathException("XPath 步缺少名字：$seg")
         "*" -> NodeTest.AnyName
         "text()" -> NodeTest.TextNode
@@ -293,21 +327,29 @@ object XmlPath {
         else -> when {
             // 带前缀的名字测试：.NET 无 namespace manager ⇒ 恒抛 XPathException（见类 KDoc），
             // 原版包成 CodeEE。修复前这里按字面量匹配 ⇒ 恒 0 命中而不报错（FN-10 第一条）。
-            ':' in raw -> throw XmlPathException(qualifiedNameMessage(raw))
+            // 畸形限定名（多冒号/空前缀/空本地名/含空白）走 [qualifiedNameMessage] 的两族文案。
+            ':' in raw -> throw XmlPathException(qualifiedNameMessage(raw, fullPath))
             raw.endsWith(")") -> throw XmlPathException("不支持的 XPath 节点测试：$raw")
             else -> NodeTest.Name(raw)
         }
     }
 
     /**
-     * 限定名（含冒号的名字）→ 报错文案。
+     * 限定名（含冒号的名字）→ 报错文案（XML-FIVE X3）。
      *
      * 合法限定名（`前缀:本地` 或 `前缀:*`，两侧都是 NCName）在 .NET 走「没有 namespace
      * manager」这条：`[XmlNamespaceManager]` 缺失 ⇒ XPathException 文案恒为
-     * [NS_NAMESPACE_MANAGER_MSG]（与是否声明过该前缀无关，dotnet 8.0.31 实测）。畸形限定名
-     * （空本地名、空前缀、多冒号、含空白）是另一族语法错误，文案带位置且分两种，见类 KDoc 残差。
+     * [NS_NAMESPACE_MANAGER_MSG]（与是否声明过该前缀无关，dotnet 8.0.31 实测）。
+     *
+     * 畸形限定名是另一族语法错误，文案带**整串查询原文**且分两族（dotnet 8.0.425 实测，
+     * [fullPath] = 传给 [select] 的原文，含前导空白 / 谓词方括号 / 联合竖线）：
+     * - 多冒号（`a:b:c`、`a::b`）与空前缀（`:c`、`:`）⇒ `'<全文>' has an invalid token.`
+     * - 空本地名（`a:`、`@a:`、`[a:]`）与名字含空白（`a: b`、`@a: b`）⇒
+     *   `'<全文>' has an invalid qualified name.`
+     * 旧实现按「空本地名 ⇒ qualified name，其余 ⇒ token」两支判反（`a: b` 与 `/:`
+     * 恰好各判错一支），且引号里只有名字片段而非整串路径，均已按探针翻案。
      */
-    private fun qualifiedNameMessage(raw: String): String {
+    private fun qualifiedNameMessage(raw: String, fullPath: String): String {
         val first = raw.indexOf(':')
         val prefix = raw.substring(0, first)
         val local = raw.substring(first + 1)
@@ -316,9 +358,13 @@ object XmlPath {
             (local == "*" || NC_NAME.matches(local)) &&
             singleColon
         if (wellFormed) return NS_NAMESPACE_MANAGER_MSG
-        // 畸形：空本地名 ⇒ invalid qualified name；其余（空前缀 / 多冒号 / 空白）⇒ invalid token
-        return if (local.isEmpty()) "'$raw' has an invalid qualified name."
-        else "'$raw' has an invalid token."
+        return when {
+            // 多冒号 / 空前缀（含全空 '/:'）⇒ token；空本地名 / 名字含空白 ⇒ qualified name
+            !singleColon || prefix.isEmpty() -> "'$fullPath' has an invalid token."
+            local.isEmpty() || raw.any { it.isWhitespace() } ->
+                "'$fullPath' has an invalid qualified name."
+            else -> "'$fullPath' has an invalid token."
+        }
     }
 
     /** NCName 近似（决定合法限定名的报错分支用）：首字符字母或下划线，其后名尾字符。 */
@@ -330,13 +376,14 @@ object XmlPath {
 
     /**
      * 谓词里出现名字的位置统一过一遍前缀闸：带冒号 ⇒ 抛（dotnet 无 namespace manager，
-     * `[@p:k='v']`、`[p:q]`、`[p:q='v']` 全报错，修复前按字面量匹配 ⇒ 恒 0 命中）。
+     * `[@p:k='v']`、`[p:q]`、`[p:q='v']` 全报错，修复前按字面量匹配 ⇒ 恒 0 命中）；
+     * 畸形限定名按 [qualifiedNameMessage] 的两族整串文案报。
      */
-    private fun requirePlainName(name: String) {
-        if (':' in name) throw XmlPathException(qualifiedNameMessage(name))
+    private fun requirePlainName(name: String, fullPath: String) {
+        if (':' in name) throw XmlPathException(qualifiedNameMessage(name, fullPath))
     }
 
-    private fun parsePredicates(seg: String, from: Int): List<Predicate> {
+    private fun parsePredicates(seg: String, from: Int, fullPath: String): List<Predicate> {
         val out = ArrayList<Predicate>()
         var k = from
         while (k < seg.length) {
@@ -365,13 +412,13 @@ object XmlPath {
                 j++
             }
             if (close < 0) throw XmlPathException("XPath 谓词未闭合")
-            out.add(parsePredicate(seg.substring(k + 1, close).trim()))
+            out.add(parsePredicate(seg.substring(k + 1, close).trim(), fullPath))
             k = close + 1
         }
         return out
     }
 
-    private fun parsePredicate(text: String): Predicate {
+    private fun parsePredicate(text: String, fullPath: String): Predicate {
         if (text.isEmpty()) throw XmlPathException("XPath 空谓词")
         if (text.all { it.isDigit() }) {
             // XPath 1.0 里 `[n]` 是 position() 比较；`[2147483648]` 是合法 Number 谓词，
@@ -382,6 +429,10 @@ object XmlPath {
         }
         if (text == "last()") return Predicate.Last
         if (text == "text()") return Predicate.HasText
+        // 谓词通配（XML-FIVE X2）：dotnet 8.0.425 实测 `[*]` =「有子元素」、`[@*]` =「有属性」
+        //（存在即真，与名字无关），不是「名为 * 的子元素/属性」名字测试（旧实现按后者 ⇒ 恒 0）。
+        if (text == "*") return Predicate.HasAnyChildElement
+        if (text == "@*") return Predicate.HasAnyAttr
         val eq = indexOfTopLevelEquals(text)
         if (eq >= 0) {
             if (eq > 0 && text[eq - 1] == '!') throw XmlPathException("不支持的 XPath 谓词：[$text]")
@@ -390,7 +441,7 @@ object XmlPath {
             return when {
                 lhs.startsWith("@") -> {
                     val attrName = lhs.substring(1).trim()
-                    requirePlainName(attrName)
+                    requirePlainName(attrName, fullPath)
                     Predicate.AttrCompare(attrName, value)
                 }
                 lhs == "text()" -> Predicate.TextCompare(value)
@@ -398,21 +449,24 @@ object XmlPath {
                 lhs.endsWith("()") -> throw XmlPathException("不支持的 XPath 函数：$lhs")
                 lhs.isEmpty() -> throw XmlPathException("XPath 谓词左值为空：[$text]")
                 else -> {
-                    requirePlainName(lhs)
+                    requirePlainName(lhs, fullPath)
                     Predicate.ChildTextCompare(lhs, value)
                 }
             }
         }
         if (text.startsWith("@")) {
             val attrName = text.substring(1).trim()
-            requirePlainName(attrName)
+            requirePlainName(attrName, fullPath)
             return Predicate.HasAttr(attrName)
         }
         // `[tag]` = 存在名为 tag 的子元素（XPath 1.0 的 node-set 布尔转换）
         if (NAME.matches(text)) {
-            requirePlainName(text)
+            requirePlainName(text, fullPath)
             return Predicate.HasChild(text)
         }
+        // NAME 不收空白 ⇒ 含空白的畸形限定名（`[a: b]`，dotnet 8.0.425 实测报
+        // `'<全文>' has an invalid qualified name.`）会漏到这里，补一道限定名闸再落默认报错。
+        if (':' in text) throw XmlPathException(qualifiedNameMessage(text, fullPath))
         throw XmlPathException("不支持的 XPath 谓词：[$text]")
     }
 
@@ -502,8 +556,13 @@ object XmlPath {
         else -> emptyList()
     }
 
-    /** XPath 数据模型里的文本节点：DOM 的 `#text` 与 `#cdata-section` 同归一类。 */
-    private fun isTextNode(node: XmlNode): Boolean = node is XmlText || node is XmlCData
+    /**
+     * XPath 数据模型里的文本节点：DOM 的 `#text`、`#cdata-section` 同归一类；
+     * `#whitespace`（InnerXml 片段赋值的纯空白，XML-FIVE X4）也属文本族——dotnet 8.0.425
+     * 实测 `/r/text()` 对 `InnerXml="  "` 后的元素命中 1（选中的就是该 #whitespace 节点）。
+     */
+    private fun isTextNode(node: XmlNode): Boolean =
+        node is XmlText || node is XmlCData || node is XmlWhitespace
 
     /**
      * 该文本/CDATA 节点是否是一个「连续文本段」的首节点。
@@ -565,8 +624,22 @@ object XmlPath {
         Axis.FOLLOWING_SIBLING -> siblings(node) { list, idx -> list.subList(idx + 1, list.size) }
         Axis.PRECEDING_SIBLING ->
             siblings(node) { list, idx -> if (idx <= 0) emptyList() else list.subList(0, idx).asReversed() }
-        Axis.ATTRIBUTE -> (node as? XmlElement)?.attributes?.toList() ?: emptyList()
+        Axis.ATTRIBUTE -> (node as? XmlElement)?.let { attributeAxis(it) } ?: emptyList()
     }
+
+    /**
+     * XPath 属性轴上的候选（XML-FIVE X5）：解析器把 `xmlns` / `xmlns:p` 声明存成普通属性
+     * （OuterXml 序列化需要），但它们在 XPath 数据模型是 **namespace 节点、不属属性步**——
+     * dotnet 8.0.425 实测 `<r xmlns:p="urn:x" a="1">` 的 `/r/@*` = 1（只 `a`）、`/r/@xmlns` = 0。
+     * 显式 `@xmlns` 与通配 `@*` 共用本过滤；`@xmlns:p` 带前缀在 parseNodeTest 就报
+     * 「缺 namespace manager」，与本条正交。
+     */
+    private fun attributeAxis(element: XmlElement): List<XmlAttribute> =
+        element.attributes.filter { !isNamespaceDeclaration(it.name) }
+
+    /** `xmlns`（默认命名空间声明）或 `xmlns:` 前缀声明。 */
+    private fun isNamespaceDeclaration(attrName: String): Boolean =
+        attrName == "xmlns" || attrName.startsWith("xmlns:")
 
     /** 兄弟节点的公共部分：属性节点没有兄弟（.NET 里 attribute 不在 ChildNodes 里）。 */
     private inline fun siblings(
@@ -592,10 +665,10 @@ object XmlPath {
     }
 
     /**
-     * 上下文节点是否有某个**文本段**（子节点里相邻 text/CDATA 合并的一段）的字符串值与 [value]
-     * 相等（dotnet 8.0.31 实测的 `text()='v'` 谓词逐段语义）。属性/文本/注释等非容器节点没有
-     * 子文本段 ⇒ 恒不命中（含 `[text()='']` 对无文本子节点的元素，dotnet 实测 0）。
-     * 数值右值（`[text()=5]`）同样逐段走 [compare] 的 number 分支。
+     * 上下文节点是否有某个**文本段**（子节点里相邻 text/CDATA/#whitespace 合并的一段）的
+     * 字符串值与 [value] 相等（dotnet 8.0.31 实测的 `text()='v'` 谓词逐段语义）。
+     * 属性/文本/注释等非容器节点没有子文本段 ⇒ 恒不命中（含 `[text()='']` 对无文本子节点
+     * 的元素，dotnet 实测 0）。数值右值（`[text()=5]`）同样逐段走 [compare] 的 number 分支。
      */
     private fun nodeHasTextSegment(node: XmlNode, value: CompareValue): Boolean {
         val kids = childNodes(node)
@@ -617,9 +690,10 @@ object XmlPath {
         return false
     }
 
-    /** 单个文本/CDATA 节点的段内容（合并到 [nodeHasTextSegment] 的段串里）。 */
+    /** 单个文本/CDATA/#whitespace 节点的段内容（合并到 [nodeHasTextSegment] 的段串里）。 */
     private fun textSegmentValue(node: XmlNode): String = when (node) {
         is XmlText -> node.text
+        is XmlWhitespace -> node.text
         is XmlCData -> node.data
         else -> ""
     }
@@ -630,16 +704,30 @@ object XmlPath {
             cur = when (p) {
                 is Predicate.Position -> if (p.n in 1..cur.size) listOf(cur[p.n - 1]) else emptyList()
                 Predicate.Last -> if (cur.isEmpty()) emptyList() else listOf(cur.last())
-                is Predicate.HasAttr -> cur.filter { (it as? XmlElement)?.attribute(p.name) != null }
+                is Predicate.HasAttr -> cur.filter { n ->
+                    // [@xmlns] / [@xmlns:x]：声明是 namespace 节点，不属属性谓词可达面
+                    //（dotnet 8.0.425 实测 `/r[@xmlns]` = 0，XML-FIVE X5）
+                    n is XmlElement && !isNamespaceDeclaration(p.name) && n.attribute(p.name) != null
+                }
                 is Predicate.HasChild -> cur.filter { n ->
                     n is XmlElement && n.children.any { it is XmlElement && matchesName(it, p.name) }
+                }
+                // [*] = 有子元素（注释/PI/文本——含 #whitespace——都不算，dotnet 8.0.425 实测）
+                Predicate.HasAnyChildElement -> cur.filter { n ->
+                    n is XmlElement && n.children.any { it is XmlElement }
+                }
+                // [@*] = 有属性（xmlns 声明不计，dotnet 8.0.425 实测 `<a xmlns='urn:d'/>` 命中 0）
+                Predicate.HasAnyAttr -> cur.filter { n ->
+                    n is XmlElement && attributeAxis(n).isNotEmpty()
                 }
                 Predicate.HasText -> cur.filter { n ->
                     // [text()] =「有文本节点子」；CDATA 也算（dotnet 8.0.421 实测）
                     n is XmlElement && n.children.any { isTextNode(it) }
                 }
                 is Predicate.AttrCompare -> cur.filter { n ->
-                    val attr = (n as? XmlElement)?.attribute(p.name) ?: return@filter false
+                    // [@xmlns='…'] 同 [@xmlns]：namespace 节点不参与属性谓词（X5 探针实测 0）
+                    val attr = (n as? XmlElement)?.takeUnless { isNamespaceDeclaration(p.name) }
+                        ?.attribute(p.name) ?: return@filter false
                     compare(attr.value, p.value)
                 }
                 // [text()='v'] 逐个**文本段**（相邻 text/CDATA 合并成一段）比较，不是 InnerText 拼接：

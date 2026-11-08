@@ -7,6 +7,8 @@ import com.eratw.port.core.expr.VariableReader
 import com.eratw.port.core.fn.BuiltinEvalContext
 import com.eratw.port.core.fn.BuiltinHost
 import com.eratw.port.core.image.PngImage
+import com.eratw.port.core.save.SaveConfig
+import com.eratw.port.core.save.SaveWiring
 import com.eratw.port.core.vars.VariableStore
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
@@ -262,7 +264,7 @@ class ImageDecoderHostTest {
         assertEquals(1L, seed.call("GCREATE", 60, 6, 5))
         assertEquals(1L, seed.call("GCLEAR", 60, 0xFF00FF00L))
         assertEquals(1L, seed.call("GSAVE", 60, 3))
-        env.ops.files["resources/a.webp"] = requireNotNull(env.ops.files["sav/img0003.png"]) { "文本载体没写进去" }
+        env.ops.files["resources/a.webp"] = requireNotNull(env.ops.files["img0003.png"]) { "文本载体没写进去" }
 
         val host = FakeDecoder(HashMap(), outcome = "null")
         env.install(host)
@@ -334,6 +336,9 @@ class ImageDecoderHostTest {
     @Test
     fun `GLOAD 走同一解码通道且路径是 sav imgNNNN png`() {
         val env = DecEnv()
+        // 路径 = {Config.SavDir}img{index:0000}.png（spec: FunctionMethodCreator.cs:9471-9474）；
+        // SavDir 跟 UseSaveFolder（spec: Config.cs:471-481），条目表出厂 false ⇒ 显式装 YES
+        SaveWiring.install(env.store, SaveConfig(useSaveFolder = true), 20)
         val path = "sav/img0007.png"
         env.ops.bytes[path] = LOSSY_WEBP // 内容随便：宿主按**路径**返回图，core 不看签名
         env.install(FakeDecoder(HashMap(mapOf(path to PngImage(2, 2, IntArray(4) { 0xFF0A0B0C.toInt() })))))
@@ -355,7 +360,7 @@ class ImageDecoderHostTest {
         assertEquals(1L, seed.call("GCLEAR", 70, 0xFF00FF00L))
         assertEquals(1L, seed.call("GSAVE", 70, 7))
         // 文本载体在 files 里、bytes 里没有 ⇒ readFileBytes 返回 null ⇒ 宿主分支整个跳过
-        assertTrue(env.ops.files.containsKey("sav/img0007.png"))
+        assertTrue(env.ops.files.containsKey("img0007.png"))
         assertEquals(1L, env.call("GLOAD", 71, 7))
         assertEquals(6L, env.call("GWIDTH", 71))
         assertEquals(0xFF00FF00L, env.call("GGETCOLOR", 71, 0, 0))

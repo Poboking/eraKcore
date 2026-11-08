@@ -214,7 +214,7 @@ class FindElementSemanticsTest {
         val e = assertFailsWith<CodeEE> {
             callRef(ctx, "FINDELEMENT", iRef("FLAG", len.toLong()), 5L)
         }
-        assertTrue(e.message!!.contains("第 1 维下标 $len 越界"), e.message!!)
+        assertEquals("数组变量\"FLAG\"的第1参数($len)超出数组范围", e.message, "Error.OoRVarArg 逐字（VariableData.cs:85）")
         // 合法下标不限制扫描范围：`FLAG:7` 扫的仍是整条数组（:565 GetArray()），
         // 7 第一次出现在 1 号位而不是 7 号位
         assertEquals(1L, intOf(callRef(ctx, "FINDELEMENT", iRef("FLAG", 7L), 7L)))
@@ -247,11 +247,21 @@ class FindElementSemanticsTest {
         store.declareUserVar(DimSpec("V3D", false, intArrayOf(2, 3, 4), isGlobal = true), "MAIN")
         // 原版 :4941 的 end 缺省走 variableTerm.GetLength()，2D/3D 的 GetLength() 抛
         // GetSizeDimError（VariableData.cs:154-157、:254-257）；
-        // 移植侧同一处由 store.getLength(name, -1) 报
+        // 移植侧同一处由 store.getLength(name, -1) 报同一枚官方键。
+        // 11-05 文案对齐（lane errtext4/5，`f843f46d`）：这里退役了自造串
+        // 「变量 X 是 R 维，必须指定维度」，改走 `LangKey.GetSizeDimError` 的 zhs 原文
+        // `试图获取一个{0}维数组变量"{1}"的长度`（Lang.cs:1630 / reference 表 :362，两表同文），
+        // 故本例逐字钉官方串（旧断言 `contains("2 维")` 里的空格是自造串的形状，官方无空格）。
         val e2 = assertFailsWith<CodeEE> { callRef(ctx, "FINDELEMENT", iRef("V2D", 0L, 0L), 1L) }
-        assertTrue(e2.message!!.contains("2 维"), e2.message!!)
+        assertTrue(
+            e2.message!!.contains("试图获取一个2维数组变量\"V2D\"的长度"),
+            "期望官方 GetSizeDimError 逐字串，实际：${e2.message}"
+        )
         val e3 = assertFailsWith<CodeEE> { callRef(ctx, "FINDELEMENT", iRef("V3D", 0L, 0L, 0L), 1L) }
-        assertTrue(e3.message!!.contains("3 维"), e3.message!!)
+        assertTrue(
+            e3.message!!.contains("试图获取一个3维数组变量\"V3D\"的长度"),
+            "期望官方 GetSizeDimError 逐字串，实际：${e3.message}"
+        )
     }
 
     // ------------------------------------------------------------------

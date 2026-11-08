@@ -1,5 +1,8 @@
 package com.eratw.port.render.view
 
+import com.eratw.port.core.host.DisplayDivBlock
+import com.eratw.port.core.host.FontDisplayWidth
+import com.eratw.port.core.host.StaticFontDisplayWidth
 import com.eratw.port.render.DisplayRow
 import com.eratw.port.render.DirtyRect
 import com.eratw.port.render.Grid
@@ -9,9 +12,12 @@ import com.eratw.port.render.RunKind
 import com.eratw.port.render.TextRun
 import com.eratw.port.render.adapter.ConsoleAdapter
 import com.eratw.port.render.adapter.ConsoleLogSync
+import com.eratw.port.render.adapter.DivOverlayFrame
+import com.eratw.port.render.adapter.DivOverlayPlanner
 import com.eratw.port.render.button.ButtonLayer
 import com.eratw.port.render.button.ButtonAcceptance
 import com.eratw.port.render.displaylist.DisplayList
+import com.eratw.port.render.glyph.CellMetrics
 import com.eratw.port.render.grid.LineFolder
 import com.eratw.port.render.scroll.LogBuffer
 import com.eratw.port.render.scroll.Viewport
@@ -121,6 +127,13 @@ import com.eratw.port.render.scroll.Viewport
  *   绘制窗口在此之上多一排被画布裁掉的行（`ConsoleAdapter.DRAW_EXTRA_ABOVE`）
  * @param stats 帧统计（W8-RENDERPERF）；null（默认）时零开销。要 `render.frame ms=…` 的 `ms`
  *   覆盖「提交 + 绘制」整帧，把同一个实例交给 `view/ConsoleFrame`；只有 debug 构建才注入
+ * @param fontWidth **字体感知排版尺**（AA 画/老虎机字符画错位修复）：折行（[LineFolder]）、
+ *   列区间（[DisplayList]）与命中列（[ButtonLayer]）共用的宽度来源。
+ *   装配层（真机 `CanvasConsoleView.fontDisplayWidth`、`GameHost`）把与 core 折行
+ *   （`LineBufferConsoleSink.fontWidth`）**同一只**实例递进来；缺省
+ *   [StaticFontDisplayWidth] = 接线前的静态 CP932 网格，headless 与既有装置逐值不变。
+ *   「必须同一只实例」的语义证据见 `FontWidthRuler.asDisplayWidth` 与
+ *   `FontDisplayWidth` 的类文档（`ConsoleStyledString.cs:25,82`）。
  */
 class ConsoleScreen(
     val clientWidth: Int,
@@ -128,6 +141,7 @@ class ConsoleScreen(
     val heightLines: Int = DEFAULT_HEIGHT_LINES,
     val drawableWidthCells: Int = clientWidth,
     val stats: FrameStats? = null,
+    val fontWidth: FontDisplayWidth = StaticFontDisplayWidth,
 ) {
 
     init {
@@ -144,7 +158,7 @@ class ConsoleScreen(
      * `ConsoleLogSync` 的对齐偏移也从这个折行器取宽（`ConsoleDisplayLine.cs:80,83` 同读
      * `DrawableWidth`）。
      */
-    val folder: LineFolder = LineFolder(drawableWidthCells)
+    val folder: LineFolder = LineFolder(drawableWidthCells, fontWidth = fontWidth)
 
     /**
      * 日志提交器（适配层件）：本类的两条入口都从它走 —— 增量批用
@@ -156,13 +170,13 @@ class ConsoleScreen(
     val logSync: ConsoleLogSync = ConsoleLogSync(log, folder)
 
     /** 保留显示列表：只装「本次提交窗口」的行，行数上限正好是绘制口径的行数。 */
-    val list: DisplayList = DisplayList(clientWidth, maxRows = heightLines + ConsoleAdapter.DRAW_EXTRA_ABOVE)
+    val list: DisplayList = DisplayList(clientWidth, maxRows = heightLines + ConsoleAdapter.DRAW_EXTRA_ABOVE, fontWidth = fontWidth)
 
     /** 滚动视口：唯一的滚动状态是 `offsetFromEnd`。 */
     val viewport: Viewport = Viewport(heightLines)
 
-    /** 按钮命中层：行坐标是 [hitRows] 的下标。 */
-    val buttons: ButtonLayer = ButtonLayer()
+    /** 按钮命中层：行坐标是 [hitRows] 的下标；命中列与折行/列区间同一把尺。 */
+    val buttons: ButtonLayer = ButtonLayer(fontWidth)
 
     private var visibleRowsCached: List<DisplayRow> = emptyList()
     private var hitRowsCached: List<DisplayRow> = emptyList()
@@ -240,48 +254,65 @@ class ConsoleScreen(
     }
 
     /**
-     * **当前这一页实际有多少行** —— 「适应屏幕」据此反推字号（见 `PageFitter.fit`）。
+     * 整屏底色（ARGB，不透明）。`SETBGCOLOR` / `RESETBGCOLOR` 的**活值**落点，由
+     * `ConsoleFeed` 每帧对账发布（[updateBackground]）——它不参与行 revision：
+     * 值变了、行内容没变，也要整幅重铺。绘制侧把它当 `graph.Clear` 的清屏色用，
+     * 并按它判整幅（`ScreenSurfacePlanner` 的 bg 指纹）。
      *
-     * ## 为什么不能写死行数
-     *
-     * 一页内容有多长取决于**当前页面**：标题页 3 行、存档页 49 行。写死 25 行则长页被切，
-     * 写死 44 行则短页字小到看不清（2026-10-24/25 两次都栽在这上面）。玩家手机尺寸也各不相同，
-     * 唯一的通用做法是**量内容**。
-     *
-     * ## 量法
-     *
-     * 自底向上累计连续行，遇到**空白行**就停：本作每个页面（[PRINT] 打出来的一屏）之后
-     * 都有一条空行与前文分隔，空行即是页边界。日志里没有空行、或整屏都连续时，
-     * 顶多量到 [maxRows] 行——上限以内的估计是安全的（字号宁小勿溢出）。
-     *
-     * @param maxRows 最多往上量多少行（默认 200：超过一屏容量很多页，再量也没意义）
+     * 原版是控制台级字段 `bgColor`（EmueraConsole.cs:200，初值 `Config.BackColor` 黑，
+     * ConfigData.cs:69），每帧 `graph.Clear(bgColor)` 清**整张**画布（`:1816`）。
+     * 时停（`COMF355 時間停止.ERB:16` 的 `SETBGCOLOR C_THE_WORLD`）「整个界面变色」
+     * 就落在这一层，而不是某几行文字的底色——2026-11 玩家反馈的修复。
      */
-    fun pageExtentRows(maxRows: Int = 200): Int {
-        val size = log.size
-        if (size <= 0) return 0
-        val n = minOf(size, maxRows.coerceAtLeast(1))
-        val rows = log.rowsAt((size - n).toLong(), n)
-        var count = 0
-        for (i in rows.indices.reversed()) {
-            val row = rows[i]
-            // 「空行」只认**真的没有任何 run**：图片行的 run 是占宽用的等宽空格
-            // （`HtmlRunFlatten` 的图形段负载），按 `text.isBlank()` 判会把它当空行，
-            // 标题页那几行图片行就被漏掉了（主人 2026-10-25 指出）。
-            val blank = row.runs.isEmpty()
-            if (blank) {
-                // 页尾的空行先跳过（它属于页与页之间的分隔），再来一条空行就是页边界
-                if (count == 0) continue
-                break
-            }
-            count++
-        }
-        return count
+    @Volatile
+    var backgroundArgb: Int = ScreenScene.DEFAULT_BACKGROUND
+        private set
+
+    /** 装配层 / ConsoleFeed 发布整屏底色（幂等：同值重复发布零效果）。 */
+    fun updateBackground(argb: Int) {
+        require(argb ushr 24 == 255) { "整屏底色必须不透明：0x${argb.toUInt().toString(16)}" }
+        backgroundArgb = argb
     }
 
     fun chipRows(limit: Int = CHIP_WINDOW_ROWS): List<DisplayRow> {
         val n = minOf(limit.coerceIn(1, CHIP_WINDOW_MAX), log.size)
         if (n <= 0) return emptyList()
         return log.rowsAt((log.size - n).toLong(), n)
+    }
+
+    /**
+     * div 覆盖绘制的**扫描行**（CONTRACT-DIV-WIRE W1/W2）：绘制窗口上下各加 [marginRows]
+     * 行的范围内，逐行挑出「携带 div 块的锚行」，交给覆盖绘制规划器
+     * （`adapter/DivOverlayPlanner.planFrame`）。
+     *
+     * 为什么窗口外还要扫 margin：原版对**相对块**的取景按登记行区间与可见行区间相交判
+     * （ConsoleEscapedParts.cs:127-129），落点公式 `num6 + (LineNo - num3) * LineHeight`
+     * 按行号算、不按「锚行在不在窗口里」算（EmueraConsole.cs:1870）—— 锚行滚出窗口、
+     * 块体仍压着窗口的高块照样画（语料 TITLE.ERB:79 的 `ypos=-CLIENTHEIGHT+行高` 就是
+     * 一个 ~52 行的块）。margin 取「约一屏」（调用方按画布高折行数喂）即可全覆盖语料；
+     * 更高的块仍会漏，登记在 planFrame 的 KDoc（TODO(verify)）。
+     *
+     * 无块返回空表（绝大多数帧；本函数只多一趟窗口行的字段检查，不分配）。
+     * absolute 块锚在**画布**上、与滚动无关（ConsoleEscapedParts.cs:77 的 type==3 恒进），
+     * 同样只随锚行进扫描窗 —— 锚行被淘汰出保留区后块随之消失，与原版
+     * `ConsoleEscapedParts.Remove`（行出列表时撤登记）同口径。
+     */
+    fun divOverlayScan(marginRows: Int): List<DivOverlayScanRow> {
+        if (log.size <= 0 || visibleRowsCached.isEmpty() || marginRows < 0) {
+            return emptyList()
+        }
+        val base = visibleRowBaseCached
+        val start = (base - marginRows).coerceAtLeast(0)
+        val rows = log.rowsAt(log.firstIndex + start, base + visibleRowsCached.size + marginRows - start)
+        if (rows.isEmpty()) return emptyList()
+        var out: ArrayList<DivOverlayScanRow>? = null
+        for ((offset, row) in rows.withIndex()) {
+            if (row.divBlocks.isEmpty()) continue
+            val retained = start + offset
+            if (out == null) out = ArrayList(2)
+            out.add(DivOverlayScanRow(retained, log.firstIndex + retained, row.divBlocks))
+        }
+        return out ?: emptyList()
     }
 
     fun refresh(): List<DirtyRect> {
@@ -350,6 +381,64 @@ class ConsoleScreen(
         mapToSnapshotRow(pointing?.let { buttons.hit(it.first, it.second) })
 
     /**
+     * 把本帧的 div 覆盖规划交给命中层（CONTRACT-DIV-HIT2）。
+     *
+     * 帧入口在算出 [DivOverlayFrame] 之后调一次；`blockIndex` 口径与绘制侧一致
+     * （`Plan.all = behind + front` 的下标），所以本方法与
+     * `ScreenComposer.composeInto(..., overlay = 同一份 frame)` 必须吃**同一帧**的产物。
+     *
+     * @param overlay 本帧覆盖帧（`view/ConsoleFrame.divOverlayFrame` 的输出）
+     * @param metrics 像素 ↔ 半角格换算器（与绘制侧同一份）
+     * @param canvasHeightPx 画布高（行顶公式基准，绘制侧同值）
+     */
+    fun updateDivOverlay(overlay: DivOverlayFrame, metrics: CellMetrics, canvasHeightPx: Int) {
+        if (overlay.isEmpty) {
+            buttons.clearDiv()
+            return
+        }
+        // 覆盖帧的 behind/front 就是 Plan 的两个字段（planFrame 的产物即已排好序的 Plan 内容），
+        // 这里只是补上画布高把 Plan 还原出来 —— blockIndex 因此与绘制侧逐个相同。
+        val plan = DivOverlayPlanner.Plan(overlay.behind, overlay.front, canvasHeightPx)
+        buttons.attachDiv(
+            plan = plan,
+            geometry = ButtonLayer.DivHitGeometry(
+                metrics = metrics,
+                rowCount = visibleRowsCached.size,
+                canvasHeightPx = canvasHeightPx,
+                // 绘制行下标 → 命中行下标：绘制窗口比命中窗口多一排被画布裁掉的溢出行。
+                hitRowOffset = visibleRowBaseCached - hitRowBaseCached,
+            ),
+        )
+    }
+
+    /**
+     * 本帧 div 子行按钮表（像素几何；顺序 = 原版命中扫描序）。
+     * 帧入口未调 [updateDivOverlay] 时为空表。
+     */
+    fun divTargets(): List<ButtonLayer.DivHit> = buttons.divTargets()
+
+    /** div 子行按钮的焦点（像素指针赢下命中链时才有值；绘制侧取它换色）。 */
+    fun focusedDiv(): ButtonLayer.DivFocus? = buttons.focusedDiv()
+
+    /** div 子行按钮的按下态（抬起即灭）。 */
+    fun pressedDiv(): ButtonLayer.DivFocus? = buttons.pressedDiv()
+
+    /** 像素命中的 div 子行按钮（null = 没有 div 命中，或被正文行按钮按原版优先级盖住）。 */
+    fun divHitAt(xPx: Int, yPx: Int): ButtonLayer.DivHit? = buttons.hitAt(xPx, yPx)
+
+    /** 像素长按提示（div 与正文行同一优先级链；null = 该像素没有提示）。 */
+    fun divTooltipAt(xPx: Int, yPx: Int): String? = buttons.tooltipAt(xPx, yPx)
+
+    /**
+     * 记录**像素**指针（div 子行按钮的焦点/按下用）：与 [ButtonLayer.setPointer] 的格坐标
+     * 指针各自独立 —— div 子行按钮不在行列表里，没有「行下标 × 列」这组坐标。
+     */
+    fun setDivPointer(xPx: Int, yPx: Int, pressed: Boolean) = buttons.setPointerPx(xPx, yPx, pressed)
+
+    /** 清空像素指针（指针离开客户区 / 刷新后）。 */
+    fun clearDivPointer() = buttons.clearPointerPx()
+
+    /**
      * 绝对行号（[LogBuffer] 的权威序号）→ 快照行下标；不在绘制窗口内返回 null。
      * 「行号 → 保留区下标」这一步本身是 `ConsoleAdapter.positionOf`（原版 `lineNo - shift`，
      * EmueraConsole.cs:1865-1868、:2402）；已被淘汰或还没生成的号由它返回 null，
@@ -397,6 +486,51 @@ class ConsoleScreen(
     /** 点击回环：命中则返回喂给 VM 的字符串（口径见 `button/ButtonLayer.kt` 的类文档）。 */
     fun click(row: Int, col: Int, acceptance: ButtonAcceptance = ButtonAcceptance.ANY): String? =
         buttons.hit(row, col, acceptance)?.let { buttons.selectedString(it, acceptance) }
+
+    /**
+     * 行内矩形命中（`ButtonLayer.hitInline` 的屏幕级入口）：在 [hit] 的列门之上再按图元
+     * **节点纵盒**判 `yInRowPx`（原版 `EmueraConsole.cs:2368` 的 `num4 < Top || num4 > Bottom`）。
+     *
+     * 与 [hit] 的分工：[hit] 是「没有行内纵坐标」的旧口径（整行可点）；本方法是真机点击/
+     * 悬停路径应当用的加严面 —— 图形段列上点在节点盒外不算命中。
+     *
+     * 行几何（[rowHeightPx] / [lineHeightPx] / [pureArtRow]）从调用方同一份
+     * `RowLayout.Plan` 来，压缩行按绘制侧同一个 k 收窄纵盒（`GraphicGeometry.rowScaleOf`）；
+     * 缺省参数 ⇒ k = 1（= 接线前口径），既有调用方零行为。
+     */
+    @Suppress("LongParameterList")
+    fun hitInline(
+        row: Int,
+        col: Int,
+        yInRowPx: Float,
+        fontSizePx: Int,
+        acceptance: ButtonAcceptance = ButtonAcceptance.ANY,
+        rowHeightPx: Float = 0f,
+        lineHeightPx: Float = 0f,
+        pureArtRow: Boolean = true,
+    ): HitTarget? = buttons.hitInline(
+        row, col, yInRowPx, fontSizePx, acceptance, rowHeightPx, lineHeightPx, pureArtRow,
+    )
+
+    /**
+     * 行内矩形口径的点击回环：与 [click] 同一回环串，但命中门是 [hitInline]。
+     *
+     * 真机点击必须走这条：否则压缩行/带 `ypos` 的图按钮，点在节点盒外（行内空白）也会
+     * 触发 —— 屏幕上没有像素的位置不该可点（原版 `:2368` 的 y 判式）。
+     */
+    @Suppress("LongParameterList")
+    fun clickInline(
+        row: Int,
+        col: Int,
+        yInRowPx: Float,
+        fontSizePx: Int,
+        acceptance: ButtonAcceptance = ButtonAcceptance.ANY,
+        rowHeightPx: Float = 0f,
+        lineHeightPx: Float = 0f,
+        pureArtRow: Boolean = true,
+    ): String? = hitInline(
+        row, col, yInRowPx, fontSizePx, acceptance, rowHeightPx, lineHeightPx, pureArtRow,
+    )?.let { buttons.selectedString(it, acceptance) }
 
     /**
      * **文本快照**：逐显示行（绘制口径，[visibleRows]）把该行的段文本按序拼起来。
@@ -516,6 +650,16 @@ class ConsoleScreen(
 }
 
 /**
+ * [ConsoleScreen.divOverlayScan] 的一行：保留区下标 + 绝对行号 + 该行锚定的块
+ * （块几何/子行全量，见 [DisplayDivBlock]）。
+ */
+class DivOverlayScanRow(
+    val retainedIndex: Int,
+    val lineNo: Long,
+    val blocks: List<DisplayDivBlock>,
+)
+
+/**
  * 构造一行的便捷工厂（夹具与真机绑定层共用）。
  *
  * 样式一律**入队时固定**，不在渲染期回看当前样式 —— 原版 `ConsoleStyledString` 在构造时就
@@ -536,7 +680,7 @@ object ScreenRows {
     fun run(
         text: String,
         fore: Int = DEFAULT_FORE,
-        back: Int = DEFAULT_BACK,
+        back: Int? = null,
         styleMask: Int = 0,
         fontName: String = DEFAULT_FONT,
         kind: RunKind = RunKind.TEXT,
@@ -588,7 +732,7 @@ object ScreenRows {
     fun textLine(
         text: String,
         fore: Int = DEFAULT_FORE,
-        back: Int = DEFAULT_BACK,
+        back: Int? = null,
         isLogicalLine: Boolean = true,
         isLineEnd: Boolean = true,
     ): RenderLine = line(

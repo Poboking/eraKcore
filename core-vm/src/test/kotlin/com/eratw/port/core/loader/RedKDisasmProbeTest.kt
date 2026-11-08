@@ -1,6 +1,7 @@
 package com.eratw.port.core.loader
 
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import java.nio.file.Files
 import java.nio.file.Path
@@ -15,6 +16,8 @@ import kotlin.test.assertTrue
  * 见 ForBackEdgeReproTest 三变体），留给设备侧取证。
  * 注意指令对齐：pc 是**指令号**，字偏移 = pc shl 2（Vm.kt 取指口径）。
  */
+// realArtifacts 家标记（realarttag 路 2026-11-06）：产物门控钉（取证产物），供 gateRealArtifacts 圈定；判定逻辑一字不动。
+@Tag("realArtifacts")
 class RedKDisasmProbeTest {
 
     @Test
@@ -24,8 +27,16 @@ class RedKDisasmProbeTest {
     fun `反汇编 CHARA_MOVEMENT 环区`() = dumpFunction("CHARA_MOVEMENT", "build/redk-chara-disasm.txt")
 
     private fun dumpFunction(name: String, outFile: String) {
+        val erbcDirRaw = System.getenv("ERATW_ERBC_DIR")?.trim()?.takeIf { it.isNotEmpty() }
         val erbcFile = artifactDir()?.resolve("program.erbc")
-        assumeTrue(erbcFile != null, "无取证产物，跳过")
+        assumeTrue(
+            erbcFile != null,
+            if (erbcDirRaw == null)
+                "无取证产物：ERATW_ERBC_DIR 未设置（§5 裸口径不导出）且 build/forensic-erbc/erbc.v1 不在 —— " +
+                    "反汇编取证判不了，跳过（真产物档 `-PwithRealArtifacts=true` 会接上，或显式导出后重跑）"
+            else
+                "ERATW_ERBC_DIR=$erbcDirRaw 下没有 program.erbc：跳过",
+        )
         val program = ProgramLoader.loadMapped(erbcFile!!) { }
         val fn = program.function(name)
         assumeTrue(fn != null, "产物里没有 $name")
@@ -72,7 +83,13 @@ class RedKDisasmProbeTest {
         }
         Files.writeString(Path.of(outFile), sb.toString())
         println(sb)
-        assertTrue(sb.isNotEmpty())
+        // 2026-11-06 补判定：`isNotEmpty` 恒真（函数头一行就非空）= 近空断言。取证读数的
+        // 最低形状要求是「头行之外真的反汇编出了指令行」—— 边界算错（end <= start）或取指
+        // 一行没出时读数作废，必须红而不是拿着头行落 PASS。
+        assertTrue(
+            sb.lineSequence().count() > 1,
+            "反汇编只落了函数头一行（end=$end）：边界计算或取指循环没产出指令行，取证读数作废",
+        )
     }
 
     private fun lineOf(program: com.eratw.port.core.code.Program, pc: Int): Int =

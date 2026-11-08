@@ -11,7 +11,6 @@ import com.eratw.port.core.stmt.VoidArgument
 import com.eratw.port.perf.HeapMeter
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.io.TempDir
-import java.lang.management.ManagementFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -106,34 +105,13 @@ class ErbcStreamPeakTest {
         val extra: Long get() = allocated - retained
     }
 
-    /**
-     * 线程分配计数（`com.sun.management.ThreadMXBean`）。宿主 JVM 不支持时返回 null，
-     * 调用方 [assumeTrue] 跳过而不是伪造读数。
-     */
-    private class AllocMeter private constructor(
-        private val bean: com.sun.management.ThreadMXBean,
-        private val tid: Long,
-    ) {
-        fun read(): Long = bean.getThreadAllocatedBytes(tid)
-
-        companion object {
-            fun open(): AllocMeter? = runCatching {
-                val bean = ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean
-                    ?: return null
-                if (!bean.isThreadAllocatedMemorySupported) return null
-                bean.isThreadAllocatedMemoryEnabled = true
-                val tid = Thread.currentThread().id
-                // 探一次：代理未实现该方法时会抛 UnsupportedOperationException
-                bean.getThreadAllocatedBytes(tid)
-                AllocMeter(bean, tid)
-            }.getOrNull()
-        }
-    }
+    // 线程分配计数（原私有 AllocMeter，连同本类 KDoc 的「宿主 JVM 不支持时返回 null、
+    // 调用方 assumeTrue 跳过而不是伪造读数」口径一并收敛进共享 AllocMeterProbe）。
 
     private fun sample(
         label: String,
         fileBytes: Long,
-        meter: AllocMeter,
+        meter: AllocMeterProbe,
         block: () -> Program,
     ): Sample {
         HeapMeter.resetPeaks()
@@ -225,9 +203,9 @@ class ErbcStreamPeakTest {
 
     @Test
     fun `合成产物：流式 mapped 少分配整整一份产物，且 Program 计数不变`(@TempDir dir: Path) {
-        val meter = AllocMeter.open()
-        assumeTrue(meter != null, "宿主 JVM 不支持线程分配计数（com.sun.management.ThreadMXBean）：跳过")
-        val m = requireNotNull(meter)
+        val opened = AllocMeterProbe.open()
+        assumeTrue(opened.meter != null, "宿主 JVM 不支持线程分配计数（com.sun.management.ThreadMXBean）：跳过（${opened.failureReason}）")
+        val m = requireNotNull(opened.meter)
         warmUp(dir)
 
         val file = dir.resolve("big.erbc")
@@ -292,9 +270,9 @@ class ErbcStreamPeakTest {
     fun `真实产物：三条路径的装载峰值读数（前 fullBytes vs 后 流式）`() {
         val path = realArtifact()
         assumeTrue(path != null, "ERATW_ERBC 未指向可读的 program.erbc：跳过真实产物用例")
-        val meter = AllocMeter.open()
-        assumeTrue(meter != null, "宿主 JVM 不支持线程分配计数：跳过")
-        val m = requireNotNull(meter)
+        val opened = AllocMeterProbe.open()
+        assumeTrue(opened.meter != null, "宿主 JVM 不支持线程分配计数：跳过（${opened.failureReason}）")
+        val m = requireNotNull(opened.meter)
         val fileBytes = Files.size(path!!)
 
         val legacy = sample("旧 mapped（fullBytes）", fileBytes, m) { loadViaFullBytes(path) }

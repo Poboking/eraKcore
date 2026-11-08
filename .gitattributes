@@ -1,0 +1,17 @@
+# 行尾 / 二进制策略（与源仓 eratw-android 根 .gitattributes 的公开范围同源，路径去掉 monorepo 前缀）。
+# 本机 core.autocrlf=true 的 Windows 检出会把下列「逐字节复现凭据」改成 CRLF，
+# 导致测试按字节比对假红，或对拍闸按 CRLF 产出假绿。
+
+# 字体成品：TTF 是二进制；度量表按行消费、且 sha256 是复现凭据，钉 LF。
+render/src/main/resources/fonts/*.ttf binary
+render/src/main/resources/fonts/*-advance.txt text eol=lf
+
+# 输入轨迹重放夹具是期望值本身（input.trace 语义 / expect-console 逐行），钉 LF。
+fixtures/replay/** text eol=lf
+
+# 缺省关审计的逐字节基线（stdout / 未绑定符号 TSV）是复现凭据，钉 LF。
+tools/erbcc/src/test/resources/reachability/** text eol=lf
+
+# erbcc-rs 的基准与基准语料是复现凭据：含 SJIS 原始字节（半截 lead byte），
+# 整棵树按 binary 处理，不做任何 EOL 转换。
+tools/erbcc-rs/tests/data/** binary

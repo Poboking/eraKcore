@@ -7,6 +7,8 @@ import com.eratw.port.core.vars.DimParser
 import com.eratw.port.core.vars.VariableStore
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -152,5 +154,84 @@ class SaveEntryOrderTest {
         assertEquals(registered.size, ordered.size, "条目数一致")
         assertEquals(registered.toSet(), ordered.toSet(), "名字集合一致")
         assertEquals(ordered.size, ordered.toSet().size, "无重复")
+    }
+
+    // ==================================================================
+    // 3. 批量列快照 == 逐元素读数
+    // ==================================================================
+
+    /**
+     * 写侧的「整列一次取走」必须与逐元素读法**逐格等值**，否则存档直接写错值。
+     *
+     * 存在理由：`SaveCapture.entryForDef` 原来是每格一次按名解析 + 一块新下标数组
+     * （TA/TB 出厂 100×100×100 ⇒ 一次存档 200 万轮，与 2026-11-02 玩家「玩久了存档失败」
+     * 的堆贴顶尖峰同形）。批量面只在能证明等值时才接管（遮蔽 / `isForbid` / 列长≠维度积
+     * 三种情况 return null 退回逐元素），本用例钉住接管路径的**展平公式**
+     * （`elem = elem * n + v`，与 `VariableStore.checkFlat` 同一条）与三条退路。
+     *
+     * 另钉「交出的是副本」：抓取后脚本还会继续写同一列，活数组绝不能流进 [SaveEntry]。
+     */
+    @Test
+    fun `批量列快照与逐元素读数逐格等值`() {
+        val store = modifiedStore()
+        store.writeInt("MONEY", longArrayOf(99), 14L)
+        store.writeInt("DA", longArrayOf(7, 3), 13L)
+        store.writeInt("TA", longArrayOf(97, 3, 5), 11L)
+        store.writeInt("TB", longArrayOf(99, 99, 99), 12L)
+        store.writeStr("SAVESTR", longArrayOf(2), "第二格")
+
+        val money = store.captureSystemIntColumn(store.registry.mustDef("MONEY"))
+        assertNotNull(money, "MONEY 是默认注册表的 1D 整数列，批量面应当接管")
+        val moneyDims = store.registry.mustDef("MONEY").dims[0]
+        assertEquals(moneyDims, money.size, "列长 = 声明维度")
+        for (k in 0 until moneyDims) {
+            assertEquals(store.readInt("MONEY", longArrayOf(k.toLong())), money[k], "MONEY[$k]")
+        }
+
+        val da = store.captureSystemIntColumn(store.registry.mustDef("DA"))
+        assertNotNull(da)
+        val d0 = store.registry.mustDef("DA").dims[0]
+        val d1 = store.registry.mustDef("DA").dims[1]
+        assertEquals(d0 * d1, da.size)
+        assertEquals(13L, da[7 * d1 + 3], "行主序展平：[7,3] → 7*d1+3")
+        for (k in listOf(0, 1, da.size / 2, da.size - 2, da.size - 1)) {
+            assertEquals(store.readInt("DA", longArrayOf((k / d1).toLong(), (k % d1).toLong())), da[k], "DA[$k]")
+        }
+
+        val ta = store.captureSystemIntColumn(store.registry.mustDef("TA"))
+        assertNotNull(ta)
+        val t = store.registry.mustDef("TA").dims
+        assertEquals(t[0] * t[1] * t[2], ta.size)
+        assertEquals(11L, ta[97 * t[1] * t[2] + 3 * t[2] + 5], "TA[97,3,5]")
+        val tb = store.captureSystemIntColumn(store.registry.mustDef("TB"))
+        assertNotNull(tb)
+        assertEquals(12L, tb[tb.size - 1], "TB 末格（[99,99,99]）")
+        for (k in listOf(0, 1, ta.size / 3, ta.size - 2, ta.size - 1)) {
+            val idx = longArrayOf(
+                (k / (t[1] * t[2])).toLong(),
+                ((k / t[2]) % t[1]).toLong(),
+                (k % t[2]).toLong(),
+            )
+            assertEquals(store.readInt("TA", idx), ta[k], "TA 展平 $k → ${idx.joinToString(",")}")
+        }
+
+        val saveStr = store.captureSystemStrColumn(store.registry.mustDef("SAVESTR"))
+        assertNotNull(saveStr)
+        assertEquals("第二格", saveStr[2])
+        for (k in saveStr.indices) {
+            assertEquals(store.readStr("SAVESTR", longArrayOf(k.toLong())), saveStr[k], "SAVESTR[$k]")
+        }
+
+        // 三条退路：形态不是整数列 / 不是 1D 字符串列 ⇒ null，调用方退回逐元素路径。
+        assertNull(store.captureSystemIntColumn(store.registry.mustDef("SAVESTR")), "字符串列不是整数批量面")
+        assertNull(store.captureSystemStrColumn(store.registry.mustDef("MONEY")), "整数列不是字符串批量面")
+        assertNull(store.captureSystemStrColumn(store.registry.mustDef("TA")), "3D 列没有 1D 批量形态")
+
+        // 交出的是副本：改快照不得回写活列，也不得影响随后的抓取。
+        ta[0] = -12345L
+        assertEquals(7L, store.readInt("TA", longArrayOf(0, 0, 0)), "批量面必须是 copyOf，改快照不许污染活列")
+        val entry = SaveCapture.normal(store, "t").variables.first { it.key == "TA" } as SaveEntry.IntArray3
+        assertEquals(11L, entry.values[97 * t[1] * t[2] + 3 * t[2] + 5], "抓取条目仍取真值")
+        assertEquals(7L, entry.values[0], "抓取条目不受上面那次快照改写的影响")
     }
 }

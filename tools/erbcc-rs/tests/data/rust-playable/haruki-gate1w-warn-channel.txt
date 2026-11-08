@@ -1,0 +1,72 @@
+# erbcc-rs / rust-playable 车道登记：Rust 腿产物装进引擎后的实测读数（Haruki 机）
+# 产法：python devtools/verify_rust_erbc_playable.py all --register（或单独 gate1 / gate1w / gate2 / gate3）
+# 时间：2026-11-01 13:18:39　语料：C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\gate1w\warn-corpus
+# 机相关：读数含产出机绝对路径与 vm 版本；换机（或改 core-vm 源码树/编译器指纹）后重跑刷新，判据不放宽。
+
+## 自造小语料（重复 @FUNCTION + INPUTS/BINPUTS 参数过多）的引擎读回告警
+```
+01_warn_dup.ERB:5 | 函数"@DUP_TARGET"已经被定义过(01_warn_dup.ERB的3行)
+01_warn_dup.ERB:7 | 函数"@DUP_TARGET"已经被定义过(01_warn_dup.ERB的3行)
+02_warn_inputs.ERB:2 | INPUTS命令:参数过多
+02_warn_inputs.ERB:3 | BINPUTS命令:参数过多
+```
+两腿告警文本逐字相等：True
+load_warnings_count 4　sha256 8c1ad5ae22b22668ff45e319a36f9b67b374b172dbaaf0cb7d9959d1bde1ef9b
+
+## 基准（.workbuddy/golden-pc-loadwarnings.txt）的第二列，逐行原样
+基准 函数"@G12_FUNC"已经被定义过(GOLDEN_12_SYMBOLS.ERB的39行)
+基准 函数"@G12_PLAIN"已经被定义过(GOLDEN_12_SYMBOLS.ERB的48行)
+基准 函数"@G12_PLAIN"已经被定义过(GOLDEN_12_SYMBOLS.ERB的48行)
+基准 INPUTS命令:参数过多
+基准 BINPUTS命令:参数过多
+引擎读回与基准**逐字相同**的条数：2/4（同字的那几条 = 同一模板的同一文案；其余条只差文件名/行号/标签名，模板同式由 check_warnings_against_golden 断言）
+
+## 读数逐项
+load_ok                            true                       OK
+program_functions                  5                          OK
+program_instructions               16                         OK
+program_statements                 11                         OK
+meta_functions                     5                          OK
+meta_labels_keys                   5                          OK
+meta_labels_entries                0                          OK
+meta_files_keys                    5                          OK
+meta_data_sections                 0                          OK
+meta_param_defaults                0                          OK
+meta_method_types                  0                          OK
+meta_macros                        0                          OK
+meta_int_constants                 0                          OK
+meta_str_constants                 0                          OK
+meta_engine_tag                    erbcc 0.1.0-SNAPSHOT       OK
+meta_program_sha256_field          15a0ced17711eb42725fa45d…  OK
+erbc_actual_sha256                 15a0ced17711eb42725fa45d…  OK
+meta_actual_sha256                 869e326efd9e36188fbdbf37…  OK
+load_warnings_present              true                       OK
+load_warnings_count                4                          OK
+load_warnings_sha256               8c1ad5ae22b22668ff45e319…  OK
+global_dims_count                  0                          OK
+global_dims_text_sha256            e3b0c44298fc1c149afbf4c8…  OK
+private_dims_count                 0                          OK
+private_dim_arity_sum              0                          OK
+private_dim_total_size_sum         0                          OK
+private_dim_str_decls              0                          OK
+private_dim_const_decls            0                          OK
+private_dim_savedata_decls         0                          OK
+private_dim_charadata_decls        0                          OK
+private_dim_ref_decls              0                          OK
+private_dims_text_sha256           e3b0c44298fc1c149afbf4c8…  OK
+meta_functions_text_sha256         af2ce61b2a5fbaffeb40d936…  OK
+int_constants_text_sha256          e3b0c44298fc1c149afbf4c8…  OK
+
+## 与基准的关系（逐条）
+[kotlin] 引擎读回 4 条：重复定义 2 条 + 参数过多 2 条；两类与基准 3+2 行同式（基准第三列 SRC: 系采集脚本补注，不参与判据）
+[kotlin] 引擎原样读数（`文件:行 | 文案`，口径同 LoadWarningsGoldenTest.render）：
+[kotlin]   01_warn_dup.ERB:5 | 函数"@DUP_TARGET"已经被定义过(01_warn_dup.ERB的3行)
+[kotlin]   01_warn_dup.ERB:7 | 函数"@DUP_TARGET"已经被定义过(01_warn_dup.ERB的3行)
+[kotlin]   02_warn_inputs.ERB:2 | INPUTS命令:参数过多
+[kotlin]   02_warn_inputs.ERB:3 | BINPUTS命令:参数过多
+[rust] 引擎读回 4 条：重复定义 2 条 + 参数过多 2 条；两类与基准 3+2 行同式（基准第三列 SRC: 系采集脚本补注，不参与判据）
+[rust] 引擎原样读数（`文件:行 | 文案`，口径同 LoadWarningsGoldenTest.render）：
+[rust]   01_warn_dup.ERB:5 | 函数"@DUP_TARGET"已经被定义过(01_warn_dup.ERB的3行)
+[rust]   01_warn_dup.ERB:7 | 函数"@DUP_TARGET"已经被定义过(01_warn_dup.ERB的3行)
+[rust]   02_warn_inputs.ERB:2 | INPUTS命令:参数过多
+[rust]   02_warn_inputs.ERB:3 | BINPUTS命令:参数过多

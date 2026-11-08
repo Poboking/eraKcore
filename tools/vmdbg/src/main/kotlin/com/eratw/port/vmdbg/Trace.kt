@@ -29,7 +29,7 @@ object CmdTrace {
 
     fun run(a: Args, out: PrintStream, err: PrintStream): Int {
         val name = a.positional.getOrNull(1) ?: throw CliError("用法: trace <函数名> [--steps N] [--capacity N] [--out 文件]")
-        val assembled = Assembler.assemble(a)
+        val assembled = Assembler.assemble(a, out = out)
         val capacity = a.longOr("--capacity", Cli.DEFAULT_TRACE_CAPACITY.toLong()).toInt()
         if (capacity <= 0) throw CliError("--capacity 必须为正整数")
         val dump = TraceSupport.install(assembled.session.runtime, capacity)
@@ -84,8 +84,8 @@ object TraceSupport {
      * 并映射 outcome/error 为摘要串。
      *
      * trace 要语句摘要（[Briefs.stmt]），故按 `index` 现取一次池：**只有探针在场时付费**，
-     * 生产缺省 probe == null 时桥里连这个回调都不进。旧树通道（[StatementProbe.NO_STMT_INDEX]，
-     * 没有扁平池的装置）不求值，摘要记 `(null)`。
+     * 生产缺省 probe == null 时桥里连这个回调都不进。对象树通道（[StatementProbe.NO_STMT_INDEX]，
+     * `flatStmtSource == null`，Android 生产默认）不求值，摘要记 `(null)`。
      */
     fun install(rt: ProcessRuntime, capacity: Int): TraceRing {
         val ring = TraceRing(capacity)

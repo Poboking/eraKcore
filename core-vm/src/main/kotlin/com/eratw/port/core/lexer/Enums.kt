@@ -70,6 +70,14 @@ enum class TokenType(val typeChar: Char) {
     IDENTIFIER('A'),
     /** LiteralIntegerWord —— spec: LiteralIntegerWord.cs:9 */
     INTEGER('0'),
+    /**
+     * 浮点字面量（4.981 升版新增：`0.7` / `1.0` / `1.5e3`）。
+     *
+     * 1.824 参考实现没有这一类（只有 [INTEGER]；`ReadDouble` 仅服务 TIMES 与 STR_DOUBLE 两个
+     * 语句参数，spec: LexicalAnalyzer.cs:232-266），故 type 字符 '1' 是本作自选值 ——
+     * 避开原版已占用的 '0'/'A'/'"'/'=' 与 StrForm 的 'F'。
+     */
+    FLOAT('1'),
     /** LiteralStringWord —— spec: LiteralStringWord.cs:9 */
     STRING('"'),
     /** OperatorWord —— spec: OperatorWord.cs:11 */

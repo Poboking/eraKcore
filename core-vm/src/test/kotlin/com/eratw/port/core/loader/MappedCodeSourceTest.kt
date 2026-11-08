@@ -16,7 +16,6 @@ import com.eratw.port.core.stmt.VoidArgument
 import com.eratw.port.perf.HeapMeter
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.io.TempDir
-import java.lang.management.ManagementFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -135,25 +134,7 @@ class MappedCodeSourceTest {
         assertEquals(expected.size, actual.size, "$ctx：字数")
     }
 
-    /** 线程分配计数（与 `ErbcStreamPeakTest` / `StreamLoadTest` 同一把尺子）。 */
-    private class AllocMeter private constructor(
-        private val bean: com.sun.management.ThreadMXBean,
-        private val tid: Long,
-    ) {
-        fun read(): Long = bean.getThreadAllocatedBytes(tid)
-
-        companion object {
-            fun open(): AllocMeter? = runCatching {
-                val bean = ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean
-                    ?: return null
-                if (!bean.isThreadAllocatedMemorySupported) return null
-                bean.isThreadAllocatedMemoryEnabled = true
-                val tid = Thread.currentThread().id
-                bean.getThreadAllocatedBytes(tid)
-                AllocMeter(bean, tid)
-            }.getOrNull()
-        }
-    }
+    // 线程分配计数（与 ErbcStreamPeakTest / StreamLoadTest 同一把尺子）：AllocMeterProbe。
 
     // ==================================================================
     // 1. 常驻口径：映射装载后 code 的堆占用为 0
@@ -321,9 +302,9 @@ class MappedCodeSourceTest {
 
     @Test
     fun `装载不含整段拷贝：线程分配计数里映射路径小于 code 整段字节`(@TempDir dir: Path) {
-        val meter = AllocMeter.open()
-        assumeTrue(meter != null, "宿主 JVM 不支持线程分配计数（com.sun.management.ThreadMXBean）：跳过")
-        val m = requireNotNull(meter)
+        val opened = AllocMeterProbe.open()
+        assumeTrue(opened.meter != null, "宿主 JVM 不支持线程分配计数（com.sun.management.ThreadMXBean）：跳过（${opened.failureReason}）")
+        val m = requireNotNull(opened.meter)
         warmUp(dir)
 
         val file = dir.resolve("big.erbc")
@@ -380,8 +361,8 @@ class MappedCodeSourceTest {
     fun `真实产物：code 段常驻前后、装载读数与再编码等价`(@TempDir dir: Path) {
         val path = realArtifact()
         assumeTrue(path != null, "ERATW_ERBC 未指向可读的 program.erbc：跳过真实产物用例")
-        val meter = AllocMeter.open()
-        assumeTrue(meter != null, "宿主 JVM 不支持线程分配计数：跳过真实产物用例")
+        val opened = AllocMeterProbe.open()
+        assumeTrue(opened.meter != null, "宿主 JVM 不支持线程分配计数：跳过真实产物用例（${opened.failureReason}）")
         val file = requireNotNull(path)
 
         // 阶段 1：只驻留映射装载的 Program（打完读数、对拍段字节、写出一份再编码）
@@ -399,7 +380,7 @@ class MappedCodeSourceTest {
         println(
             "[erbc-codemap] 再编码：映射装载 ${mib(Files.size(mappedOut))} / 全读装载 ${mib(Files.size(fullOut))}，逐字节相同",
         )
-        // 容器级 identity 取决于产物的产出构建（本机 artifact 由 `D:\DSH\eratw-build` 的旧 core 产出），
+        // 容器级 identity 取决于产物的产出构建（本机 artifact 由 `<work-root>/eratw-build` 的旧 core 产出），
         // 这里如实报出差异位置，不作为本波判据。
         println("[erbc-codemap] 再编码 vs 原容器：${firstDiff(file, mappedOut) ?: "逐字节相同"}")
     }
@@ -409,7 +390,8 @@ class MappedCodeSourceTest {
         file: Path,
         dir: Path,
     ): Path {
-        val meter = requireNotNull(AllocMeter.open())
+        val opened = AllocMeterProbe.open()
+        val meter = requireNotNull(opened.meter) { "宿主 JVM 不支持线程分配计数（${opened.failureReason}）" }
         val fileBytes = Files.size(file)
         HeapMeter.resetPeaks()
         val before = HeapMeter.settled()

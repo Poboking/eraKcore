@@ -1,0 +1,17 @@
+; ----------------------------------------------------------------------------
+; rust-symbols 车道的小语料：符号表 JSON 摘要与 --collator-check 报告的基准档。
+; 口径权威 = tools/erbcc/src/main/kotlin/com/eratw/port/erbcc/Main.kt:169-309
+; 与 core-vm/src/main/kotlin/com/eratw/port/core/frontend/Symbols.kt（装载序 ADR-006）。
+;
+; 刻意设计：
+;   · 文件名 `Z_FIRST` / `a_second` / `M_CTRL` 让 ja-JP Collator 与序数比较给出
+;     **不同**装载序（序数 M < Z < a；ja-JP a < m < z），制造位移/翻转读数；
+;   · 每个进 JSON 的标签都有 ≥2 处定义（`duplicates` 只登记重名组，Main.kt:266-268），
+;     覆盖 method/only/single/pri/later、arg 三计数、#LOCALSIZE/#LOCALSSIZE、
+;     dimSpecs 的 dims/keywords/initializer（含引号、反斜杠、TAB、0x01 控制字符）；
+;   · 键与文件名含非 ASCII（日本語ラベル / C_サブ），钉 JSON 的转义口径。
+; 基准由真 Kotlin 工具链产出后入库；改本目录必须重跑基准（见 tests/symbols_json_parity.rs）。
+; ----------------------------------------------------------------------------
+#DEFINE 宏一 7
+#DIM CONST 定数上限 = 3
+#DIMS CONST 标语$ = "带引号与反斜杠C:\DIR"

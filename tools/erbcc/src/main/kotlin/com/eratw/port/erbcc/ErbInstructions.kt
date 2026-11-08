@@ -473,6 +473,9 @@ val ERB_INSTRUCTIONS: Set<String> = setOf(
     "SPLIT",
     "SPRITEANIMEADDFRAME",
     "SPRITEANIMECREATE",
+    // 4.981 fork 新增（画蛇又添足版自改emuera相关说明.txt:236-239）：行首语句形态
+    // `SPRITEANIMEFRAME "X"` 与表达式形态共用同一内建（BuiltinSymbols 也已登记）。
+    "SPRITEANIMEFRAME",
     "SPRITECREATE",
     "SPRITECREATED",
     "SPRITEDISPOSE",
@@ -510,6 +513,7 @@ val ERB_INSTRUCTIONS: Set<String> = setOf(
     "TIMES",
     "TINPUT",
     "TINPUTS",
+    "TOFLOAT",
     "TOFULL",
     "TOHALF",
     "TOINT",

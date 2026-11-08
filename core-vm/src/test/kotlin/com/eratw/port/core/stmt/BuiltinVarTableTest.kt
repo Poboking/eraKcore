@@ -11,9 +11,10 @@ import kotlin.test.assertTrue
  * **内建变量表与 C# `varTokenDic` 的全集对齐（deep-stmt-sym 路）**
  *
  * 锁三件事：
- * 1. [BuiltinSymbols.variables] 的键集 == 原版 `varTokenDic` 键集 ∪ 函数局部变量四名
+ * 1. [BuiltinSymbols.variables] 的键集 == 原版 `varTokenDic` 键集 ∪ 函数局部变量六名
  *    （`varTokenDic.Add`，spec: VariableData.cs:2962-3200；`localvarTokenDic.Add`，
- *    spec: VariableData.cs:3190-3199）。曾经的「按需裁剪」漏掉 DITEMTYPE/DA..DE/TA/TB
+ *    spec: VariableData.cs:3190-3199；4.981 浮点局部 `LOCALF`/`ARGF`，fork-src
+ *    VariableData.cs:376-379）。曾经的「按需裁剪」漏掉 DITEMTYPE/DA..DE/TA/TB
  *    与 `__FILE__`/`__FUNCTION__`/`__LINE__`，并误登记原版不存在的 FILE/FUNCTION/LINE。
  * 2. 维度（`VariableToken.Dimension`，spec: VariableToken.cs:76-89）：
  *    2D 系统数组 = 2、3D = 3、角色标量（NAME/NO/ISASSI 等）= 0 且 `isCharacterData`。
@@ -23,10 +24,10 @@ import kotlin.test.assertTrue
  */
 class BuiltinVarTableTest {
 
-    /** 原版 `varTokenDic` 全键 + LOCAL/ARG/LOCALS/ARGS（共 158），逐名前照抄。 */
+    /** 原版 `varTokenDic` 全键 + LOCAL/ARG/LOCALS/ARGS/LOCALF/ARGF/RESULTF（共 161），逐名前照抄。 */
     private val csharpVarNames: Set<String> = setOf(
         "DAY", "MONEY", "ITEM", "FLAG", "TFLAG", "UP",
-        "PALAMLV", "EXPLV", "EJAC", "DOWN", "RESULT", "COUNT",
+        "PALAMLV", "EXPLV", "EJAC", "DOWN", "RESULT", "RESULTF", "COUNT",
         "TARGET", "ASSI", "MASTER", "NOITEM", "LOSEBASE", "SELECTCOM",
         "ASSIPLAY", "PREVCOM", "TIME", "ITEMSALES", "PLAYER", "NEXTCOM",
         "PBAND", "BOUGHT", "A", "B", "C", "D",
@@ -53,6 +54,8 @@ class BuiltinVarTableTest {
         "ISTIMEOUT", "__INT_MAX__", "__INT_MIN__", "EMUERA_VERSION", "WINDOW_TITLE", "MONEYLABEL",
         "DRAWLINESTR", "__FILE__", "__FUNCTION__", "__LINE__", "LOCAL", "ARG",
         "LOCALS", "ARGS",
+        // 4.981 浮点局部变量（fork-src VariableData.cs:376-379；spec: variables.yaml:99-100）
+        "LOCALF", "ARGF",
     )
 
     @Test
@@ -118,8 +121,9 @@ class BuiltinVarTableTest {
     @Test
     fun functionAndMethodTablesAreTheSame271Set() {
         // FunctionMethodCreator.cs:9040-9316（271 条）、FunctionIdentifier.cs:4140-4148 双注册。
-        assertEquals(271, BuiltinSymbols.functions.size)
-        assertEquals(271, BuiltinSymbols.methods.size)
+        // 4.981 上游自改另加 8 条（GETANIMETIMER/GETPLATFORM/UNCHECKED_*/MAP_*）+ 浮点 TOFLOAT + 16 SQL，共 296。
+        assertEquals(297, BuiltinSymbols.functions.size)
+        assertEquals(297, BuiltinSymbols.methods.size)
         assertEquals(BuiltinSymbols.functions.keys, BuiltinSymbols.methods)
         // 同时是语句名的 6 个方法名（FunctionIdentifier.cs:4142 的 `!funcDic.ContainsKey`）。
         assertEquals(

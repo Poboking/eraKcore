@@ -21,6 +21,7 @@ import com.eratw.port.core.save.RootedSaveFileIo
 import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Random
 
 /**
  * explore 驱动器（CONTRACT-DBG6 E1）：真实游戏流程状态机的「窄而深」遍历器。
@@ -92,6 +93,35 @@ object ExploreDefaults {
     /** WaitPoint.consoleTail 的缺省行数（CONTRACT-DBG6 §3：缺省 30 行，去空白尾行）。 */
     const val TAIL_LINES = 30
 
+    /** 引导逐步台账的文件名（落 `<out>` 下，引导失败与引导成功各写一份全量）。 */
+    const val BOOT_STEPS_LEDGER = "boot-steps.jsonl"
+
+    /** 引导台账里单格文本的截断长度（屏上 ASCII 地图一行就上千字符，不截会灌爆台账）。 */
+    const val BOOT_TRACE_TEXT_MAX = 400
+
+    /**
+     * 引导期「任意键自动放行」的护栏上限（obs-bootrecipe）：超过即判引导失败并说明卡在纯推进面。
+     * 口径依据：[ExploreBoot] 类 KDoc 钉死「任意键等待点不经食谱（自动 PassAnyKey 放行，对应 FLOW.md §2
+     * 里的 (Enter×N) 段）」，而开局链的 (Enter×N) 段有几十个这样的点（真机取证原话「几十个等待点」），
+     * 无上限则脚本一旦进入纯 anykey 死循环会把浸泡墙钟烧光。
+     */
+    const val BOOT_ANYKEY_AUTO_MAX = 400
+
+    /**
+     * 发现台账**同种重复**的抑制上限（obs-soakwall）：一种 kind 在一轮 run 里最多真实投递这么多条。
+     * 立项依据（组长实测，修前装置）：--soak-min 1 一轮写出 findings.jsonl 42 MB / 28,964 行，
+     * 全部 kind=WALL_LIMIT、全部 episode=1，相邻两条时间戳只差 0～37 ms —— 喂入侧墙钟命中后
+     * 「记一条 = 应答一次输入」的死循环（修法见 feederBody 与 stateMachinePump 的 KDoc）。
+     * 定长护栏：即使别处再冒出同类环，台账行数也有上界（本仓的 OOM 账从没人记账的累加开始）。
+     */
+    const val FINDING_KIND_CAP = 40
+
+    /** 发现台账**总行数**的护栏上限（单轮 run，跨所有 kind；[FINDING_KIND_CAP] 之外的第二道闸）。 */
+    const val FINDING_TOTAL_CAP = 400
+
+    /** [FindingGuard] 种类桶的上限：kind 名全部来自本文件常量集合，正常远达不到；防未知 kind 撑爆映射。 */
+    const val FINDING_KIND_KEYS_MAX = 64
+
     /**
      * 加载种子的缺省状态机锚点：第 1 日主菜单的指令选择步（BeginFlow 的 Train_CallShowUserCom，
      * 端上引导链的种子打点态）。
@@ -117,6 +147,55 @@ fun interface FindingSink {
 
 /** 弃局信号（非 CodeEE 的 RuntimeException：与 WallLimitExceeded 同款，TRYC 家族捕不到，原样穿栈上抛）。 */
 class ExploreAbandon(message: String, val findingKind: String? = null) : RuntimeException(message)
+
+/**
+ * 同种发现的重复抑制护栏（obs-soakwall）：驱动器的每条发现投递都先过这里。
+ *
+ * 口径（三条都要被单测钉住）：
+ * 1. **第一次的真现场绝不吞**：每种 kind 前 [kindCap] 条、全局前 [totalCap] 条原样放行；
+ * 2. **台账行数有上界**：超出的只累计 [suppressed] 计数、不再投递（死循环再犯也只烧常数行）；
+ * 3. **定长存储**：kind → 已放行条数用映射记账，桶数上限 [ExploreDefaults.FINDING_KIND_KEYS_MAX]，
+ *    未知 kind 超出后并入 overflow 桶共享额度——不存在无界累加。
+ *
+ * 首次把某个 kind 压静音时（[Pass.justMuted]），调用方应打一行 stderr 说明护栏生效，
+ * 让「台账不再涨」可被读成「被抑制」而不是「现场已清」。线程纪律：只在驱动器锁内调
+ * [allow]（三个 report 挂点都持 lock），本类自身不加锁。
+ */
+internal class FindingGuard(private val kindCap: Int, private val totalCap: Int) {
+
+    /** 投递判定结果。 */
+    class Pass(val delivered: Boolean, val justMuted: Boolean)
+
+    /** 单 kind 的护栏状态：已放行条数 + 是否已报过静音（每 kind 一格，定长）。 */
+    private class KindState {
+        var delivered = 0
+        var mutedAnnounced = false
+    }
+
+    private val perKind = HashMap<String, KindState>()
+    private var total = 0
+
+    /** 被抑制的条数（供 run 结果汇总，不落台账）。 */
+    var suppressed: Int = 0
+        private set
+
+    /** 共享桶：未知 kind 超出桶数上限后的归并位（kind 名来自本文件常量集合，正常走不到）。 */
+    private fun bucketOf(kind: String): String =
+        if (kind in perKind || perKind.size < ExploreDefaults.FINDING_KIND_KEYS_MAX) kind else "*"
+
+    fun allow(kind: String): Pass {
+        val st = perKind.getOrPut(bucketOf(kind)) { KindState() }
+        if (total < totalCap && st.delivered < kindCap) {
+            st.delivered++
+            total++
+            return Pass(delivered = true, justMuted = false)
+        }
+        suppressed++
+        val justMuted = !st.mutedAnnounced
+        st.mutedAnnounced = true
+        return Pass(delivered = false, justMuted = justMuted)
+    }
+}
 
 /**
  * 等待点观测环境：组装 [WaitPoint] 所需的三项活读数。
@@ -224,9 +303,24 @@ class ExploreInputSink(
     @Volatile
     var budget: WallBudget? = null
 
+    /**
+     * 浸泡档「交付前」缝（obs-soak）：null = 非浸泡（既有探索路径零行为变化）。
+     * 驱动器在 [ExploreConfig.soak] 时接线；交付输入前经它做随机停顿 + 记录提交时刻（见 [SoakTuner]）。
+     */
+    @Volatile
+    var soak: SoakTuner? = null
+
     /** 迟绑驱动器（驱动器构造完成后立即调用）。 */
     fun attach(h: ExploreHooks) {
         hooks = h
+    }
+
+    /** 浸泡档：交付前停顿（锁外 sleep）+ 记录提交时刻；[soak] 未接线时纯透传（异常动作不交付）。 */
+    private fun soakBeforeDeliver(wp: WaitPoint, action: ExploreAction) {
+        val s = soak ?: return
+        val ms = s.idleMs()
+        if (ms > 0L) Thread.sleep(ms)
+        s.markSubmit(wp, action)
     }
 
     override fun readAnyKey(anyKey: Boolean, stopMesSkip: Boolean) {
@@ -242,7 +336,10 @@ class ExploreInputSink(
         val wp = WaitPoint(request, anyKey = true, buttons = env.drainButtons(), consoleTail = env.consoleTail(tailLines), stackTop = env.stackTop())
         val action = d.decide(wp)
         d.onObserved(wp, action)
-        if (action is ExploreAction.PassAnyKey) return
+        if (action is ExploreAction.PassAnyKey) {
+            soakBeforeDeliver(wp, action)
+            return
+        }
         when (action) {
             is ExploreAction.Abandon -> throw ExploreAbandon(action.reason)
             else -> throw ExploreAbandon("anyKey 等待点收到取值类动作（非法）", findingKind = "ILLEGAL_ACTION")
@@ -256,7 +353,10 @@ class ExploreInputSink(
         val wp = WaitPoint(request, anyKey = false, buttons = env.drainButtons(), consoleTail = env.consoleTail(tailLines), stackTop = env.stackTop())
         val action = d.decide(wp)
         d.onObserved(wp, action)
-        return translate(wp, action)
+        val outcome = translate(wp, action)
+        // 浸泡档：交付前停顿 + 记录提交时刻（translate 若抛非法/弃局，不交付、不停顿，正确跳过）。
+        soakBeforeDeliver(wp, action)
+        return outcome
     }
 
     /** 动作 → 交付的唯一定义点（翻译矩阵见类 KDoc）；非法组合与 Abandon 一律以异常表达。 */
@@ -533,6 +633,59 @@ class ExploreConfig(
     val maxDepth: Int = 24,
     val outDir: Path,
     val tailLines: Int = ExploreDefaults.TAIL_LINES,
+    /** 浸泡档总开关（obs-soak）：true = 随机操作 + 随机停顿 + 跑满 [soakWallMs] 墙钟，关掉快照栈分支。 */
+    val soak: Boolean = false,
+    /** 浸泡总墙钟毫秒（[soak] 为真时的主终止条件；局终后重新播种续跑至此）。 */
+    val soakWallMs: Long = 0L,
+    /** 每步「玩家停顿」的随机下限毫秒。 */
+    val idleMinMs: Long = 0L,
+    /** 每步「玩家停顿」的随机上限毫秒（含长间隔；与下限同值 = 固定停顿）。 */
+    val idleMaxMs: Long = 0L,
+    /** 单步「提交 → 到点」慢步阈值毫秒（≥ 此值单独成节，缺省 5 s）。 */
+    val slowStepMs: Long = 5_000L,
+    /**
+     * 单段落墙钟闸毫秒（CLI 的 `--step-wall-ms`，直载体为 `VmConfig.maxRunMillis`）；
+     * **缺省 0 = 关闭**，与既有行为逐字一致。与 [wallMs]（每局墙钟，只喂输入循环）和
+     * `--steps`（全局/引导共用的步数闸）三闸彼此独立：本闸纯计算也吃得到，
+     * 命中即中断这一步并把抛点现场写进台账（见 [reportStepSceneLocked]）。
+     */
+    val stepWallMs: Long = 0L,
+    /** 停顿 RNG 种子（确定性复跑；与策略 seed 可同值，单独持流避免相互消耗）。 */
+    val soakSeed: Long = DEFAULT_EXPLORE_SEED,
+    /** 同种发现每轮的放行上限（护栏口径见 [FindingGuard] 与 [ExploreDefaults.FINDING_KIND_CAP]）。 */
+    val findingKindCap: Int = ExploreDefaults.FINDING_KIND_CAP,
+    /** 发现台账每轮总放行上限（[findingKindCap] 之外的第二道闸）。 */
+    val findingTotalCap: Int = ExploreDefaults.FINDING_TOTAL_CAP,
+    /**
+     * 只引导不跑局（obs-compat512 的 `--boot-only`）：引导到落 seed.dbg 即收工。
+     * 缺省 false = 既有行为逐字不变；true 时策略供给与逐局循环整段跳过（引导失败照旧报红）。
+     */
+    val bootOnly: Boolean = false,
+)
+
+/**
+ * 单步墙钟闸与步数闸的**判据**（obs-midhang）：两者共用
+ * [com.eratw.port.core.code.StepLimitExceeded]（Vm.kt:616 的 `timeLimitAt` 与 `stepLimitAt`
+ * 两个抛点），唯一区别是 `elapsedMs` —— 时间闸带真实段耗时（≥0），步数闸恒为 -1。
+ */
+internal fun isSegmentTimeGate(t: com.eratw.port.core.code.StepLimitExceeded): Boolean = t.elapsedMs >= 0L
+
+/**
+ * 墙钟闸现场的纯搬运（键名固定：`funcName/line/pc/steps/elapsedMs/callChain/stepWallMs`）。
+ * 六项全取自异常自带字段（抛点就地构造，Vm.kt 的 `timeLimitAt` 注释即口径），本函数不读时钟、
+ * 不反射猜现场；[stepWallMs] 是启用中的阈值，用于台账里复核「阈值 vs 实际」。
+ */
+internal fun stepLimitScene(
+    t: com.eratw.port.core.code.StepLimitExceeded,
+    stepWallMs: Long,
+): LinkedHashMap<String, String> = linkedMapOf(
+    "funcName" to (t.funcName ?: ""),
+    "line" to t.line.toString(),
+    "pc" to t.pc.toString(),
+    "steps" to t.steps.toString(),
+    "elapsedMs" to t.elapsedMs.toString(),
+    "callChain" to (t.callChain ?: ""),
+    "stepWallMs" to stepWallMs.toString(),
 )
 
 /** explore 运行结果（CLI 汇总行的数据源）。 */
@@ -543,6 +696,8 @@ class ExploreRunResult(
     val episodes: Int,
     val outcomeCounts: Map<OutcomeKind, Int>,
     val findingsCount: Int,
+    /** 被 [FindingGuard] 抑制的同种重复条数（未落台账；0 = 护栏未触发）。 */
+    val findingsSuppressed: Int = 0,
 )
 
 /**
@@ -570,7 +725,12 @@ class ExploreDriver(
      * null = 不记（既有单测与最小用法）。挂点见本文件头 KDoc「E2 台账接线」。
      */
     private val out: ExploreOut? = null,
-) : ExploreHooks {
+    /**
+     * 浸泡档计量器（obs-soak）：[ExploreConfig.soak] 为真时非 null，逐条记「提交 → 到点」耗时。
+     * null = 非浸泡（既有探索路径零行为变化）。
+     */
+    private val meter: SoakMeter? = null,
+) : ExploreHooks, SoakTuner {
 
     private val session: GameSession = assembled.session
     private val collector = ConsoleButtonCollector(session.console)
@@ -591,12 +751,46 @@ class ExploreDriver(
     private var episodeNo = 0
     private var bootStepIdx = 0
     private var bootFailure: String? = null
+    // ---- 引导逐步台账（obs-bootrecipe；均在 lock 内读写）----
+    /**
+     * 引导期每个等待点一行 JSONL：步序 / 输入 / 期望子串 / 实际动作 / 等待点形态 / 栈顶函数 /
+     * **本次新增的屏上行**（上一条记账以来的增量）。
+     * 落盘时机：引导失败（[bootFailLocked]，全部失败原因都经它）与引导到种子（[takeSeedLocked]）
+     * 各写一次 `<out>/boot-steps.jsonl` —— 有了它，「配方第 k 步到底落在哪一面」是可读的，
+     * 不必从 boot-fail-console.txt 的全量转写里反推等待点边界（反推正是 obs-midhang 卡住的地方）。
+     */
+    private val bootTrace = ArrayList<String>()
+    /** 上一次记账时的控制台行序号水位（`Line.serial` 单调递增，行缓冲裁头不影响增量判定）。 */
+    private var bootLastSerial = 0L
+
+    /** 引导期「任意键自动放行」计数（护栏见 [ExploreDefaults.BOOT_ANYKEY_AUTO_MAX]；lock 内读写）。 */
+    private var bootAnyKeyAuto = 0
     private var seed: ExploreSnap? = null
     private var anchor: SystemStateCode? = null
     private var budget: WallBudget? = null
     private var findingsCount = 0
+    /**
+     * 同种发现重复抑制护栏（obs-soakwall 任务一）：驱动器全部台账投递点（两个
+     * [reportFindingLocked] 重载 + [reportStepSceneLocked]）都先过 [FindingGuard.allow]，
+     * 超出定长上限的只累计 [FindingGuard.suppressed]、不再写台账。lock 内使用，本身不加锁。
+     */
+    private val findingGuard = FindingGuard(cfg.findingKindCap, cfg.findingTotalCap)
+    /**
+     * 喂入线程侧的墙钟现场挂起位（obs-soakwall 死循环修复）：旧实现命中后只记台账就解除停车，
+     * 预算已耗尽 ⇒ 泵回到同一等待点再抛再记，「记一条 = 一次输入」无限循环（组长实测
+     * 28,964 行 WALL_LIMIT / episode=1）。现在首条现场经 [reportFindingLocked] 落账一次、
+     * 本字段挂起异常，泵在下一步界（[stateMachinePump]）据此把本局折成 WALL_LIMIT 终态收口。
+     */
+    private var feedWallPending: WallLimitExceeded? = null
     private val outcomeCounts = HashMap<OutcomeKind, Int>()
     val episodeLogs = ArrayList<EpisodeLog>()
+
+    // ---- 浸泡档状态（obs-soak；均在 lock 内读写，idleRng 的抽取亦经锁串行，确定可复跑） ----
+    private val idleRng = Random(cfg.soakSeed)
+    private var soakLastSubmitNs = 0L
+    private var soakPendingStackTop = ""
+    private var soakPendingAction = ""
+    private var soakStepIdx = 0
 
     private enum class Phase { BOOT, EXPLORE, DONE }
 
@@ -607,6 +801,7 @@ class ExploreDriver(
     /** 主流程：播种（引导链 / 现成快照 / 直调装配态）→ 逐局探索。阻塞至收工。 */
     fun run(): ExploreRunResult {
         sink.attach(this)
+        if (cfg.soak) sink.soak = this
         Files.createDirectories(cfg.outDir)
         // 覆盖探针先于播种挂上：引导段的 VM 执行也计入（挂卸口径见头 KDoc「E2 台账接线」）。
         out?.coverage?.attach(session.runtime)
@@ -628,31 +823,42 @@ class ExploreDriver(
                     phase = Phase.EXPLORE
                 }
             }
-            if (bootFailure == null) {
+            if (bootFailure == null && !cfg.bootOnly) {
                 // 引擎 save/load 子系统的首次走通（JIT + 类装载冷启动）不计入任何一局的墙钟预算：
                 // 播种后立即做一次 seed 自往返——take 已暖 save 半边，这里暖 load 半边。
                 // 没有这一步，第一局的 restore 冷启动成本直接吃穿 --wall-min（wallBudgetTripsOnInputLoop
                 // 首跑实锤：预算 200ms 时第二局在首个预算检查点就超时、零 push、栈空收工）。
                 SnapShots.restore(session, assembled.sandboxDir, seed ?: throw IllegalStateException("种子缺失"))
                 policy = policyProvider()
-                taskStack.addLast(
-                    EpisodeTask(
-                        snap = seed ?: throw IllegalStateException("种子缺失"),
-                        anchorState = anchor,
-                        chain = emptyList(),
-                        tried = null,
-                        branchSignature = null,
-                        depth = 0,
-                    ),
+                val rootTask = EpisodeTask(
+                    snap = seed ?: throw IllegalStateException("种子缺失"),
+                    anchorState = anchor,
+                    chain = emptyList(),
+                    tried = null,
+                    branchSignature = null,
+                    depth = 0,
                 )
-                while (episodeNo < cfg.maxEpisodes && taskStack.isNotEmpty()) {
-                    val task = taskStack.removeLast()
-                    runEpisode(task)
+                taskStack.addLast(rootTask)
+                if (cfg.soak) {
+                    // 浸泡主终止条件 = 总墙钟（[ExploreConfig.soakWallMs]）；局终后重新播种续跑。
+                    // 关掉分支入栈（onObservedLocked 经 cfg.soak 门控）→ taskStack 恒空 → 反复走 root，
+                    // 即「一条随机操作流一直玩下去」。maxEpisodes 作二次安全闸（真跑给到极大）。
+                    val deadlineNs = System.nanoTime() + cfg.soakWallMs * 1_000_000L
+                    while (episodeNo < cfg.maxEpisodes && System.nanoTime() < deadlineNs) {
+                        val task = if (taskStack.isEmpty()) rootTask else taskStack.removeLast()
+                        runEpisode(task)
+                    }
+                } else {
+                    while (episodeNo < cfg.maxEpisodes && taskStack.isNotEmpty()) {
+                        val task = taskStack.removeLast()
+                        runEpisode(task)
+                    }
                 }
             }
         } finally {
             // 探针卸下（生产零行为路径）+ 台账收口（冲洗逐步/发现台账 + 落 coverage.txt）。
             // 引导失败 / 装配后异常同样走这里：coverage.txt 落失败前已触碰的读数。
+            sink.soak = null
             out?.coverage?.detach(session.runtime)
             out?.close()
         }
@@ -667,6 +873,7 @@ class ExploreDriver(
             episodes = episodeNo,
             outcomeCounts = outcomeCounts.toMap(),
             findingsCount = findingsCount,
+            findingsSuppressed = findingGuard.suppressed,
         )
     }
 
@@ -693,7 +900,11 @@ class ExploreDriver(
             while (true) {
                 val done = synchronized(lock) {
                     if (bootFailure != null) return
-                    bootStepIdx >= recipe.steps.size && tailContainsLocked(recipe.terminal)
+                    val terminalNow = tailContainsLocked(recipe.terminal)
+                    // 浸泡档：终点子串一现身（停在带「第1日」尾屏的等待点）即播种，不等食谱耗尽——
+                    // 随机游玩的浸泡种子只需一个「进到游戏里」的落点，避免盲喂尾部步冲过头（overshoot）。
+                    // 探索档（exhaustive）沿用原口径：食谱耗尽 + 终点现身才播种（逐支全排列要跑完整链）。
+                    (bootStepIdx >= recipe.steps.size && terminalNow) || (cfg.soak && terminalNow)
                 }
                 if (done) {
                     synchronized(lock) { takeSeedLocked() }
@@ -732,7 +943,46 @@ class ExploreDriver(
         SnapShots.saveSeed(cfg.outDir, s, Cli.RAND_SEED)
         phase = Phase.EXPLORE
         episodeOver = true
+        bootTraceRow(
+            listOf(
+                "event" to "SEED",
+                "step" to bootStepIdx,
+                "systemState" to session.runtime.systemState.name,
+                "newLines" to bootNewConsoleLinesLocked().size,
+                "seed" to cfg.outDir.resolve("seed.dbg").fileName.toString(),
+            ),
+        )
+        dumpBootTraceLocked()
         err.println("explore: 引导完成，种子落盘（anchor=" + anchor?.name + "）")
+    }
+
+    /** 自上一条记账以来新落到控制台行的文本（引导台账的「本次新增屏上行」）。 */
+    private fun bootNewConsoleLinesLocked(): List<String> {
+        val lines = session.console.lines()
+        if (lines.isEmpty()) return emptyList()
+        val fresh = lines.filter { it.serial > bootLastSerial }.map { session.console.textOf(it) }
+        bootLastSerial = lines.last().serial
+        return fresh
+    }
+
+    /** 记一行引导台账（字段名固定，值截断到 [ExploreDefaults.BOOT_TRACE_TEXT_MAX]，防整屏 ASCII 图灌爆台账）。 */
+    private fun bootTraceRow(fields: List<Pair<String, Any?>>) {
+        bootTrace.add(Jsonl.obj(fields.map { (k, v) -> k to (v?.toString()?.take(ExploreDefaults.BOOT_TRACE_TEXT_MAX) ?: "") }))
+    }
+
+    /**
+     * 引导台账落盘（`<out>/boot-steps.jsonl`，全量覆盖写：一次引导一份）。
+     * 失败不掩盖主因——与现场落盘同一口径，写不进就继续报红。
+     */
+    private fun dumpBootTraceLocked() {
+        runCatching {
+            Files.createDirectories(cfg.outDir)
+            Files.writeString(
+                cfg.outDir.resolve(ExploreDefaults.BOOT_STEPS_LEDGER),
+                bootTrace.joinToString("\n", postfix = "\n"),
+                Charsets.UTF_8,
+            )
+        }
     }
 
     private fun bootFailLocked(reason: String) {
@@ -758,6 +1008,7 @@ class ExploreDriver(
                 Charsets.UTF_8,
             )
             Files.writeString(cfg.outDir.resolve("boot-fail-console.txt"), tail.joinToString("\n"), Charsets.UTF_8)
+            dumpBootTraceLocked()
             findings.onFinding(
                 "BOOT_FAIL",
                 mapOf("reason" to reason, "stepIndex" to bootStepIdx.toString()),
@@ -773,28 +1024,121 @@ class ExploreDriver(
     /** 当前引导配方（仅 Boot 计划有；其他计划在引导阶段不会走到这里）。 */
     private fun currentRecipe(): BootRecipe? = (plan as? ExplorePlan.Boot)?.recipe
 
-    /** 引导阶段在等待点上要的下一个动作（期望检查 → 按步骤喂入；耗尽 → 终点已现 = 最小推进）。 */
+    /**
+     * 引导阶段在等待点上要的下一个动作（期望检查 → 按步骤喂入；耗尽 → 终点已现 = 最小推进）。
+     *
+     * ## 任意键面不经食谱（obs-bootrecipe 修正的口径）
+     *
+     * [ExploreBoot] 头 KDoc 自 DBG6 就钉着「任意键等待点不经食谱（自动 PassAnyKey 放行，对应
+     * FLOW.md §2 里的 (Enter×N) 段）」，但本函数此前在**每一个**等待点都消费一个食谱步，并在消费前
+     * 硬性判定期望子串（[bootExpectHit]）。两条口径叠起来的后果，2026-11-01 的 boot-steps.jsonl
+     * 逐条可读：第 15 步（`1 ;; 全部覆盖`）到达的不是口上技能变更面，而是 (Enter×N) 段里
+     * `NEWGAME_VERUP` 打「游戏开始处理完成」的那个 PRINTW（anyKey=true，量到的新增屏上行逐字是
+     * 「正在匹配经验与能力等级…」+「游戏开始处理完成」）——期望门抢在 [bootActionFor] 的 anykey
+     * 宽容（「步值舍弃、后续步自会落在它该在的等待点上」）之前开火，宽容路径对任何带期望的步
+     * **永不可达**。真机取证原文（FLOW.md §2）在该步前明明写着「(Enter×N) ← 开局链：经验/能力换算、
+     * 初始处理、各角色口上UPDATE（几十个等待点）」，内置链却没有对应的填充步，于是每局必死于第 15 步。
+     *
+     * 现口径（与类 KDoc 一致，期望门只在它真正交付输入的那一面开火）：
+     * - 任意键面 + 队列面（`queueFace`）：不变，走下面的消费路径（队列面没有真 anykey 语义，
+     *   按食谱喂 0 是既有交付路径）；
+     * - 任意键面 + 当前步是 Enter 步：仍消费该步（配方作者显式写的推进步，进链、进重放、可判期望）；
+     * - 任意键面 + 当前步是取值步 / 配方已耗尽：**自动放行且不消费步、不判期望**，记一条
+     *   `ANYKEY_AUTO` 台账；累计超 [ExploreDefaults.BOOT_ANYKEY_AUTO_MAX] 判引导失败
+     *   （纯 anykey 死循环不吃步数闸，必须有闸）。
+     */
     private fun bootNextActionLocked(wp: WaitPoint, queueFace: Boolean): ExploreAction {
         val recipe = currentRecipe() ?: throw BootAbortException()
+        // 本等待点自上一条记账以来的新增屏上行：配方错位时它就是「这一面究竟是什么」的证据。
+        val fresh = bootNewConsoleLinesLocked()
+        if (wp.anyKey && !queueFace) {
+            val pending = recipe.steps.getOrNull(bootStepIdx)
+            if (pending == null || !isEnterInput(pending.input)) {
+                bootAnyKeyAuto++
+                bootTraceRow(
+                    listOf(
+                        "event" to "ANYKEY_AUTO",
+                        "step" to bootStepIdx,
+                        "pendingInput" to (pending?.input ?: ""),
+                        "pendingExpect" to (pending?.expect ?: ""),
+                        "anyKey" to true,
+                        "autoCount" to bootAnyKeyAuto,
+                        "stackTop" to wp.stackTop,
+                        "newLines" to fresh.size,
+                        "newText" to fresh.joinToString(" | "),
+                    ),
+                )
+                if (bootAnyKeyAuto > ExploreDefaults.BOOT_ANYKEY_AUTO_MAX) {
+                    bootFailLocked(
+                        "引导在任意键面自动放行超过 " + ExploreDefaults.BOOT_ANYKEY_AUTO_MAX +
+                            " 个仍未到终点「" + recipe.terminal + "」（栈顶 " + wp.stackTop + "；见 boot-steps.jsonl）",
+                    )
+                    throw BootAbortException()
+                }
+                return ExploreAction.PassAnyKey
+            }
+        }
         if (bootStepIdx < recipe.steps.size) {
             val step = recipe.steps[bootStepIdx]
-            if (step.expect.isNotEmpty() && consoleTailLocked(cfg.tailLines).none { it.contains(step.expect) }) {
+            if (!bootExpectHit(step.expect, consoleTailLocked(cfg.tailLines))) {
+                bootTraceRow(
+                    listOf(
+                        "event" to "EXPECT_MISS",
+                        "step" to (bootStepIdx + 1),
+                        "input" to step.input,
+                        "expect" to step.expect,
+                        "anyKey" to wp.anyKey,
+                        "type" to wp.request.type.name,
+                        "stackTop" to wp.stackTop,
+                        "newLines" to fresh.size,
+                        "newText" to fresh.joinToString(" | "),
+                        "tail" to consoleTailLocked(cfg.tailLines).joinToString(" | "),
+                    ),
+                )
                 bootFailLocked(
                     "引导第 " + (bootStepIdx + 1) + " 步期望子串未命中：「" + step.expect +
-                        "」（输入 " + step.input + "；屏尾无此串，见 boot-fail-console.txt）",
+                        "」（输入 " + step.input + "；屏尾无此串，见 boot-fail-console.txt / boot-steps.jsonl）",
                 )
                 throw BootAbortException()
             }
+            val action = bootActionFor(step, wp, queueFace)
             bootStepIdx++
             // 食谱步入 E2 链（原文输入 + 期望注记，与 --boot 配方语法同构；anyKey 宽容放行的
             // 步值舍弃也照记 —— 重放走同一翻译矩阵，行为一致）。
             out?.logBootStep(step.input, step.expect)
-            return bootActionFor(step, wp, queueFace)
+            bootTraceRow(
+                listOf(
+                    "event" to "STEP",
+                    "step" to bootStepIdx,
+                    "input" to step.input,
+                    "expect" to step.expect,
+                    "action" to actionLabel(action),
+                    "anyKey" to wp.anyKey,
+                    "type" to wp.request.type.name,
+                    "queueFace" to queueFace,
+                    "stackTop" to wp.stackTop,
+                    "newLines" to fresh.size,
+                    "newText" to fresh.joinToString(" | "),
+                ),
+            )
+            return action
         }
         // 食谱耗尽：终点已在尾 → 最小推进（anykey 放行 / INT 喂 0 / STR 喂空串），种子在下一步界打点。
         if (consoleTailLocked(cfg.tailLines).any { it.contains(recipe.terminal) }) {
             return defaultAdvance(wp)
         }
+        bootTraceRow(
+            listOf(
+                "event" to "EXHAUSTED_OFF_TERMINAL",
+                "step" to bootStepIdx,
+                "anyKey" to wp.anyKey,
+                "type" to wp.request.type.name,
+                "stackTop" to wp.stackTop,
+                "newLines" to fresh.size,
+                "newText" to fresh.joinToString(" | "),
+                "tail" to consoleTailLocked(cfg.tailLines).joinToString(" | "),
+            ),
+        )
         bootFailLocked("食谱耗尽于非终点等待点（终点「" + recipe.terminal + "」未现身；type=" + wp.request.type.name + "）")
         throw BootAbortException()
     }
@@ -807,7 +1151,7 @@ class ExploreDriver(
         if (wp.anyKey && !queueFace) {
             return ExploreAction.PassAnyKey
         }
-        if (raw.isEmpty() || raw.equals("Enter", ignoreCase = true)) {
+        if (isEnterInput(raw)) {
             if (queueFace || !wp.anyKey) {
                 // 引导食谱的 Enter 步落在值等待面上（含队列面）：喂 0 = ASK_YN 的「是」惯例（FLOW.md §0.1）。
                 return ExploreAction.FeedInt(0L)
@@ -848,6 +1192,14 @@ class ExploreDriver(
             prevWasFree = false
             episodeOver = false
             forcedAbandon = false
+            feedWallPending = null
+            if (cfg.soak) {
+                // 新局：提交计时清零（首步无「上一步」可结算），步序重计。
+                soakLastSubmitNs = 0L
+                soakPendingStackTop = ""
+                soakPendingAction = ""
+                soakStepIdx = 0
+            }
         }
         err.println(
             "explore: episode " + episodeNo + " depth=" + task.depth +
@@ -900,8 +1252,31 @@ class ExploreDriver(
             reportFindingLocked("WALL_LIMIT", t)
             recordTerminalLocked(OutcomeKind.WALL_LIMIT, t, "墙钟超限")
         } catch (t: com.eratw.port.core.code.StepLimitExceeded) {
-            reportFindingLocked("STEP_LIMIT", t)
-            recordTerminalLocked(OutcomeKind.STEP_LIMIT, t, "步数超限")
+            // 同异常两种闸：elapsedMs>=0 = 单段落墙钟闸（--step-wall-ms）命中，-1 = 步数闸。
+            // 前者是 obs-midhang 的定标入口：这一段落从未跨过让出点（没有输入等待、没有 AWAIT），
+            // 纯计算跑到超时点被中断，抛点自带函数名/行号/pc/调用链/已执行步数 = 肇事现场。
+            // 局终态类别沿用 STEP_LIMIT（既有 OutcomeKind 枚举与 findingKindOf 映射不动）；
+            // 台账里靠发现类别字符串与现场字段区分两种闸。
+            if (isSegmentTimeGate(t)) {
+                reportStepSceneLocked("STEP_WALL_LIMIT", t)
+                recordTerminalLocked(OutcomeKind.STEP_LIMIT, t, "单步墙钟超限 " + t.elapsedMs + "ms")
+            } else {
+                reportFindingLocked("STEP_LIMIT", t)
+                recordTerminalLocked(OutcomeKind.STEP_LIMIT, t, "步数超限")
+            }
+        } catch (t: OutOfMemoryError) {
+            // 堆贴顶 OOM（obs-soak512）：真机上报同相位（used=510/512MiB 时平时 2ms 的页面跑到
+            // 一分钟），桌面 3g 挡从来没进过这一相位——512m 挡浸泡里 OOM 就是**被观察对象本身**，
+            // 不许吞、不许顺手调大挡位蒙混。现场三份：soak.txt 的堆 OOM 专节（meter.oom）、
+            // findings.jsonl（HEAP_OOM）、本局终态 CRASH（在飞步仍进耗时台账，outcome=CRASH）。
+            // 后两步各自 runCatching：OOM 之后连「记 OOM」的分配都可能再被拒——最后一步
+            // 无条件 episodeOver=true，保证喂入线程能收口、浸泡循环能续跑（挡位真贴顶时
+            // 下一局的 restore 可能再 OOM，那也照样有现场，不静默挂死）。
+            val scene = synchronized(lock) { soakOomSceneLocked(t) }
+            meter?.oom(scene)
+            runCatching { reportFindingLocked("HEAP_OOM", t) }
+            runCatching { recordTerminalLocked(OutcomeKind.CRASH, t, "堆 OOM：" + (t.message ?: t.javaClass.name)) }
+            synchronized(lock) { episodeOver = true }
         } catch (t: Throwable) {
             reportFindingLocked("CRASH", t)
             recordTerminalLocked(OutcomeKind.CRASH, t, "异常：" + t.javaClass.simpleName)
@@ -914,6 +1289,13 @@ class ExploreDriver(
         while (true) {
             val step = session.resumeSystem()
             synchronized(lock) {
+                // 喂入侧墙钟收口（obs-soakwall）：喂入线程已记现场并挂起异常，本步界即终态——
+                // 不再重进等待点、不再重复记同一类 finding。
+                feedWallPending?.let { t ->
+                    recordTerminalLocked(OutcomeKind.WALL_LIMIT, t, "喂入侧墙钟超限（本局收口）")
+                    feedWallPending = null
+                    return
+                }
                 if (session.runtime.quitRequested) {
                     recordTerminalLocked(OutcomeKind.EPISODE_DONE, null, "脚本 QUIT")
                     return
@@ -954,6 +1336,8 @@ class ExploreDriver(
             // InputRequest）。块外声明：submit 后的「等消费」自旋要读它。
             var decidedAwait: InputRequest? = null
             var skipTick = false
+            var armedDrain = false
+            var soakFeeder: Pair<WaitPoint, ExploreAction>? = null
             try {
                 synchronized(lock) {
                     if (episodeOver) return
@@ -961,20 +1345,42 @@ class ExploreDriver(
                     if (awaitingNow == null) skipTick = true else {
                     val request = awaitingNow
                     decidedAwait = request
+                    if (feedWallPending != null) {
+                        // 墙钟现场已挂起、等泵在下一步界收口：本等待点不再代查预算、不再记台账，
+                        // 只解除停车（obs-soakwall 死循环修复的第二层——连「再抛再记」的入口都拆掉）。
+                        armedDrain = true
+                    } else {
                     // 停车侧的墙钟兜底：队列等待不经 sink 预算，由喂入线程代查（超限抛
                     // WallLimitExceeded → 记发现 → 解除停车后由泵折成 WALL_LIMIT 终态）。
                     budget?.check()
                     closeOutPendingLocked(OutcomeKind.ADVANCED)
                     val wp = WaitPoint(
                         request, anyKey = false, buttons = collector.drain(),
-                        consoleTail = consoleTailLocked(cfg.tailLines), stackTop = "",
+                        consoleTail = consoleTailLocked(cfg.tailLines), stackTop = queueFaceStackTopLocked(),
                     )
                     val action = decideLocked(wp, queueFace = true)
                     onObservedLocked(wp, action)
-                    feederSubmit(q, action)
+                    if (cfg.soak) {
+                        // 浸泡档：交付前停顿要放到锁外做（不阻塞泵线程），此刻先暂存决定，
+                        // 出锁后再 idle + markSubmit + feederSubmit（非浸泡沿用原「锁内直发」）。
+                        soakFeeder = wp to action
+                    } else {
+                        feederSubmit(q, action)
+                    }
+                    }
                     }
                 }
                 if (skipTick) continue
+                if (armedDrain) {
+                    // 收口等待期的停车解除（值 0 与既有解除面同形）；不再进决策/预算/台账路径。
+                    runCatching { q.submitInt(0L) }
+                }
+                soakFeeder?.let { (wp, action) ->
+                    val ms = idleMs()
+                    if (ms > 0L) Thread.sleep(ms)
+                    markSubmit(wp, action)
+                    feederSubmit(q, action)
+                }
                 // 同一次停车只决策一次：submit 后等「同一个 request」的等待被消费
                 // （QueueInputSink.waitInput 的 finally 把 awaiting 清零，QueueInputSink.kt:336-340）——
                 // 否则喂入线程会在消费完成前的短暂窗口里把同一等待点再决策一遍（二次喂入 /
@@ -993,7 +1399,17 @@ class ExploreDriver(
                 synchronized(lock) { forcedAbandon = true }
                 runCatching { q.submitInt(0L) }
             } catch (t: WallLimitExceeded) {
-                synchronized(lock) { reportFindingLocked("WALL_LIMIT", t) }
+                // 死循环修复（obs-soakwall 任务一）：旧路径只记一条发现就解除停车、不收口本局——
+                // 预算已耗尽 ⇒ 泵每回到该等待点都再抛再记（组长实测 --soak-min 1：findings.jsonl
+                // 8 分钟 42 MB / 28,964 行全 WALL_LIMIT 全 episode=1，相邻 0～37 ms）。
+                // 现口径：单局墙钟耗尽 = 这一局终态——现场（仍过 FindingGuard 闸）只挂一条进
+                // feedWallPending，泵在下一步界折成 WALL_LIMIT 终态；后续同局再停车只放行不记录。
+                synchronized(lock) {
+                    if (feedWallPending == null && !episodeOver) {
+                        reportFindingLocked("WALL_LIMIT", t)
+                        feedWallPending = t
+                    }
+                }
                 runCatching { q.submitInt(0L) }
             } catch (t: Throwable) {
                 synchronized(lock) { reportFindingLocked("FEEDER_ERROR", t) }
@@ -1013,6 +1429,32 @@ class ExploreDriver(
         }
     }
 
+    /**
+     * 队列面（喂入线程）的栈顶读数（fix-longsoak 补「feeder 构造的 WaitPoint 恒空栈顶」缺口）。
+     *
+     * 口径分两层：
+     * 1. **活帧优先**：与 sink 面同源 [VmStackReader]（funcStack/depth/lastPc 三件套，工具侧反射
+     *    的理由见本文件头 KDoc）——若某个队列等待真的挂在中途 ERB 帧上，这里直接给「函数名:pc」。
+     * 2. **帧已退卷 ⇒ 页面级定名**：现状的系统队列等待全部发生在 BeginFlow 的 Kotlin 步里、
+     *    相邻两次 ERB 调用**之间**（ConsoleBeginHost.kt:86-92 的 await* 全系经
+     *    waitSystemInteger（ConsoleBeginHost.kt:130），典型如 stepTrainShowUserCom
+     *    （BeginFlow.kt:957-985）：显示函数已在**上一个步界**执行完毕返回，vm 的 run 收尾时
+     *    unwindScopes 把 depth 收成 -1——Vm.kt:2291-2296 的「无帧 = null」承诺与
+     *    Vm.kt:2307-2311 的 KDoc 就是这条），此刻**不存在**「当前最内层 ERB 帧」可读，
+     *    硬报函数名会是脑补。退回「state:状态机态名」：态名本身就是页面名
+     *    （Train_CallShowUserCom / Shop_CallShowShop 即此），慢页至少定名到页；
+     *    core 侧若要开放「本页由哪些 ERB 函数渲染过」的读数（状态机最近执行函数序列），
+     *    属产品面改动，写进交付报告的需组长接线，本车道不动 core-vm。
+     *
+     * 只读取数，不改任何执行语义。窗口说明：submit 后的「等消费」自旋期间存在读到**陈旧**
+     * awaiting 的竞态（泵已复跑），[VmStackReader.read] 的 runCatching 保证读数尽力而为、
+     * 撕裂不抛；持锁调用（feederBody 的决策块内）。
+     */
+    private fun queueFaceStackTopLocked(): String {
+        val live = VmStackReader.read(session.runtime, assembled.metadata)
+        return if (live.isNotEmpty()) live else "state:" + session.runtime.systemState.name
+    }
+
     // ------------------------------------------------------------------
     // 等待点决策（sink 回调 + 喂入线程共用；调用方持锁）
     // ------------------------------------------------------------------
@@ -1028,6 +1470,27 @@ class ExploreDriver(
     override fun decide(wp: WaitPoint): ExploreAction = synchronized(lock) { decideLocked(wp, queueFace = false) }
 
     override fun onObserved(wp: WaitPoint, action: ExploreAction) = synchronized(lock) { onObservedLocked(wp, action) }
+
+    // ---- 浸泡档 SoakTuner 实现（obs-soak）：交付前停顿 + 记录提交时刻；非浸泡纯透传 ----
+
+    /** 本步「玩家停顿」毫秒：[idleMinMs, idleMaxMs] 均匀随机（含长间隔）；非浸泡或未接线返 0。 */
+    override fun idleMs(): Long = synchronized(lock) {
+        if (!cfg.soak || meter == null) return 0L
+        val lo = cfg.idleMinMs.coerceAtLeast(0L)
+        val hi = cfg.idleMaxMs.coerceAtLeast(lo)
+        val span = hi - lo
+        if (span <= 0L) lo else lo + idleRng.nextLong(span + 1)
+    }
+
+    /** 停顿结束、交付前：钉本步现场（函数名:pc / 动作）+ 打提交时刻，等下一步到达时结算耗时。 */
+    override fun markSubmit(wp: WaitPoint, action: ExploreAction) {
+        synchronized(lock) {
+            if (!cfg.soak || meter == null) return
+            soakPendingStackTop = wp.stackTop
+            soakPendingAction = actionLabel(action)
+            soakLastSubmitNs = System.nanoTime()
+        }
+    }
 
     private fun decideLocked(wp: WaitPoint, queueFace: Boolean): ExploreAction {
         if (phase == Phase.BOOT) return bootNextActionLocked(wp, queueFace)
@@ -1104,7 +1567,9 @@ class ExploreDriver(
         val free = prevWasFree
         if (free && action !is ExploreAction.Abandon) {
             // 分支入栈：候选数多于一个、深度未满、且动作即将真实执行（Abandon 不执行、不入链）。
+            // 浸泡档关掉分支枚举（一条随机操作流一直玩，不回退换支），故 cfg.soak 时不 push。
             if (
+                !cfg.soak &&
                 candidateCount(wp) > 1 &&
                 task.depth + 1 <= cfg.maxDepth
             ) {
@@ -1126,6 +1591,7 @@ class ExploreDriver(
 
     /** 上一动作的结局回喂（onOutcome 只回喂策略的自由决定，重放段不喂）。 */
     private fun closeOutPendingLocked(kind: OutcomeKind) {
+        if (cfg.soak) recordSoakStepLocked(kind)
         val wp = prevWp
         val act = prevAction
         prevWp = null
@@ -1141,6 +1607,50 @@ class ExploreDriver(
         runCatching { policy?.onOutcome(wp, act, kind) }
     }
 
+    /**
+     * 浸泡档：结算「上一提交步」的「提交 → 到点」耗时（此刻正是下一步到达 / 局终态揭晓）。
+     * 只认已 markSubmit 过的步（soakLastSubmitNs!=0），首步/无在飞步跳过；耗时不含停顿
+     * （停顿在 markSubmit 之前完成，markSubmit 打的是停顿后、交付前的时刻）。
+     */
+    private fun recordSoakStepLocked(kind: OutcomeKind) {
+        val m = meter ?: return
+        if (soakLastSubmitNs == 0L) return
+        val elapsedMs = (System.nanoTime() - soakLastSubmitNs) / 1_000_000L
+        m.record(
+            SoakMeter.Sample(
+                elapsedMs = elapsedMs,
+                episode = episodeNo.toLong(),
+                stackTop = soakPendingStackTop,
+                action = soakPendingAction,
+                stepIndex = soakStepIdx,
+                outcome = kind.name,
+                // obs-soak512：结算时刻（= 本步刚跑完、下一步到点/局终态揭晓）的 live 堆水位。
+                heapUsedMi = heapUsedMiNow(),
+            ),
+        )
+        soakStepIdx++
+        soakLastSubmitNs = 0L
+    }
+
+    /**
+     * 堆 OOM 现场（obs-soak512）：泵线程被 OutOfMemoryError 打断时、在飞步还挂在
+     * soak 槽位上——此刻取「提交→OOM」的段耗时与当时的 live 堆，落在 [SoakMeter.oom]
+     * 与 findings.jsonl（类别 HEAP_OOM）两侧；随后的 [recordTerminalLocked] 收口仍会把
+     * 这一步作为样本记进耗时台账（outcome=CRASH），两表互不混。持锁调用。
+     */
+    private fun soakOomSceneLocked(t: OutOfMemoryError): HangScene = HangScene(
+        elapsedMs = if (soakLastSubmitNs != 0L) (System.nanoTime() - soakLastSubmitNs) / 1_000_000L else -1L,
+        episode = episodeNo.toLong(),
+        stepIndex = soakStepIdx,
+        action = soakPendingAction,
+        scene = linkedMapOf(
+            "message" to (t.message ?: t.javaClass.name),
+            "heapUsedMi" to heapUsedMiNow().toString(),
+            "heapCeilingMi" to heapCeilingMiNow().toString(),
+            "stackTop" to soakPendingStackTop,
+        ),
+    )
+
     /** 局终态：最后一动作的结局 = 局终态类别；记账、日志、旗标一次收口（异常细节由 reportFindingLocked 落）。 */
     private fun recordTerminalLocked(kind: OutcomeKind, t: Throwable?, note: String) {
         closeOutPendingLocked(kind)
@@ -1153,8 +1663,59 @@ class ExploreDriver(
         )
     }
 
+    /**
+     * 单步墙钟闸（`--step-wall-ms`）命中时的**函数级现场**投递（obs-midhang）。
+     *
+     * [com.eratw.port.core.code.StepLimitExceeded] 由 Vm 在抛点就地构造（Vm.kt:616 的
+     * `timeLimitAt`：`funcName`/`line`/`pc`/`callChain`/`steps`/`elapsedMs` 全带上），
+     * 本函数只做搬运：findings.jsonl 一条 `STEP_WALL_LIMIT`（外→内调用链 + 最内层函数 +
+     * `文件:行号` + 该段实际指令数 + 段墙钟毫秒）+ 浸泡台账的挂起专节。
+     * 局终态类别仍走 [OutcomeKind.STEP_LIMIT]（枚举与 findingKindOf 映射不动，见 pumpBody 注释）。
+     */
+    private fun reportStepSceneLocked(kind: String, t: com.eratw.port.core.code.StepLimitExceeded) {
+        if (!findingAllowedLocked(kind)) return
+        findingsCount++
+        val tail = consoleTailLocked(cfg.tailLines)
+        val chain = episodeActions.map { actionLabel(it) }
+        val scene = stepScene(t)
+        val detail = linkedMapOf(
+            "episode" to episodeNo.toString(),
+            "exception" to (t.javaClass.name + ": " + (t.message ?: "")),
+            "anchor" to (anchor?.name ?: ""),
+            "systemState" to session.runtime.systemState.name,
+            "chain" to chain.joinToString(" -> "),
+        )
+        detail.putAll(scene)
+        runCatching { findings.onFinding(kind, detail, tail, chain) }
+        meter?.hang(HangScene(elapsedMs = t.elapsedMs, episode = episodeNo.toLong(),
+            stepIndex = soakStepIdx, action = soakPendingAction, scene = scene))
+        err.println("explore: 发现 " + kind + " —— " + (t.message ?: ""))
+    }
+
+    /** 现场字段（键名固定，findings.jsonl 与 soak.txt 共用；值取异常自带、不事后反射猜）。 */
+    private fun stepScene(t: com.eratw.port.core.code.StepLimitExceeded): LinkedHashMap<String, String> =
+        stepLimitScene(t, cfg.stepWallMs)
+
+    /**
+     * 护栏闸（obs-soakwall）：台账投递前统一过 [FindingGuard.allow]；被抑制时不写台账、
+     * 不占 [findingsCount]，只在某个 kind **首次**被压静音时打一行 stderr（让「台账不涨」
+     * 可被读成「被抑制」而不是「现场已清」）。持锁调用。
+     */
+    private fun findingAllowedLocked(kind: String): Boolean {
+        val pass = findingGuard.allow(kind)
+        if (!pass.delivered && pass.justMuted) {
+            err.println(
+                "explore: 发现类别 " + kind + " 达单种放行上限（kindCap=" + cfg.findingKindCap +
+                    " / totalCap=" + cfg.findingTotalCap + "），后续同类抑制不入台账" +
+                    "（累计抑制 " + findingGuard.suppressed + " 条）",
+            )
+        }
+        return pass.delivered
+    }
+
     /** 发现落盘（细节 + 完整输入链 + 现场控制台尾； FindingSink 由外层接 E2 适配器或最小 sink）。 */
     private fun reportFindingLocked(kind: String, t: Throwable) {
+        if (!findingAllowedLocked(kind)) return
         findingsCount++
         val tail = consoleTailLocked(cfg.tailLines)
         val chain = episodeActions.map { actionLabel(it) }
@@ -1170,6 +1731,7 @@ class ExploreDriver(
     }
 
     private fun reportFindingLocked(kind: String, message: String) {
+        if (!findingAllowedLocked(kind)) return
         findingsCount++
         val detail = linkedMapOf(
             "episode" to episodeNo.toString(),

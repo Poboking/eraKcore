@@ -7,6 +7,7 @@ import com.eratw.port.core.code.ErbcFormat.StmtTag
 import com.eratw.port.core.code.ErbcFormat.WireEnum
 import com.eratw.port.core.expr.Binary
 import com.eratw.port.core.expr.Expr
+import com.eratw.port.core.expr.FloatLiteral
 import com.eratw.port.core.expr.FormConversion
 import com.eratw.port.core.expr.FormPart
 import com.eratw.port.core.expr.FormStringTerm
@@ -179,6 +180,15 @@ object ErbcWriter {
         /** 段 3 记录区总字节数（侧车的粗校验位）。 */
         private var stmtRecordBytes: Int = 0
 
+        /**
+         * **本段**（窗口内）指令条数。
+         *
+         * `Program.instructionCount` 是**绝对**口径（`instructionBase + 本段条数`，R7-L1），
+         * 而 `.erbc` 只装本段 ⇒ 写侧一切「长度自洽 / 区间判界」都必须用它，不能用绝对计数。
+         * 无基线时两者逐位相同（`instructionBase == 0`），既有路径一个字节都不变。
+         */
+        private val segmentInstructions: Int = program.codeSource.wordCount / Instruction.WORDS
+
         /** 与 [build] 同一次编码，额外带回语句记录偏移表。 */
         fun buildEncoded(): ErbcEncoded = ErbcEncoded(build(), stmtRecordOffsets, stmtRecordBytes)
 
@@ -188,15 +198,23 @@ object ErbcWriter {
                     "不支持的容器版本 $version（写侧只产出 v${ErbcFormat.VERSION_1}/v${ErbcFormat.VERSION_2}）",
                 )
             }
-            if (program.instructionCount == 0) throw ErbcEncodeException("空程序：指令流长度必须 > 0")
+            if (segmentInstructions == 0) throw ErbcEncodeException("空程序：本段指令流长度必须 > 0")
+            // entryFunction 是 functions 的**表内序号**（CodeBuilder.build 已按 functionBase 折回，
+            // 容器里写的也是序号），故这里仍按 indices 判；消息里补报基线与绝对下标，便于对照补丁头。
             if (program.entryFunction !in program.functions.indices) {
-                throw ErbcEncodeException("入口函数下标越界: ${program.entryFunction}")
+                throw ErbcEncodeException(
+                    "入口函数下标越界: 表内序号 ${program.entryFunction}" +
+                        "（本段函数表 ${program.functions.size} 个，functionBase=${program.functionBase}，" +
+                        "绝对下标 ${program.functionBase + program.entryFunction}）",
+                )
             }
             // 与 ErbcReader 的行表判界对称：reader 只认「行号表长度 == 指令条数」，
-            // 写侧不先拦就会产出自己读不回的产物。
-            if (options.includeLines && program.lines.size != program.instructionCount) {
+            // 写侧不先拦就会产出自己读不回的产物。比的是**本段**条数：Program.lines 只有本段条目。
+            if (options.includeLines && program.lines.size != segmentInstructions) {
                 throw ErbcEncodeException(
-                    "行号表长度(${program.lines.size})与指令条数(${program.instructionCount})不符",
+                    "行号表长度(${program.lines.size})与本段指令条数($segmentInstructions)不符" +
+                        "（instructionBase=${program.instructionBase}，" +
+                        "绝对指令数=${program.instructionCount}）",
                 )
             }
             if (version < ErbcFormat.VERSION_2) rejectCallArgMetadataForV1()
@@ -292,29 +310,34 @@ object ErbcWriter {
         }
 
         private fun writeStrings() {
-            val n = program.stringCount
+            // 计数与取值都按**本段**：stringCount 是绝对口径，池本体只持有窗口内条目，
+            // 从 stringBase 起逐条取（绝对下标直取，池内部按 base 折回）。
+            val from = program.stringBase
+            val n = program.stringCount - from
             if (n == 0) return
             val table = ErbcStringTable()
             val out = ErbcSink(64)
             // 逐条重新 intern：内容相同的字符串在源池里本就不可能重复（addString 按值去重），
             // 因此 intern 的追加序 == 原池下标序，下标 1:1 保留。
-            for (i in 0 until n) table.intern(program.string(i))
+            for (i in 0 until n) table.intern(program.string(from + i))
             table.writeTo(out)
             bodies[ErbcFormat.SECTION_STRINGS] = out
         }
 
         private fun writeConstants() {
-            val n = program.constantCount
+            val from = program.longBase
+            val n = program.constantCount - from
             if (n == 0) return
             val out = ErbcSink(8 + n * 8)
             out.u32(n)
             out.u32(0) // doubleCount：v1 恒 0（ConstantPool 只有 Long 池；规约 §5.2）
-            for (i in 0 until n) out.i64(program.constant(i))
+            for (i in 0 until n) out.i64(program.constant(from + i))
             bodies[ErbcFormat.SECTION_CONSTANTS] = out
         }
 
         private fun writeExpressions() {
-            val n = program.exprCount
+            val from = program.exprBase
+            val n = program.exprCount - from
             if (n > 0 && !options.includeExpressions) {
                 throw ErbcEncodeException("选项声明不带表达式池，但程序有 $n 条表达式（_EVAL_* 会全部失效）")
             }
@@ -322,7 +345,7 @@ object ErbcWriter {
             val sink = ErbcSink(128)
             val rootIdx = IntArray(n)
             val arena = RecordSink(ErbcStringTable(), sink)
-            for (i in 0 until n) rootIdx[i] = arena.intern(program.expr(i))
+            for (i in 0 until n) rootIdx[i] = arena.intern(program.expr(from + i))
             val table = ErbcSink(32)
             arena.strings.writeTo(table)
             val out = ErbcSink(8 + table.size + sink.size + 4 * n)
@@ -335,7 +358,8 @@ object ErbcWriter {
         }
 
         private fun writeStatements() {
-            val n = program.statementCount
+            val from = program.statementBase
+            val n = program.statementCount - from
             if (n > 0 && !options.includeStatements) {
                 throw ErbcEncodeException(
                     "选项声明不带语句池，但程序有 $n 条语句（marker 的 a 会全部越界；" +
@@ -351,7 +375,7 @@ object ErbcWriter {
                 // 偏移 = 本条记录写入前的位置（相对记录区起点）：装载期惰性语句池直接用它，
                 // 不必再逐条反序列化一遍（2026-10-23 装载提速，见 StmtOffsetSidecar）。
                 offsets[i] = entries.size
-                arena.writeStatement(entries, program.statement(i))
+                arena.writeStatement(entries, program.statement(from + i))
             }
             stmtRecordOffsets = offsets
             stmtRecordBytes = entries.size
@@ -373,15 +397,18 @@ object ErbcWriter {
             if (program.globalSlots < 0) {
                 throw ErbcEncodeException("全局槽数为负: ${program.globalSlots}")
             }
-            val instructionCount = program.instructionCount
+            // entryPc / 标签 pc 都是**绝对** pc（CodeBuilder 的 emit 返回绝对口径），故判界区间
+            // 是本段窗口 [instructionBase, instructionCount)，而不是 [0, 本段条数)。
+            val pcFrom = program.instructionBase
+            val pcUntil = program.instructionCount
             val seenNames = HashSet<String>(funcs.size)
             val table = ErbcStringTable()
             val rec = ErbcSink(64)
             for (f in funcs) {
                 if (!seenNames.add(f.name)) throw ErbcEncodeException("函数重复声明: ${f.name}")
-                if (f.entryPc !in 0 until instructionCount) {
+                if (f.entryPc !in pcFrom until pcUntil) {
                     throw ErbcEncodeException(
-                        "函数 ${f.name} 的 entryPc=${f.entryPc} 越界（指令数 $instructionCount）",
+                        "函数 ${f.name} 的 entryPc=${f.entryPc} 越界（本段绝对 pc 区间 [$pcFrom, $pcUntil)）",
                     )
                 }
                 if (f.arity < 0 || f.slotCount < 0) {
@@ -393,9 +420,10 @@ object ErbcWriter {
                     throw ErbcEncodeException("函数 ${f.name} 的标签平行表长度不一致")
                 }
                 for (i in f.labelPcs.indices) {
-                    if (f.labelPcs[i] !in 0 until instructionCount) {
+                    if (f.labelPcs[i] !in pcFrom until pcUntil) {
                         throw ErbcEncodeException(
-                            "函数 ${f.name} 的标签 \$${f.labelNames[i]} 的 pc=${f.labelPcs[i]} 越界（指令数 $instructionCount）",
+                            "函数 ${f.name} 的标签 \$${f.labelNames[i]} 的 pc=${f.labelPcs[i]} 越界" +
+                                "（本段绝对 pc 区间 [$pcFrom, $pcUntil)）",
                         )
                     }
                 }
@@ -423,9 +451,17 @@ object ErbcWriter {
         }
 
         private fun writeCode() {
-            val out = ErbcSink(4 + program.code.size * 4)
-            out.u32(program.instructionCount)
-            for (w in program.code) out.u32(w)
+            // 段头声明的条数必须是**本段**条数：产物是「一段合法 .erbc」，基线只进补丁头。
+            val code = program.code
+            if (code.size != segmentInstructions * Instruction.WORDS) {
+                throw ErbcEncodeException(
+                    "本段指令字数(${code.size})与本段条数($segmentInstructions) × ${Instruction.WORDS} 不符：" +
+                        "Program.code 只能是窗口内的字（带基线时不含 base 段）",
+                )
+            }
+            val out = ErbcSink(4 + code.size * 4)
+            out.u32(segmentInstructions)
+            for (w in code) out.u32(w)
             bodies[ErbcFormat.SECTION_CODE] = out
         }
 
@@ -453,9 +489,14 @@ object ErbcWriter {
             val names = ErbcStringTable()
             val rec = ErbcSink(64)
             var totalArgs = 0
+            // 调用点 pc 是**绝对** pc（CodeBuilder.declareCallArgs 收的就是 emit 的返回值）。
+            val pcFrom = program.instructionBase
+            val pcUntil = program.instructionCount
             for ((pc, rawArgs) in sites) {
-                if (pc < 0 || pc >= program.instructionCount) {
-                    throw ErbcEncodeException("调用点 pc=$pc 越界（指令数 ${program.instructionCount}）")
+                if (pc < pcFrom || pc >= pcUntil) {
+                    throw ErbcEncodeException(
+                        "调用点 pc=$pc 越界（本段绝对 pc 区间 [$pcFrom, $pcUntil)）",
+                    )
                 }
                 if (rawArgs.isEmpty()) {
                     throw ErbcEncodeException("调用点 pc=$pc 的实参表为空（v2 只登记非空表，规约 §5.8）")
@@ -602,8 +643,11 @@ private class RecordSink(
     /** 期望 VarRef 的字段（`SpSetArgument.dest` 之类在类型上就是 VarRef，无需运行时判断）。 */
     fun ref(e: VarRef): Int = intern(e)
 
-    private fun operandTypeWire(t: OperandType): Int =
-        if (t == OperandType.INT) WireEnum.OPERAND_INT else WireEnum.OPERAND_STR
+    private fun operandTypeWire(t: OperandType): Int = when (t) {
+        OperandType.INT -> WireEnum.OPERAND_INT
+        OperandType.STR -> WireEnum.OPERAND_STR
+        OperandType.FLOAT -> WireEnum.OPERAND_FLOAT
+    }
 
     private fun operatorWire(op: com.eratw.port.core.expr.OperatorCode): Int = strings.intern(op.name)
 
@@ -711,6 +755,13 @@ private class RecordSink(
             is StrLiteral -> {
                 out.u8(ExprTag.STR_LITERAL)
                 out.u32(str(e.value))
+                pos(out, e)
+            }
+
+            is FloatLiteral -> {
+                // 8 字节 IEEE-754 raw bits（与 SpTimesArgument / StrDoubleArgument 同法）。
+                out.u8(ExprTag.FLOAT_LITERAL)
+                out.f64(e.value)
                 pos(out, e)
             }
 

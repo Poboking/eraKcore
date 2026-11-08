@@ -14,9 +14,10 @@ import kotlin.system.exitProcess
  *   不发明第三套名字）。
  * - 退出码：`0` = 命令成功（call/trace = PASS；where = 已读到现场或无错误记录；
  *   sweep/ledger/disasm/var/vars = 正常完成）；`1` = 用法错误或装配失败；`2` = 目标不存在
- *   （call/trace 的 NOT_FOUND、var 的未定义变量）；`3` = 运行期脚本错误（call/trace 的
- *   CODEEE / STEP_LIMIT / STACK_OVERFLOW / WALL_LIMIT / ERROR）。sweep 的失败**不是**工具错误
- *   —— 挖虫结果全部落 `--out`，进程退出码恒 0。
+ *   （call/trace 的 NOT_FOUND、var 的未定义变量；snapshot validate/expand/diff = 快照主文件缺失）；
+ *   `3` = 运行期脚本错误（call/trace 的 CODEEE / STEP_LIMIT / STACK_OVERFLOW / WALL_LIMIT / ERROR）
+ *   或快照分析 INVALID（sidecar 不可解析 / schema 违规、二进制容器版本 ≠ 1808）。sweep 的失败
+ *   **不是**工具错误 —— 挖虫结果全部落 `--out`，进程退出码恒 0。
  * - 输出给人读也给脚本读：机器可断言的字段用 `key=value` 行，人看的补充段（控制台尾、
  *   反汇编正文）跟在 `---` 分隔行之后。
  * - **语料只读铁律的落地点在 [Assembler]**：存档层写侧全部重定向到临时沙箱目录，
@@ -73,6 +74,15 @@ object Cli {
   --game <目录>     游戏根（ERB 的上一级，含 CSV / emuera.config）；缺省读 ERATW_GAMEDIR
   --work <目录>     状态目录（call 落 last-error.json，where 读它）；缺省 <系统临时目录>/eratw-vmdbg
   --steps N         单次 run 步数闸（VmConfig.maxStepsPerRun）；call/trace 缺省 20000000，sweep 缺省 2000000
+  --step-wall-ms N  单段落墙钟闸（VmConfig.maxRunMillis，段落 = 相邻两次让出点之间）；缺省 0 = 关闭。
+                    >0 时「一次提交后不回等待点」的纯计算挂起会在超时点被中断，抛点函数名/行号/pc/
+                    调用链随 StepLimitExceeded(elapsedMs>=0) 进台账（与 --steps 的步数闸互不顶替）
+  --compat-load     兼容装载档（obs-compat512）：loadMapped(compat = true)（解码期去重/校验串行）
+                    + 照产品侧逢段必收（每个解码分段 mark 一次全量 GC，侧车/会话交界各一次）。
+                    缺省关 = 单参 loadMapped、无 mark、无额外 GC（与改前逐字相同）
+  --load-precheck   装载前打一行 estimateHeap 读数（requiredBytes/requiredMiB/maxMemoryBytes/
+                    maxMemoryMiB/sufficient/artifactBytes/metaBytes/instructions），
+                    同时自证 -Xmx 挡位真的生效（512m ⇒ maxMemoryBytes=536870912）
 
 子命令:
   call <函数名> [--args 0,1,...] [--steps N]
@@ -112,15 +122,34 @@ object Cli {
       游戏根零接触），主文件 = 游戏自身 save 格式；sidecar（<主文件>.json）记 RNG 状态 /
       console 尾 200 行 / funcStack-depth 反射快照（只记录）/ commit / randSeed / 墙钟。
       缺省 --out <work>/snapshot.dbg。
+  snapshot validate [<快照>]
+      离线校验（MODERN-T3 R1）：主文件容器（二进制魔数/版本 1808/校验表；文本首行整数；
+      未知只告警）+ sidecar schema（必需字段/类型/rngState 长度 0 或 625）。不装配会话、
+      不读 --erbc/--game。退出码 0 PASS / 2 主文件缺失 / 3 INVALID；sidecar 缺席只告警。
+  snapshot expand [<快照>] [--out <文件>]
+      离线可读化：主文件字节数/sha256/容器 + sidecar 全部字段 + funcStack（栈顶在前）
+      与 console 尾段；rngState 给 head 前 8 个与整态 sha256。变量值必须装配会话 ——
+      输出 vars=not-expanded(offline; use restore)。--out 给了只打印 status/out 一行。
+  snapshot diff <快照a> <快照b>
+      两份快照对比：主文件 sha256/字节数/容器、sidecar 逐字段 same、funcStack 与
+      consoleTail 首个差异下标、rngState 差异计数；末行 same=<bool>。报告恒产出，
+      same=false 仍退出 0；主文件缺失 2、sidecar 不可解析 3。
   restore <快照>
       新装配会话（同 randSeed）后还原：变量面走引擎 LOADDATA 全链（读侧 = 沙箱的
       FileSystemOps），RNG 按 sidecar setState。调用栈不还原 = 正确语义（原版 LOADDATA
       整栈丢弃）。快照路径缺省 <work>/snapshot.dbg。
+  heap
+      打印本进程真实生效的 JVM 挡位（jvmMaxHeapBytes / jvmMaxHeapMiB / jvmTotalMiB /
+      jvmUsedMiB / jvmVersion / jvmName）。用于自证 desktop.py --xmx 真的透传到了
+      被测进程：512m 挡位下 jvmMaxHeapBytes 应为 536870912（devtools/heap_gate.py 的挡位项就用它）。
   log [--tags event,rng[,var]] [--watch N1,N2] [--max N] [--out <文件>] -- call <FN> [--args ...]
       结构化事件流（DBG4 P3）：-- 之后原样转发给 call（只包装 call）。每行
       {"seq","tag","event","payload"} 落 --out（缺省 <work>/dbg-log.jsonl）。三个挂点
       （函数进出 / RNG 出号 / watch 名单命中写入）全部 core 侧可空观察口，缺省零行为。
       --max 缺省 1000000 条截断；--tags var 必须带 --watch 名单。
+  explore ... --boot-only
+      只引导不跑局（obs-compat512）：引导到落 <out>/seed.dbg 即收工，不跑任何局；
+      与 --soak-min 互斥。缺省关 = 既有行为
   help
 """
 
@@ -146,6 +175,7 @@ object Cli {
                 "cheat" -> CmdSet.runCheat(parsed, out, err)
                 "snapshot" -> CmdSnap.run(parsed, out, err)
                 "restore" -> CmdSnap.runRestore(parsed, out, err)
+                "heap" -> CmdHeap.run(out)
                 "log" -> CmdLog.run(args, out, err)
                 "explore" -> run {
                     CmdExplore.policyFactory = CmdExplore.PolicyFactory { name, seed -> createExplorePolicy(name, seed) }
@@ -180,7 +210,7 @@ class Args private constructor(
     companion object {
         /** 带值的选项名（其余 `--xxx` 记为布尔旗标）。 */
         private val VALUE_OPTS = setOf(
-            "--erbc", "--game", "--work", "--steps", "--args", "--out", "--only",
+            "--erbc", "--game", "--work", "--steps", "--step-wall-ms", "--args", "--out", "--only",
             "--shard", "--wall-ms", "--capacity", "-n", "--base", "--head", "--from",
             "--tags", "--watch", "--max",
         ) + CmdExplore.VALUE_OPTS_NEEDED

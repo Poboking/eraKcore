@@ -130,6 +130,31 @@ class ConsoleLogSyncTest {
     }
 
     /**
+     * 空行（runs 为空）折零排 ⇒ 在 [LogBuffer] 里根本不占排，撤销时也没有「逻辑行首排」可回撤。
+     *
+     * 这条同时钉住 [ConsoleLogSync.submit] 的回撤计数口径：`LineFolder.fold` 对空段早退
+     * （grid/LineFolder.kt:127-129），所以「一条 RenderLine 折出的 isLogicalLine 排数」
+     * 恒是 `(runs 非空 && isLogicalLine)` —— 按 published 逐行数时也必须带 `runs.isNotEmpty()`
+     * 这一半，否则空行会被当成一条可回撤的逻辑行，误删它前面的行。
+     */
+    @Test
+    fun `空 runs 的逻辑行折零排且不参与回撤计数`() {
+        val buf = LogBuffer(500)
+        val sync = ConsoleLogSync(buf, LineFolder(10))
+        val blank = RenderLine(runs = emptyList(), isLogicalLine = true, isLineEnd = true)
+        sync.submit(listOf(renderLine("A"), blank))
+        assertEquals(1, buf.size, "空行折零排（LineFolder 空段早退）")
+        assertEquals(1L, buf.totalLines)
+        assertEquals("A", joined(buf.last()))
+        // 撤销空行：回撤区间里没有逻辑行首排 ⇒ 一次 removeLast 都不该发
+        sync.submit(listOf(renderLine("A")))
+        assertEquals(1, buf.size, "A 不许被空行的撤销连带删掉")
+        assertEquals(1L, buf.totalLines, "行号不因空行回退（EmueraConsole.cs:3013 无从触发）")
+        assertEquals(1L, buf.logicalLines)
+        assertEquals("A", joined(buf.last()))
+    }
+
+    /**
      * 连续 REUSELASTLINE（PRINT 反复覆盖同一行）：每条临时行入列前先删掉上一条
      * （spec: `EmueraConsole.cs:2891-2893` 的 `LastLineIsTemporary` 先删 + `deleteLine(1)`，
      * :3007-3021），更早的行不得陪葬。原版临时行经 `PrintTemporaryLine` → `PrintSingleLine` →

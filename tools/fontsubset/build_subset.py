@@ -24,7 +24,7 @@ Sarasa Mono SC 假设写，从未真实执行过，若干 fontTools API 用法�
 
 ## 产出（全部落 render/src/main/resources/fonts/，路径由脚本自算）
 
-1. `saitamaar-subset.ttf`——required-codepoints.txt（8076 码点）∩ 源字体 cmap（5268 码点）的子集。
+1. `saitamaar-subset.ttf`——required-codepoints.txt（7956 码点）∩ 源字体 cmap（5169 码点）的子集。
 2. `saitamaar-advance.txt`——契约 §3 sidecar：advance/lsb 设计单元度量表，
    **从落盘的子集成品重新打开读取**（不是从内存对象、更不是原件），逐码点：
    `码点十六进制大写(无前缀) advance lsb`，升序、LF、无空行；源 cmap 没有的码点不出行。
@@ -65,7 +65,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ANDROID_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 REPO_FONTS_DIR = os.path.join(ANDROID_ROOT, "render", "src", "main", "resources", "fonts")
-CORPUS_SOURCE = r"D:/DSH/eratw-安卓移植计划/eratw-画蛇添足版eratw4.980/font/Saitamaar.ttf"
+CORPUS_SOURCE = os.environ.get("ERATW_FONT_SOURCE")
 
 # 允许入库再分发的源字体文件名关键字（判据①）
 ALLOWED_SOURCE_HINTS = ("saitamaar",)

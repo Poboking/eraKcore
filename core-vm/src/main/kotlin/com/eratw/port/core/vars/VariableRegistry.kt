@@ -103,6 +103,7 @@ class VariableRegistry(
         buildStringArrays()
         buildCharacterArrays()
         buildLocals()
+        buildFloats()
         buildPseudo()
         buildCsvConstants()
     }
@@ -334,6 +335,60 @@ class VariableRegistry(
         }
     }
 
+    /**
+     * 4.981 fork 的三个系统浮点名（LOCALF / ARGF / RESULTF）。
+     *
+     * 本段是「把浮点接线从存储层的散装名字收进注册表」的落点：名字、code、维度、类型与
+     * VARSIZE 档位在这里一次定死，`VariableStore` 只按 [VarDef.storage] 决定数据落在哪
+     * （LOCALF/ARGF = 每函数一份的浮点局部实例，RESULTF = 内建浮点标量列的第 1 格），
+     * 不再按字符串名字硬判。
+     *
+     * 证据（fork-src，1.824 无此面）：
+     * - LOCALF/ARGF 登记在 `localvarTokenDic`（spec: VariableData.cs:376-379），
+     *   尺寸来自 `VariableFloatArrayLength[LOCALF/ARGF]`（spec: ConstantData.cs:211-217 出厂 10，
+     *   :532-533 被 VARIABLESIZE.CSV 改写）；
+     * - RESULTF 是 `dataFloat[1]` 的 0 维包装（spec: VariableData.cs:182 + `:155` 列长）。
+     *
+     * 与 [buildLocals] 同样只登记**元信息**：per-function 实例不存在注册表里
+     * （注册表运行期只读，见类 KDoc），所以这三条的 `dims` 是「装载期档位」，
+     * 运行期某函数里的实际长度仍由 `VariableStore` 按 `#LOCALFSIZE` / 形参声明就地解析。
+     */
+    private fun buildFloats() {
+        for ((name, code) in SystemLayout.localFloat) {
+            val idx = VariableCode.lowIndex(code)
+            add(
+                VarDef(
+                    name = name,
+                    code = code,
+                    type = VarType.FLOAT,
+                    storage = Storage.L_FLOAT,
+                    index = idx,
+                    // 默认长度吃 VariableSize.csv 的浮点行（LOCALF/ARGF），出厂 10；
+                    // 可被函数内 #LOCALFSIZE / 形参声明拉大（口径同 buildLocals 的注释）。
+                    dims = intArrayOf(sizes.float1D[idx]),
+                    isConst = false,
+                    isSavedata = VariableCode.isSavedata(code, name),
+                    isGlobal = false,
+                ),
+            )
+        }
+        for ((name, code) in SystemLayout.floatScalar) {
+            add(
+                VarDef(
+                    name = name,
+                    code = code,
+                    type = VarType.FLOAT,
+                    storage = Storage.G_FLOAT0,
+                    index = VariableCode.lowIndex(code),
+                    dims = intArrayOf(),
+                    isConst = false,
+                    isSavedata = VariableCode.isSavedata(code, name),
+                    isGlobal = false,
+                ),
+            )
+        }
+    }
+
     private fun buildPseudo() {
         for ((name, code, kind) in SystemLayout.pseudo) {
             val pseudoDim = VariableCode.dimension(code)
@@ -494,7 +549,10 @@ class VariableRegistry(
      *
      * LOCAL/ARG/LOCALS/ARGS 在 C# 落 localvarTokenDic（:3181-3187）、不在 varTokenDic，
      * 它们永远不会成为存档条目（LOCAL_FLAG/EXTENDED 位 ⇒ isSavedata=false），
-     * 由尾部的完整性兜底追加，保证本序不丢任何已注册变量。
+     * 由尾部的完整性兜底追加，保证本序不丢任何已注册变量。4.981 fork 的 LOCALF/ARGF
+     * 同表（spec: fork-src VariableData.cs:376-379）；RESULTF 虽然在 varTokenDic
+     * （spec: fork-src VariableData.cs:182）但登记点在本段所引的 :3014-3179 区间之外，
+     * 且同样带 EXTENDED 位 ⇒ 不入档，一并由兜底尾部携带（序不可观测）。
      */
     fun allInVarTokenDicOrder(): List<VarDef> {
         val out = ArrayList<VarDef>(byName.size)

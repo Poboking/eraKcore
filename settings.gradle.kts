@@ -7,16 +7,21 @@
 //   :tools:vmdbg    面向 agent 的无交互 VM 调试 CLI
 //   :tools:uipreview 桌面渲染预览（浏览器贴帧）
 //   :tools:fontsubset 字体内子集生成（维护 resources/fonts 的再生成工具）
+//   :tools:erbcc-rs erbcc 的 Rust 侧（Cargo 工程，由 :tools:erbcc 的 Gradle 对拍脚本接线）
 
 pluginManagement {
     repositories {
-        mavenCentral()
+        // 阿里云 gradle-plugin 镜像作兜底/加速（国内网络对 plugins.gradle.org 不稳）。
+        maven("https://maven.aliyun.com/repository/gradle-plugin")
         gradlePluginPortal()
+        mavenCentral()
     }
 }
 
 dependencyResolutionManagement {
     repositories {
+        // 阿里云 public 镜像（聚合 central+jcenter），主源不可达时兜底。
+        maven("https://maven.aliyun.com/repository/public")
         mavenCentral()
     }
 }

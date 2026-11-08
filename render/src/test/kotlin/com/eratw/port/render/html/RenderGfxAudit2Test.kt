@@ -19,7 +19,9 @@ import kotlin.test.assertTrue
  * 高置信缺陷只在 [Raster] 与 [SpriteTable] 上（1-3 号用例）；`DrawLineBar` / `RowUnionFind`
  * 逐行对拍后未发现可修项 —— 前者的空 builder 崩点与「零可绘宽直接返回一个单元」都是官方行为
  * （5 号用例钉住），`RowUnionFind` 的合并口径已由 `displaylist/DirtyStripsTest` 逐例覆盖，
- * 本类不重复。`MiniHtmlDoc` 的两处口径分歧见 6-7 号用例与交付报告。
+ * 本类不重复。`MiniHtmlDoc` 的口径分歧见 6-7 号用例与交付报告 —— 其中 7 号（ypos 丢 px 标志）
+ * 是 R-F1 的「现状桩」，2026-10-28 W4 车道解析侧补齐后已改钉真行为（改钉理由逐行写在该用例上）；
+ * 6 号（图片段不计行宽）仍是登记不修的官方口径差。
  *
  * 判据全部来自反编译 C#：
  * - `GraphicsImage.cs:502-509` 的 `GGetColor` 判完空位图（`:504-506`）就直通
@@ -236,22 +238,31 @@ class RenderGfxAudit2Test {
     }
 
     /**
-     * 已知口径缺口（登记，待解析侧接线）：`ypos` 的 `px` 标志没进模型。
+     * R-F1 收口（2026-10-28，W4 车道）：`ypos` 的 `px` 标志**落进模型**。
      *
-     * 原版 ypos 与宽高分两路（`ConsoleImagePart.cs:81` 的 `isPx ? num : num * FontSize / 100`），
-     * 而解析侧只取数值（`MiniHtml.kt:402-405`）⇒ `'40px'` 与 `'40'` 在本模型里**不可区分**。
-     * 这里钉住这个不可区分性：解析侧补上标志后本用例即红，逼着模型与解析同时改。
+     * 本用例原样钉的是「现状桩」—— 解析侧只取数值、`'40px'` 与 `'40'` 在模型里不可区分。
+     * 改钉为真行为的逐行理由：
+     * - 原 :251 `assertEquals(40, withPx.yPos, ...)` —— 数值支不变（`'40px'` 的 num 仍是 40，
+     *   `Utils.cs:347-354` 的 MixedNum 形态），保留；
+     * - 原 :252 `assertEquals(bare.yPos, withPx.yPos, "px 与否算出的 ypos 相同 ⇒ 标志确实没落进模型")`
+     *   —— 断言的值仍成立（两边 yPos 都是 40），但注释理由作废：不可区分性正是 R-F1 的虫，
+     *   原版按 `ConsoleImagePart.cs:81` 分两路 `raw_ypos.isPx ? raw_ypos.num : raw_ypos.num * Config.FontSize / 100`，
+     *   字号倍率与像素必须可区分 ⇒ 换成 `yPosIsPx` 的 true/false 对钉；
+     * - 原 :253-256（widthIsPx 对照支）保留 —— 它就是本次补齐的对照口径
+     *   （直印路 `adapter/HtmlRunFlatten.kt` 的 `Mixed.isPx` 同样两条支，:612-616）。
      */
     @Test
-    fun `ypos 的 px 标志目前落在模型之外`() {
+    fun `ypos 的 px 标志落进模型（与宽高同式）`() {
         val withPx = MiniHtml().parse("<img src='A' ypos='40px'>").lines[0]
             .segments.filterIsInstance<HtmlSegment.Image>().single()
         val bare = MiniHtml().parse("<img src='A' ypos='40'>").lines[0]
             .segments.filterIsInstance<HtmlSegment.Image>().single()
         assertEquals(40, withPx.yPos, "数值仍按 MixedNum 解析（Utils.cs:347-354）")
-        assertEquals(bare.yPos, withPx.yPos, "px 与否算出的 ypos 相同 ⇒ 标志确实没落进模型")
+        assertEquals(40, bare.yPos, "两条支的 num 同为 40，分歧只在 isPx")
+        assertTrue(withPx.yPosIsPx, "带 px ⇒ 像素支（ConsoleImagePart.cs:81 的 raw_ypos.isPx ? raw_ypos.num : …）")
+        assertFalse(bare.yPosIsPx, "不带 px ⇒ 字号倍率支（同式 else：num * Config.FontSize / 100）")
         assertEquals(bare.widthIsPx, withPx.widthIsPx, "未给 width 时两者都是默认 false")
-        // 同一份 MixedNum 逻辑对 width 是留了标志的，对照出 ypos 这一路的缺失
+        // 同一份 MixedNum 逻辑对 width 本来就留标志，ypos 现在同式收口
         assertTrue(MiniHtml().parse("<img src='A' width='40px'>").lines[0]
             .segments.filterIsInstance<HtmlSegment.Image>().single().widthIsPx)
     }

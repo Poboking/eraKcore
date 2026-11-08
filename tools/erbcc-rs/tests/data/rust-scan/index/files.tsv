@@ -1,0 +1,6 @@
+file	encoding	binary	physicalLines	logicalLines	tokens	stmtLines	errors	warnings
+a.ERB	UTF-8	0	1	1	2	0	1	0
+c.ERB	Shift-JIS	0	1	1	1	0	1	0
+d.ERB	Shift-JIS	0	1	1	1	0	1	0
+notindexed.ERB	UTF-8	0	1	1	2	0	1	0
+sub/b.ERH	UTF-8	0	1	1	2	0	1	0

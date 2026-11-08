@@ -1,0 +1,44 @@
+@Z_PLAIN
+	PRINTL a-shadow-first
+	RETURN
+
+@Z_PLAIN
+	PRINTL a-shadow-second
+	RETURN
+
+@EVENTCOM
+#LATER
+	PRINTL a-event-later
+
+@G12_DUP
+	PRINTL a-dup-not-method
+	RETURN
+
+@G12_ARGS(A, C$, D)
+#LOCALSIZE 定数上限
+#LOCALSSIZE 宏一
+#DIM STATIC statvar
+	PRINTL args-second
+	RETURN
+
+@G12_ONLY
+	PRINTL only-shadow
+	RETURN
+
+@G12_SINGLE
+	PRINTL single-shadow
+	RETURN
+
+@G12_PATH
+#DIMS 路径$ 1 = "重复名不收集"
+#DIMS 空串$ = ""
+	PRINTL backslash-second
+	RETURN
+
+@G12_CTRL
+	PRINTL ctrl-shadow
+	RETURN
+
+@日本語ラベル
+	PRINTL cjk-key-second
+	RETURN

@@ -1,5 +1,6 @@
 package com.eratw.port.erbcc
 
+import com.erbcc.bridge.sizeConsts
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.nio.file.Files
 import java.nio.file.Path
@@ -34,7 +35,7 @@ class SymbolsTest {
     @Test
     fun goldenFixture() {
         val corpus = repoRoot().resolve("fixtures/golden")
-        val table = SymbolTable.build(corpus)
+        val table = LabelTable.build(corpus, sizeConsts = ::sizeConsts)
         val st = table.stats()
 
         // 4 组重名：G12_FUNC(2) / G12_PLAIN(3) 为同文件非事件重复；EVENTTURNEND(3) 为事件；
@@ -76,26 +77,30 @@ class SymbolsTest {
             @FUNC_A(A, B, C = 3)
             #LOCALSIZE 7
             #LOCALSSIZE 9
+            #LOCALFSIZE 11
             	RETURN
             @FUNC_B(REF X, ARGS = "a,b")
             #LOCALSIZE 0
+            #LOCALFSIZE 0
             	RETURN
             @FUNC_C()
             	RETURN
             @FUNC_D
             	RETURN
         """.trimIndent()
-        val labels = SymbolTable.scanLabels(text)
+        val labels = LabelTable.scanLabels(text)
         assertEquals(listOf("FUNC_A", "FUNC_B", "FUNC_C", "FUNC_D"), labels.map { it.name })
         assertEquals(3, labels[0].argCount)
         assertEquals(3, labels[0].argIntCount, "FUNC_A 全为无默认值整型形参")
         assertEquals(0, labels[0].argStrCount)
         assertEquals(7, labels[0].localSize)
         assertEquals(9, labels[0].localsSize)
+        assertEquals(11, labels[0].floatLocalSize, "#LOCALFSIZE 与 #LOCALSIZE 同形（fork LogicalLineParser.cs:257-266）")
         assertEquals(2, labels[1].argCount)          // 字符串里的逗号不算分隔符
         assertEquals(1, labels[1].argIntCount, "REF X 无 $ 且无默认值 → 整型")
         assertEquals(1, labels[1].argStrCount, "ARGS 形参 → 字符串桶（ErbLoader.cs:710-714）")
         assertEquals(0, labels[1].localSize)         // 非法值（<=0）按未声明处理
+        assertEquals(0, labels[1].floatLocalSize, "#LOCALFSIZE 0 同样不生效")
         assertEquals(0, labels[2].argCount)          // 空括号
         assertEquals(0, labels[3].argCount)          // 无括号
     }
@@ -109,7 +114,7 @@ class SymbolsTest {
             @F_STRONLY(NAME = "")
             	RETURN
         """.trimIndent()
-        val labels = SymbolTable.scanLabels(text)
+        val labels = LabelTable.scanLabels(text)
         assertEquals(4, labels[0].argCount)
         assertEquals(2, labels[0].argIntCount, "A（无默认）与 D（整数默认）→ 整型")
         assertEquals(2, labels[0].argStrCount, "B\$（$ 后缀）与 C（字符串默认）→ 字符串")
@@ -133,12 +138,12 @@ class SymbolsTest {
             #DIMS	REF		COLOR_STR
             	RETURN
             @DUP
-            #DIM X, 10
-            #DIM X, 20
-            #DIMS X
+            #DIM DUP_SLOT, 10
+            #DIM DUP_SLOT, 20
+            #DIMS DUP_SLOT
             	RETURN
         """.trimIndent()
-        val labels = SymbolTable.scanLabels(text)
+        val labels = LabelTable.scanLabels(text)
         assertEquals(listOf("SYUGO", "UPDATE_STATE", "DUP"), labels.map { it.name })
 
         // 1) `#DIM 集合, 人物数量上限, 3`：尺寸「人物数量上限」是 ERH #DIM CONST 标识符
@@ -171,9 +176,11 @@ class SymbolsTest {
 
         // 3) 同函数重名：先到者胜（spec: FunctionLabelLine.cs:98-108 AddPrivateVariable
         //    ContainsKey → false；键为 StrComper=OrdinalIgnoreCase，FunctionLabelLine.cs:17）
+        //    名字用 DUP_SLOT：旧夹具的 `X` 是原版系统变量（spec: VariableData.cs:3063），
+        //    CORE-06 查表半接线后 `#DIM X` 会被 zhs:875 正当拒绝，夹具随之改名（W7-judge）。
         val dup = labels[2].dimSpecs
         assertEquals(1, dup.size)
-        assertEquals("X", dup[0].name)
+        assertEquals("DUP_SLOT", dup[0].name)
         assertEquals(listOf("10"), dup[0].dims, "重名只收先到者")
         assertEquals(false, dup[0].isStr)
     }
@@ -185,7 +192,7 @@ class SymbolsTest {
         //      → UseSharpInSystemFunc 告警 level 2，IsMethod 不置位（:178-182）；
         //   ② 函数名数字开头 → CanNotDeclaredBeginNumberFunction + IsError（:153-158）；
         //   ③ 接受声明时（:183-192）作废先行的 #PRI/#LATER/#SINGLE/#ONLY（:193-212）。
-        val labels = SymbolTable.scanLabels(
+        val labels = LabelTable.scanLabels(
             """
             @EVENTFIRST
             #FUNCTION
@@ -246,7 +253,7 @@ class SymbolsTest {
             }
             	RETURN
         """.trimIndent()
-        val erh = SymbolTable.collectErhSymbols(text)
+        val erh = LabelTable.collectErhSymbols(text)
         assertEquals(
             mapOf(
                 "MAXSIZE" to "300",           // 先到者胜（999 被拒）
@@ -260,7 +267,7 @@ class SymbolsTest {
             "F(X) 参数化宏不收集（原版禁声明）",
         )
         // 兼容入口：collectMacros 只给名集
-        assertEquals(erh.macros.keys, SymbolTable.collectMacros(text))
+        assertEquals(erh.macros.keys, LabelTable.collectMacros(text))
     }
 
     @Test
@@ -279,7 +286,7 @@ class SymbolsTest {
             #DIM CONST DUP = 2
             #DIMS	CONST	TAB_KW	=	9
         """.trimIndent()
-        val specs = SymbolTable.collectErhSymbols(text).dimConsts
+        val specs = LabelTable.collectErhSymbols(text).dimConsts
         assertEquals(
             listOf("人物数量上限", "ARR", "EXPR", "HEX", "TABSPECS", "STR_C", "DUP", "TAB_KW"),
             specs.map { it.name },
@@ -300,7 +307,7 @@ class SymbolsTest {
         // `#LOCALSIZE 人物数量上限`（DIM.ERH:209 `#DIM CONST 人物数量上限 = 200`），
         // 旧实现 toIntOrNull 只认字面量 → localSize=0，运行期 LOCAL 退回默认长度。
         val cfg = SymbolConfig(constValues = mapOf("人物数量上限" to 200L, "LS8" to 8L))
-        val labels = SymbolTable.scanLabels(
+        val labels = LabelTable.scanLabels(
             """
             @A
             #LOCALSIZE 人物数量上限
@@ -338,12 +345,14 @@ class SymbolsTest {
         // #DIM 值段的 token 流由 Analyse 产出，';' 注释在词法层剥离且引号内不算
         // （spec: LexicalAnalyzer.cs:919-929 + ReadString 引号扫描 :330）；
         // 旧实现 substringBefore(';') 对引号不设防，把 "a;b" 截成 "a。
-        val labels = SymbolTable.scanLabels(
+        // 旧夹具名 X/Y/Z 全是原版系统变量（spec: VariableData.cs:3063-3065），
+        // CORE-06 查表半接线后会被 zhs:875 正当拒绝 ⇒ 夹具改名（W7-judge）。
+        val labels = LabelTable.scanLabels(
             """
             @F
-            #DIMS X = "a;b"
-            #DIM Y = 3 ;コメント
-            #DIMS Z = "x;y", "u"
+            #DIMS SLOT_X = "a;b"
+            #DIM SLOT_Y = 3 ;コメント
+            #DIMS SLOT_Z = "x;y", "u"
             	RETURN
             """.trimIndent(),
         )
@@ -360,7 +369,7 @@ class SymbolsTest {
         // （spec: LexicalAnalyzer.cs:919-929）；`;^;` 的「继续」只存在于行首
         // SkipWhiteSpace 侧（LexicalAnalyzer.cs:668-671）。旧实现把 `;^;` 当继续标记，
         // `#DEFINE A 1 ;^; 2` 的体多收了 " 2"。
-        val erh = SymbolTable.collectErhSymbols(
+        val erh = LabelTable.collectErhSymbols(
             """
             #DEFINE MY_A 1 ;^; 2
             #DEFINE MY_B 1 ;!; 2
@@ -376,7 +385,7 @@ class SymbolsTest {
         val corpus = Path.of(raw!!)
         assumeTrue(corpus.isDirectory(), "语料目录不存在: $corpus")
 
-        val table = SymbolTable.build(corpus)
+        val table = LabelTable.build(corpus, sizeConsts = ::sizeConsts)
 
         // 基线口径（2026-10-17，specs/loader.md 附录 D.3）只覆盖游戏本体文件；
         // E2E 线（2026-10-18 起）把 fixtures/golden 的 13 个 GOLDEN_*.ERB 复制进了语料目录，
@@ -390,26 +399,23 @@ class SymbolsTest {
         val nonEventDupGame = dupKeysGame.count { !it.value.first().isEvent }
         val eventDupGame = dupKeysGame.count { it.value.first().isEvent }
 
-        // 全量语料基线（2026-10-17，见 specs/loader.md 附录 D.3）
-        assertEquals(110_066, totalGame, "@标签定义总数（不含 GOLDEN 复制件）")
-        assertEquals(110_042, uniqueGame, "去重名字数")
-        assertEquals(6, dupKeysGame.size, "重名组数")
+        // 全量语料基线（根自适应，corpusroot 波 2026-11-05）：按当前根档案取列。
+        // 4.981 列（dev-4.981 验收语料，2026-11-01 重落）：@ 标签 117_055、去重名 117_025、
+        // 重名组 7（EVENTEND 为 4.981 新增组）；4.980 列（specs/loader.md 附录 D.3 原基线）：
+        // 110_066 / 110_042 / 6 组。列值都钉死具体数，未登记的根 ⇒ detect 判红。
+        val profile = ErbccCorpusProfile.detect(corpus)
+        assertEquals(profile.labelsTotal, totalGame, "@标签定义总数（不含 GOLDEN 复制件，${profile.name} 列）")
+        assertEquals(profile.labelsUnique, uniqueGame, "去重名字数（${profile.name} 列）")
+        assertEquals(profile.dupGroups, dupKeysGame.size, "重名组数（${profile.name} 列）")
         assertEquals(0, nonEventDupGame, "非事件重名必须为 0")
-        assertEquals(6, eventDupGame, "事件重名组数（基线：6 组全部为事件函数）")
-        println("（信息）GOLDEN 复制件定义数 = $goldenDefs，不计入基线")
+        assertEquals(profile.dupGroups, eventDupGame, "事件重名组数（基线：全部为事件函数）")
+        println("（信息）GOLDEN 复制件定义数 = $goldenDefs，不计入基线；根档案 = ${profile.name}")
 
         val groups = dupKeysGame.mapValues { it.value.size }
         assertEquals(
-            mapOf(
-                "EVENTFIRST" to 2,
-                "EVENTLOAD" to 9,
-                "EVENTTURNEND" to 2,
-                "EVENTCOMEND" to 6,
-                "EVENTTRAIN" to 7,
-                "EVENTCOM" to 4,
-            ),
+            profile.dupGroupCounts,
             groups,
-            "6 组事件函数重名的定义数",
+            "${profile.name} 列事件函数重名定义数（4.981 对 4.980：EVENTLOAD 9→8 / EVENTCOMEND 6→10 / EVENTTRAIN 7→9 / 新增 EVENTEND 2）",
         )
 
         // 抽样：形参个数与 #LOCALSIZE/#LOCALSSIZE（三处均已对照源文件行）
@@ -427,9 +433,10 @@ class SymbolsTest {
         assertEquals(1, mobColor.localSize, "BODY_INFO/MOB_FUNCTION.ERB:2 #LOCALSIZE 1")
 
         // 该名字有 3 处定义：COLOR.ERB 整文件在 [SKIPSTART](1-295)、PANIMATION.ERB:102 在 [SKIPSTART](1-355)，
-        // 唯一生效者是 UI_Components:959（这条正是被本测试纠正过的易错点）
+        // 唯一生效者是 UI_Components_&_Tables.ERB（这条正是被本测试纠正过的易错点）。
+        // 生效行随根档案取列（4.980=959 / 4.981 增补后=1010；其余形参/尺寸两根全同，2026-11-05 复核）。
         val colorBar = assertNotNull(table.resolve("PRINT_COLORBAR"))
-        assertEquals(959, colorBar.lineNo, "PRINT_COLORBAR 生效行")
+        assertEquals(profile.colorBarLine, colorBar.lineNo, "PRINT_COLORBAR 生效行（${profile.name} 列）")
         assertEquals(7, colorBar.argCount, "7 个形参（含默认值）")
         assertEquals(5, colorBar.argIntCount, "VAL/MAX_VAL/L_LEN=20/COLOR_FG=-1/COLOR_BG=-1")
         assertEquals(2, colorBar.argStrCount, "CHAR_FG=\"*\" 与 CHAR_BG=\".\"")
@@ -447,7 +454,7 @@ class SymbolsTest {
         // [SKIPSTART] 原版 Warn level 1（「～がありません」），只报最内层一次；
         // ELSEIF 报成 ENDIF。erbcc 不中断装载，但必须留痕。
         val warnings = ArrayList<LoadWarning>()
-        val labels = SymbolTable.scanLabels(
+        val labels = LabelTable.scanLabels(
             """
             @VISIBLE
             	RETURN
@@ -465,10 +472,15 @@ class SymbolsTest {
     }
 
     @Test
-    fun erhLogicalLinesWithLinesTracksStartLineNumber() {
-        // spec: ErhLoader.cs:94 —— 装载期报错定位 ScriptPosition(filename, LineNo)，
-        // 行号是逻辑行**起始**的 1 基物理行号（{} 块取 `{` 所在行）。
-        val lines = SymbolTable.erhLogicalLinesWithLines(
+    fun erhLogicalLinesWithLinesTracksClosingBraceLineNumber() {
+        // P6（挖虫波第三批）：`{…}` 续行块的行号取**闭合 `}` 那一行**，不是 `{` 的起始行。
+        // 判据链：`EraStreamReader.ReadLine()` 每读一行都把 `curNo` 推到该行
+        // （EraStreamReader.cs:80-85），`LineNo => curNo`（:30）；续行块的 while 一直
+        // `ReadLine()` 到独占一行的 `}` 才 `break`（:166-174），函数返回后
+        // `ErhLoader.cs:94` 的 `new ScriptPosition(filename, eraStreamReader.LineNo)`
+        // 拿到的就是闭合行。旧实现返回起始行（`{` 那行）⇒ 装载期诊断整体偏到块首。
+        // `{` = 2 行、块体 3-4 行、`}` = 5 行。
+        val lines = LabelTable.erhLogicalLinesWithLines(
             """
             #DEFINE A 1
             {
@@ -477,7 +489,88 @@ class SymbolsTest {
             }
             """.trimIndent(),
         )
-        assertEquals(listOf(1 to "#DEFINE A 1", 2 to "#DEFINE B 2"), lines)
+        assertEquals(listOf(1 to "#DEFINE A 1", 5 to "#DEFINE B 2"), lines)
+    }
+
+    @Test
+    fun erhLogicalLinesWithLinesTreatsBareCrAsLineBreak() {
+        // P5（挖虫波第三批）：切行认 CR / LF / CRLF 三形（spec: EraStreamReader.cs:52
+        // `File.ReadAllLines`，口径登记于 specs/loader.md:115）。这里刻意用**单 CR** 拼接：
+        // 旧实现 `split('\n')` 会把整份文件当成 1 行，ERH 头链只剩一条逻辑行 ⇒
+        // 后续 `#` 指令全部解析不到。行号必须逐条推进。
+        val text = "#DIM CONST 上限 = 3\r#DEFINE B 2\r\n#DEFINE C 3\r#DIM CONST 下限 = 1\n"
+        val lines = LabelTable.erhLogicalLinesWithLines(text)
+        assertEquals(
+            listOf(1 to "#DIM CONST 上限 = 3", 2 to "#DEFINE B 2", 3 to "#DEFINE C 3", 4 to "#DIM CONST 下限 = 1"),
+            lines,
+        )
+    }
+
+    @Test
+    fun scanLabelsTreatsBareCrAsLineBreak() {
+        // P5 的 ERB 侧：同一个单 CR 文件在旧实现里塌成 1 行 ⇒ 只有第一个 @ 标签被登记。
+        val text = "@FOO\r\tRETURN\r@BAR\r\tRETURN\r"
+        val labels = LabelTable.scanLabels(text)
+        assertEquals(listOf("FOO", "BAR"), labels.map { it.name })
+        assertEquals(listOf(1, 3), labels.map { it.lineNo })
+    }
+
+    @Test
+    fun scanLabelsWarnsOnDuplicatePrivateDim() {
+        // P4（挖虫波第三批）：同函数体内后到的重名 `#DIM` —— 原版
+        // `AddPrivateVariable` 返回 false（FunctionLabelLine.cs:98-103）后
+        // `Warn(string.Format(VarNameAlreadyUsed, Name), position, 2)` 并 `return false`
+        // （LogicalLineParser.cs:284-287）。旧实现无声丢弃（rejectMsg 恒 null）。
+        // 先到者胜： dimSpecs 只留第一条；文案取 zhs:668 原文（specs/error-texts.yaml 已登记）。
+        // 夹具名从 A/a 改为 DUP_SLOT/dup_slot：`A` 是原版系统变量（VariableData.cs 的 varTokenDic），
+        // CORE-06 查表半接线后首条就会被 zhs:875 拒掉、留两条告警，重名面测不到（W7-judge）。
+        val warnings = ArrayList<LoadWarning>()
+        val labels = LabelTable.scanLabels(
+            """
+            @FOO
+            #DIM DUP_SLOT, 10
+            #DIMS dup_slot, 3
+            """.trimIndent(),
+            file = "X.ERB",
+            warnings = warnings,
+        )
+        assertEquals(1, labels.size)
+        assertEquals(listOf("DUP_SLOT"), labels[0].dimSpecs.map { it.name }, "先到者胜，后到者不注册")
+        assertEquals(1, warnings.size, "重名必须留痕，实得：$warnings")
+        assertEquals("X.ERB", warnings[0].file)
+        assertEquals(3, warnings[0].line, "告警定位到后到的那条 #DIMS 行")
+        assertEquals("变量名\"dup_slot\"已经被使用", warnings[0].message)
+    }
+
+    @Test
+    fun scanLabelsRejectsPrivateDimNameStartingWithDigit() {
+        // P4 的第二条闸：`CheckUserPrivateVarName` 的「半角数字开头」（IdentifierDictionary.cs:353-358）
+        // → warnLevel 2 → `UserDefinedVariableData.cs:288-292` 抛 CodeEE ⇒ 该行无效、变量不注册。
+        // 这条闸是**私有变体独有**的（全局 `CheckUserVarName` :258-297 没有），旧实现整条缺席。
+        val warnings = ArrayList<LoadWarning>()
+        val labels = LabelTable.scanLabels(
+            """
+            @FOO
+            #DIM 1ST_SLOT, 10
+            #DIM OK_SLOT, 10
+            """.trimIndent(),
+            file = "Y.ERB",
+            warnings = warnings,
+        )
+        assertEquals(listOf("OK_SLOT"), labels[0].dimSpecs.map { it.name }, "数字开头的名字不注册")
+        assertEquals(1, warnings.size, "必须留痕，实得：$warnings")
+        assertEquals(2, warnings[0].line)
+        assertEquals("变量名\"1ST_SLOT\"以半角数字开始", warnings[0].message)
+    }
+
+    @Test
+    fun scanLabelsAcceptsNonAsciiDimNameStartingWithFullWidthDigit() {
+        // 同一条闸的照抄面：判据是 `char.IsDigit`（Unicode Nd），文案却写「半角数字」
+        // （ADR-005 不修误译）⇒ 全角数字 `０` 一样被拒。钉住行为，避免以后有人「顺手修好」。
+        val warnings = ArrayList<LoadWarning>()
+        val labels = LabelTable.scanLabels("@FOO\n#DIM ０A\n", file = "Z.ERB", warnings = warnings)
+        assertEquals(emptyList<String>(), labels[0].dimSpecs.map { it.name })
+        assertEquals("变量名\"０A\"以半角数字开始", warnings[0].message)
     }
 
     @Test
@@ -503,7 +596,7 @@ class SymbolsTest {
             #UNKNOWN
             #DIM CONST NOINIT
         """.trimIndent()
-        val erh = SymbolTable.collectErhSymbols(text, "T.ERH")
+        val erh = LabelTable.collectErhSymbols(text, "T.ERH")
         assertEquals("1", erh.macros["DUP"], "重名宏先到者胜")
         assertTrue(erh.dimConsts.isEmpty(), "CONST 缺初值不注册")
         assertEquals(8, erh.diag.size, "8 条降级逐条留痕，实得：${erh.diag.joinToString("\n")}")

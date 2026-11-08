@@ -545,8 +545,10 @@ class SaveFormatAuditTest {
     /**
      * 文本 NORMAL（`VariableEvaluator.cs:2409-2426`）：游戏码 / 脚本版本 / 描述 / 角色数 /
      * 角色正文（2 String + 2 Int + 17 Int1D，`CharacterData.cs:353-369`）/
-     * 60 个 Int1D + 1 个 Str1D（`VariableData.cs:3516-3534`）/ `__EMUERA_1808_STRAT__` /
-     * 8 段系统扩展 + 6 段用户扩展（各以 `__EMU_SEPARATOR__` 收尾，`VariableData.cs:3556-3626`）。
+     * 60 个 Int1D + 1 个 Str1D（`VariableData.cs:3516-3534`）/
+     * 2 个 Float 标量 + 7 个 Float1D（fork 4.981 尾段，`VariableData.cs:766-769`）/
+     * `__EMUERA_1808_STRAT__` / 8 段系统扩展 + 6 段用户扩展
+     * （各以 `__EMU_SEPARATOR__` 收尾，`VariableData.cs:3556-3626`）。
      *
      * 文本 GLOBAL（`:2498-2503`）：游戏码 / 脚本版本 / GLOBAL / GLOBALS / EMU_START / 6 段用户扩展，
      * **没有描述行**（二进制分支写的 `""` 在文本分支不存在）。
@@ -563,10 +565,14 @@ class SaveFormatAuditTest {
         assertEquals("desc", nl[2], "第 3 行描述（:2413）")
         assertEquals("0", nl[3], "角色数（:2414）")
         assertTrue((4..64).all { nl[it] == "__FINISHED" }, "60 个 Int1D + 1 个 Str1D 全空 ⇒ 61 行 FINISHED")
-        assertEquals("__EMUERA_1808_STRAT__", nl[65], "EMU_START 拼写照抄 STRAT（EraDataWriter.cs:13）")
-        assertTrue((66..79).all { nl[it] == "__EMU_SEPARATOR__" }, "8 段系统 + 6 段用户扩展")
-        assertEquals("", nl[80], "末尾一个换行")
-        assertEquals(81, nl.size)
+        // fork 4.981 经典浮点尾段：dataFloat 2 格 + dataFloatArray 7 个空数组（VariableData.cs:766-769）
+        assertEquals("0", nl[65], "dataFloat[0]（未命名槽，未建模 ⇒ 0）")
+        assertEquals("0", nl[66], "dataFloat[1]（RESULTF，非 SAVEDATA ⇒ 0）")
+        assertTrue((67..73).all { nl[it] == "__FINISHED" }, "7 个系统 dataFloatArray 恒空（VariableData.cs:157-159）")
+        assertEquals("__EMUERA_1808_STRAT__", nl[74], "EMU_START 拼写照抄 STRAT（EraDataWriter.cs:13）")
+        assertTrue((75..88).all { nl[it] == "__EMU_SEPARATOR__" }, "8 段系统 + 6 段用户扩展")
+        assertEquals("", nl[89], "末尾一个换行")
+        assertEquals(90, nl.size)
 
         val gBytes = SaveTextFormat.write(global(code = 7153L, version = 0L), registry)
         val gl = String(gBytes, 3, gBytes.size - 3, StandardCharsets.UTF_8).split('\n')
@@ -583,6 +589,41 @@ class SaveFormatAuditTest {
         assertEquals(SaveFileKind.GLOBAL, readBack.fileType)
         assertEquals("", readBack.text, "全局档描述恒空（VariableEvaluator.cs:2488 同源口径）")
         assertTrue(readBack.variables.any { it.key == "GLOBAL" }, "GLOBAL 槽被读成空数组条目")
+    }
+
+    /**
+     * 文本档解码 = `EncodingHandler.DetectEncoding` 的探测链（spec: EncodingHandler.cs:15-41），
+     * **不是猜**：旧实现「U+FFFD 嗅探 + 宽松 Shift_JIS 兜底」会把任何含 U+FFFD 的存档
+     * （乱码写回的残留）整篇按 Shift_JIS 重解 ⇒ 完好文案全变乱码，且读→改→写闭环把乱码固化进档。
+     * 判据是严格解码的成功/失败二分；失败即整文件拒读（spec: EraStreamReader.cs:50-59 的 false 分支，
+     * 原版 `PrintError + break/skip`，绝不会再猜一种编码硬读）。
+     */
+    @Test
+    fun `文本档按探测链解码不猜编码`() {
+        val registry = VariableStore().registry
+
+        // ①含 U+FFFD 的合法 UTF-8 档：U+FFFD 是**内容**，照抄保留，不得触发整篇重解
+        val withFffd = SaveTextFormat.write(normal(code = 7153L, version = 0L, text = "A\uFFFDB"), registry)
+        assertEquals(
+            "A\uFFFDB",
+            SaveTextFormat.read(withFffd, registry, SaveFileKind.NORMAL).text,
+            "严格 UTF-8 成功即收，含 U+FFFD 也不例外（旧启发式在这里会把整篇换编码重解）",
+        )
+
+        // ②纯 CP932 旧档（无 BOM、非法 UTF-8）：探测链第三跳严格 CP932 照读（spec: EncodingHandler.cs:37-40）
+        val utfBytes = SaveTextFormat.write(normal(code = 7153L, version = 0L, text = "AあB"), registry)
+        val cp932 = String(utfBytes, 3, utfBytes.size - 3, StandardCharsets.UTF_8)
+            .toByteArray(charset("windows-31J"))
+        assertEquals(
+            "AあB",
+            SaveTextFormat.read(cp932, registry, SaveFileKind.NORMAL).text,
+            "CP932 档经探测链还原，不是宽松替换",
+        )
+
+        // ③既不属严格 UTF-8 也不属严格 CP932 ⇒ 整文件拒读（0x82 是 CP932 首字节却无后继）
+        assertFailsWith<SaveFormatException>("两链皆失败的字节必须拒读而非硬解") {
+            SaveTextFormat.read(byteArrayOf(0x30, 0x0A, 0x82.toByte()), registry, SaveFileKind.NORMAL)
+        }
     }
 
     /**
@@ -603,8 +644,8 @@ class SaveFormatAuditTest {
         val reference = SaveTextFormat.write(normal(code = 1L, version = 0L, text = "old"), registry)
         assertEquals(
             String(reference, 3, reference.size - 3, StandardCharsets.UTF_8),
-            oldNormalText(SaveTextFormat.EMU_START, charaCount = 0, charaSegs = 6, userSegs = 6),
-            "旧档拼装器与 1808 写侧同源（VariableEvaluator.cs:2409-2426）",
+            oldNormalText(SaveTextFormat.EMU_START, charaCount = 0, charaSegs = 6, userSegs = 6, floatTail = true),
+            "旧档拼装器与 1808 写侧同源（VariableEvaluator.cs:2409-2426；浮点尾段 VariableData.cs:766-769）",
         )
 
         // 1803 档：角色 6 段 + 系统 8 段，**没有**用户 6 段 ⇒ 原版读完 8 段即返回
@@ -831,6 +872,8 @@ class SaveFormatAuditTest {
         userSegs: Int,
         sysSegs: Int = 8,
         sysSegLines: List<List<String>> = emptyList(),
+        /** fork 4.981 的经典浮点尾段（2 标量 + 7 空数组）；4.980 旧档为 false。 */
+        floatTail: Boolean = false,
     ): String {
         val sb = StringBuilder()
         fun line(s: String) = sb.append(s).append('\n')
@@ -846,6 +889,10 @@ class SaveFormatAuditTest {
             repeat(17) { line(SaveTextFormat.FINISHED) }
         }
         repeat(61) { line(SaveTextFormat.FINISHED) }
+        if (floatTail) {
+            repeat(2) { line("0") }
+            repeat(7) { line(SaveTextFormat.FINISHED) }
+        }
         if (marker.isNotEmpty()) line(marker)
         repeat(charaCount * charaSegs) { line(SaveTextFormat.SEPARATOR) }
         repeat(sysSegs) { i ->
@@ -954,6 +1001,62 @@ class SaveFormatAuditTest {
             CharaFileIO.load(broken, VariableStore()),
             "LOADCHARA 走「不是容器」分支 ⇒ 原版 RESULT 保持 0（:2299-2303），不得抛 CodeEE",
         )
+    }
+
+    /**
+     * 列表快探测只解**头字段**（2026-10-31「多创几个档后加载变慢」）：
+     * `CHKDATA` 在存档列表里每页调 40 次，原先每次都要整份解压（PC 原版
+     * `CreateReader` 的 `gZipStream.CopyTo`，`EraBinaryDataReader.cs:807-815`），
+     * 已填的档越多列表越慢。现在头部字段读完就停，正文/尾部坏不坏不影响列表；
+     * 完整探测 [SaveFormat.peek] 与 [SaveFormat.read] 仍走全量解压，读档前置校验不放宽。
+     */
+    @Test
+    fun `列表快探测只解头字段 截断的GZip尾部仍能探出头`() {
+        val big = normal(
+            code = 7153L,
+            text = "第 1日",
+            compressed = true,
+            variables = listOf(SaveEntry.StrArray1("S", Array<String?>(2000) { "行$it-xxxxxxxxxxxxxxxx" })),
+        )
+        val bytes = SaveFormat.write(big)
+        val cut = bytes.copyOfRange(0, bytes.size - 32)
+        val head = SaveFormat.peekHeader(cut)
+        assertNotNull(head, "头字段完整即可探出头（CHKDATA 不读正文与 GZip 尾部）")
+        assertEquals("第 1日", head.text)
+        assertNull(SaveFormat.peek(cut), "完整探测仍按全量解压拒收截断档（读档前置校验靠它）")
+        assertFailsWith<SaveFormatException>("读档仍走全量解压并拒绝截断档") { SaveFormat.read(cut) }
+    }
+
+    /** 有效档上快探测与完整探测必须逐字段一致：快探测只省解压，不改任何读数。 */
+    @Test
+    fun `快探测与完整探测在有效档上读数一致`() {
+        fun save(compressed: Boolean) = normal(
+            code = 7153L,
+            version = 7L,
+            text = "第 3日",
+            compressed = compressed,
+            variables = listOf(
+                SaveEntry.IntValue("DAY", 3),
+                SaveEntry.StrArray1("S", arrayOf<String?>("a", null, "c")),
+            ),
+        )
+        val gz = SaveFormat.write(save(compressed = true))
+        assertEquals(SaveFormat.peek(gz), SaveFormat.peekHeader(gz), "GZip 档读数必须一致")
+        val plain = SaveFormat.write(save(compressed = false))
+        assertEquals(SaveFormat.peek(plain), SaveFormat.peekHeader(plain), "未压缩档读数必须一致")
+    }
+
+    /**
+     * 描述文本比 [SaveFormat] 的头前缀上限还长（极罕见的超长 `SAVEDATA_TEXT`）：
+     * 头前缀被撑满、解析不全时回落全量解压，读数与完整探测一致。
+     */
+    @Test
+    fun `超长描述文本在快探测里仍能回落到全量解压`() {
+        val longText = "长".repeat(20_000) // UTF-16LE 40,000 字节 > 16 KiB 头前缀
+        val bytes = SaveFormat.write(normal(code = 7153L, text = longText, compressed = true))
+        val head = SaveFormat.peekHeader(bytes)
+        assertNotNull(head, "描述超长时回落全量解压，不得因前缀不足判 null")
+        assertEquals(longText, head.text)
     }
 
     /**
@@ -1203,7 +1306,7 @@ class SaveFormatAuditTest {
     @Test
     fun `真存档解出的角色与全局数值与 PC 侧一致`() {
         val bytes = saveBytes("save00.sav")
-        Assumptions.assumeTrue(bytes != null, "既无 ERATW_GAMEDIR/sav 也无仓内 sav-backup 样本，跳过真档判据")
+        Assumptions.assumeTrue(bytes != null, "既无 ERATW_GAMEDIR/sav 也无显式 ERATW_SAVE_SAMPLES 样本，跳过真档判据")
         val d = SaveFormat.read(bytes!!)
 
         // ---- 头（VariableEvaluator.cs:2594-2598）----
@@ -1325,7 +1428,7 @@ class SaveFormatAuditTest {
         assertEquals(10L, store.readInt("ITEM", longArrayOf(81L)), "ITEM[81] 写进了池子")
     }
 
-    /** 语料 `sav/` 优先，回落仓内只读样本目录（`.workbuddy/sav-backup/sav-20261018-110513`）。 */
+    /** 语料 `sav/` 优先，其次显式 `ERATW_SAVE_SAMPLES`（`-PsaveSamples` 由 build.gradle 导出）。 */
     private fun saveBytes(name: String): ByteArray? {
         gameDir()?.resolve("sav")?.resolve(name)?.let { if (Files.isRegularFile(it)) return Files.readAllBytes(it) }
         for (dir in SAMPLE_DIRS) {
@@ -1354,11 +1457,8 @@ class SaveFormatAuditTest {
             ?: throw AssertionError("全局块里没有 $key")
 
     private companion object {
-        /** 与 [SaveRoundTripTest] 同一批样本（md5 与语料根 `sav/` 逐字节相同）。 */
-        val SAMPLE_DIRS = listOf(
-            "../../.workbuddy/sav-backup/sav-20261018-110513",
-            "../.workbuddy/sav-backup/sav-20261018-110513",
-            ".workbuddy/sav-backup/sav-20261018-110513",
-        )
+        /** 显式样本目录：`-PsaveSamples` / `ERATW_SAVE_SAMPLES`（公开仓不内置内部备份）。 */
+        val SAMPLE_DIRS: List<String> =
+            listOfNotNull(System.getenv("ERATW_SAVE_SAMPLES")?.trim()?.takeIf { it.isNotEmpty() })
     }
 }

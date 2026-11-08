@@ -25,6 +25,8 @@ package com.eratw.port.core.expr
  */
 enum class ExprTokenKind {
     INT_LITERAL,
+    /** 浮点字面量（4.981 升版）：见 [ExprToken.floatValue]。 */
+    FLOAT_LITERAL,
     STR_LITERAL,
     FORM_STRING,
     IDENTIFIER,
@@ -52,6 +54,13 @@ data class ExprToken(
      * StrFormWord.Strs/SubWords 的结构，spec: StrForm.cs:206-353）。
      */
     val form: com.eratw.port.core.lexer.StrForm? = null,
+    /**
+     * FLOAT_LITERAL 专有：词法器 `Token.Float` 的数值（`0.7` / `1.5e3`）。
+     *
+     * 放在末位（而不是紧跟 [intValue]）：位置实参的既有调用点（测试装置
+     * `ExprToken(kind, text, 0L, line, col)` 与 FormStringTerm 的 6 参形态）因此不受影响。
+     */
+    val floatValue: Double = 0.0,
 ) {
     companion object {
         val EOL = ExprToken(ExprTokenKind.EOL, "")

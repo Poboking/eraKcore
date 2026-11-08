@@ -14,6 +14,7 @@ import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.Value
 import com.eratw.port.core.host.RuntimeAux
 import com.eratw.port.core.lexer.LexerConfig
+import com.eratw.port.core.save.SaveWiring
 import java.nio.file.Path
 
 /**
@@ -157,7 +158,7 @@ object ConfigMethods {
      *     `Program.cs:95` 的 `LoadConfig()` 之后才装载脚本，同样吃这份配置；
      *     移植侧编译发生在 erbcc 离线（无配置通道），维持出厂默认 true/false，
      *     差异登记在交付报告（语料 golden 装载告警里没有一条全角空格告警，
-     *     编译期读数不可观察，见 `.workbuddy/golden-pc-loadwarnings.txt`）。
+     *     编译期读数不可观察，见 `<internal-workdir>/golden-pc-loadwarnings.txt`）。
      *
      * 条目表走 [store]（aux 槽单例）：首次取用播种与 GETCONFIG 同一条路
      * （rooted 宿主三层链重放 / 覆盖表降级），语料 `emuera.config` 的
@@ -215,7 +216,7 @@ object ConfigMethods {
     }
 
     /**
-     * 用宿主播种一份条目表 —— 两条通道，顺序都有意义：
+     * 用宿主播种一份条目表 —— 两条通道 + 一道**链后回填**，顺序都有意义：
      *
      * **优先通道**（宿主实现了 [ConfigChainSource]，即开局已经读过盘的 rooted 宿主）：
      * 1. [seedHostState] 先写宿主**运行态**；
@@ -224,12 +225,15 @@ object ConfigMethods {
      *    spec: `ConfigData.cs:491-494`；窗口尺寸是配置读出来后才拿去开窗口的，
      *    `Config.cs` 的 `SetConfig` 全文 `:296` 起）。钉位（`fixed` 层）与 `-a` 改写
      *    这条通道**有**，降级通道没有。
+     * 3. [backfillWindowWidth] 把窗口宽**链后回填**（`Config.WindowX` 的原版终值是
+     *    「实际客户区宽」而不是配置值，见该函数 KDoc）。
      *
      * **降级通道**（宿主只交得出 `configOverrides` 表，例如只转发 `BuiltinHost` 成员的包装宿主）：
      * 同样先 [seedHostState] 再 [EmueraConfigParser.loadOverrideMap]。自本波起这张表本身就是
      * 三层链的合并快照（`core/proc/BootHosts.kt` 的 `configOverrides` 说明），
      * 所以两条通道的**读数相同**，只有钉位与 `EditorArgument` 的 Trim 两处差别
      * （逐条见 `EmueraConfigParser.loadOverrideMap` 的 KDoc 与交付报告）。
+     * 回填同样落在链后（第 3 步对两条通道一致）。
      *
      * [seedHostState] 的口径：宿主运行态（窗口宽高、字号、PRINTC 两项、存档页数、货币
      * 标签与位置、consoleStyle 的三色与字体名）覆盖出厂默认。原版的对应物是
@@ -252,7 +256,41 @@ object ConfigMethods {
         } else {
             EmueraConfigParser.loadOverrideMap(store, "host.configOverrides", host.configOverrides)
         }
+        backfillWindowWidth(store, host)
         return store
+    }
+
+    /**
+     * 窗口宽（`WindowX`）的**链后回填** —— 原版「按配置开窗、再把实际客户区宽回填」的移植形态
+     * （spec: `MainWindow.cs:726`：窗口创建后 `Config.WindowX = clientRectangle.Width`）。
+     *
+     * 为什么必须在三层链**之后**：`WindowX` 的原版终值是开窗**输出**（实际客户区宽），
+     * `emuera.config` 的 `WINDOW WIDTH` 只是开窗**输入** —— PC 上系统按请求值建窗后，
+     * 实际客户区可能因边框/最小尺寸/屏幕而不同，配置值活到开窗那一刻为止。
+     * 移植侧的对应读数是 [BuiltinHost.windowWidthScriptPx]：屏上实际版面宽按
+     * `CellMetrics.scriptPixels` 同尺逆折算的脚本 px（Android 无可调窗口，客户区宽 =
+     * View 解算的版面宽）。链前 [seedHostState] 播的 `WindowX` 会被三层链按原版方向
+     * 覆盖（文件值/缺省 760）—— 不回填的话播种**永不生效**：0.2.43（`0664085e`）的
+     * 「core/屏上同源」就是断在这一步（旧盘读数压住真机版面宽，`MAXWIDTH()` 掉到
+     * 除零区，`DEBUG.ERB` 的 `CFLAG_DEBUG` 行582 报「除数为0的除法运算」）。
+     *
+     * 只在接线（`windowWidthScriptPx > 0`）时写：headless / 既有装置读数逐值不变（R5.3）。
+     * 写入走 `ConfigItem.assign`：被 `fixed.config` 钉住的条目丢弃写入（原版 Fixed 最高优先级）。
+     * `WindowY` **不**在此回填：纵向未接线（用户裁定纵向观感零变化），保持链前播种语义。
+     */
+    fun backfillWindowWidth(store: ConfigStore, host: BuiltinHost) {
+        backfillWindowWidth(store, host.windowWidthScriptPx)
+    }
+
+    /** [backfillWindowWidth] 的数值形：`GameSession` 装配直接喂构造参数，不经宿主转发。 */
+    fun backfillWindowWidth(store: ConfigStore, windowWidthScriptPx: Long) {
+        if (windowWidthScriptPx <= 0L) return
+        store.itemOf(ConfigKey.WindowX).assign(
+            // 与 seedHostState.setInt 同口径：夹到 Int32 域（条目本身是 `ConfigItem<int>`）
+            ConfigValue.IntValue(
+                windowWidthScriptPx.coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt(),
+            ),
+        )
     }
 
     /**
@@ -275,6 +313,17 @@ object ConfigMethods {
     /** [useSaveFolder] 的 VM 面形：读当前 VM 装好的条目表。 */
     fun useSaveFolder(c: BuiltinContext): Boolean = useSaveFolder(store(c))
 
+    /**
+     * `Config.SavDir` 的相对前缀（spec: `Config.cs:471-481`）：`UseSaveFolder` 真 ⇒ `sav/`，假 ⇒ 根目录。
+     *
+     * 现值优先取会话装好的 [SaveWiring]（`GameSession` 把生效配置装进 aux），未装配时回落到条目表
+     * （[useSaveFolder]）。**存档的两条通道**——文本 `txt{index:00}.txt`
+     * （spec: `FunctionMethodCreator.cs:9466-9469`）与图片 `img{index:0000}.png`（spec: 同文件 `:9471-9474`）
+     * ——共用这一个口径；各拼各的前缀会让 `USE SAV FOLDER:NO` 的存档写到不同目录。
+     */
+    fun saveFolderPrefix(c: BuiltinContext): String =
+        SaveWiring.of(c.store)?.config?.saveFolderPrefix ?: if (useSaveFolder(c)) "sav/" else ""
+
 
     /**
      * 宿主运行态 → 条目现值（口径逐条来自切换前的 `DebugMiscMethods.ConfigState.seedFromHost`）。
@@ -288,7 +337,15 @@ object ConfigMethods {
                 ConfigValue.IntValue(raw.coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()),
             )
         }
-        setInt(ConfigKey.WindowX, host.clientWidth)
+        // R5.1：窗口宽优先吃 View **同尺逆折算**出来的脚本 px 版面宽 ——
+        // 宿主的 `WindowX = 版面宽(设备 px) × 脚本字号 / 真机字号`，核心据此算
+        // `drawableWidth = WindowX - max(2, FontSize/6)`，折算回设备像素后与屏上可绘制宽
+        // 差不到一格（C-WINDOW-SEED 的同源验收算式）。
+        // 未接线（0/负，headless / 既有装置）⇒ 逐字沿用 host.clientWidth（设备像素），零行为变化。
+        setInt(
+            ConfigKey.WindowX,
+            if (host.windowWidthScriptPx > 0L) host.windowWidthScriptPx else host.clientWidth,
+        )
         // spec: MainWindow.cs:726 —— WindowY 是外框高 = 客户区高 + 一行高
         setInt(ConfigKey.WindowY, host.clientHeight + store.itemOf(ConfigKey.LineHeight).int().toLong())
         setInt(ConfigKey.FontSize, host.fontSize)
@@ -382,6 +439,8 @@ object ConfigMethods {
         when (val v = valueInErb(store(c), name)) {
             is Value.IntV -> v.v
             is Value.StrV -> throw CodeEE(LangError.invalidType(GETCONFIG, GETCONFIGS))
+            // 浮点不是配置项类型（1.824 无浮点；TODO(verify)）。按「类型不符」拒绝。
+            is Value.FloatV -> throw CodeEE(LangError.invalidType(GETCONFIG, GETCONFIGS))
         }
 
     /** `string` 形：`GetConfigMethod.GetStrValue`（spec: `:6066-6073`）；镜像方向报对称的文案（`:6072`）。 */
@@ -389,6 +448,7 @@ object ConfigMethods {
         when (val v = valueInErb(store(c), name)) {
             is Value.StrV -> v.v
             is Value.IntV -> throw CodeEE(LangError.invalidType(GETCONFIGS, GETCONFIG))
+            is Value.FloatV -> throw CodeEE(LangError.invalidType(GETCONFIGS, GETCONFIG))
         }
 
     /**
@@ -462,6 +522,7 @@ internal fun registerConfigMethods(r: BuiltinRegistry) {
             when (val v = ConfigMethods.singleTerm(c, a, ConfigMethods.GETCONFIG)) {
                 is Value.IntV -> v
                 is Value.StrV -> throw CodeEE(LangError.invalidType(ConfigMethods.GETCONFIG, ConfigMethods.GETCONFIGS))
+                is Value.FloatV -> throw CodeEE(LangError.invalidType(ConfigMethods.GETCONFIG, ConfigMethods.GETCONFIGS))
             }
         },
     )
@@ -471,6 +532,7 @@ internal fun registerConfigMethods(r: BuiltinRegistry) {
             when (val v = ConfigMethods.singleTerm(c, a, ConfigMethods.GETCONFIGS)) {
                 is Value.StrV -> v
                 is Value.IntV -> throw CodeEE(LangError.invalidType(ConfigMethods.GETCONFIGS, ConfigMethods.GETCONFIG))
+                is Value.FloatV -> throw CodeEE(LangError.invalidType(ConfigMethods.GETCONFIGS, ConfigMethods.GETCONFIG))
             }
         },
     )

@@ -11,11 +11,8 @@ import com.eratw.port.core.expr.VariableReader
 import com.eratw.port.core.fn.BuiltinEvalContext
 import com.eratw.port.core.vars.DimSpec
 import com.eratw.port.core.vars.VariableStore
-import org.junit.jupiter.api.Assumptions
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
 import java.util.Locale
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -91,17 +88,14 @@ private fun docRef() = VarRef("XDOC", emptyList(), operandType = OperandType.STR
 private fun bufAt(store: VariableStore, index: Int): String =
     store.readStr("XBUF", longArrayOf(index.toLong()))
 
-/** 语料游戏根：优先 `ERATW_GAMEDIR`，回落 `ERATW_CORPUS` 的父目录（闸门里两者都导出）。 */
-private fun corpusGameRoot(): Path? {
-    val raw = System.getenv("ERATW_GAMEDIR")?.trim()?.takeIf { it.isNotEmpty() }
-        ?: System.getenv("ERATW_CORPUS")?.trim()?.takeIf { it.isNotEmpty() }
-        ?: return null
-    val p = runCatching { Paths.get(raw).toAbsolutePath().normalize() }.getOrNull() ?: return null
-    if (Files.isDirectory(p.resolve("plugins"))) return p
-    // ERATW_CORPUS 指到 .../ERB 时回退一层
-    val parent = p.parent ?: return null
-    return if (Files.isDirectory(parent.resolve("plugins"))) parent else null
-}
+/**
+ * 语料游戏根 + 根版本档（按根取列，见 [XmlCorpusFacts]）。
+ *
+ * 口径同 `core/config/ConfigChainTest`：`ERATW_GAMEDIR` 未设 / 目录不是语料根 /
+ * `plugins` 下缺 xml ⇒ **AssertionError 判红**并打印已认到的证据。旧实现是
+ * `corpusGameRoot() ?: Assumptions.assumeTrue(...)`：环境变量一缺用例就静默通过，等于把闸关掉。
+ */
+private fun corpusFacts(): XmlCorpusFacts = XmlCorpusFacts.detect()
 
 class XmlFamilyAuditTest {
 
@@ -504,16 +498,15 @@ class XmlFamilyAuditTest {
      */
     @Test
     fun `语料 plugins 下带 BOM 的 XML 可直接装载`() {
-        val root = corpusGameRoot()
-        Assumptions.assumeTrue(root != null, "缺 ERATW_GAMEDIR/ERATW_CORPUS：跳过语料 XML 装载")
-        val plugins = root!!.resolve("plugins")
+        val facts = corpusFacts()
+        val plugins = facts.root.resolve("plugins")
         val files = Files.list(plugins).use { s ->
             s.filter { Files.isRegularFile(it) }
                 .filter { it.fileName.toString().lowercase(Locale.ROOT).endsWith(".xml") }
                 .sorted(compareBy { it.fileName.toString() })
                 .toList()
         }
-        Assumptions.assumeTrue(files.isNotEmpty(), "plugins 下无 xml：跳过语料装载")
+        if (files.isEmpty()) throw AssertionError("$plugins 下没有 xml：语料根不完整，判红不降级")
         val (ctx, store) = auditEnv()
         var bomFiles = 0
         for (f in files) {
@@ -531,23 +524,30 @@ class XmlFamilyAuditTest {
             assertTrue(asv(ctx, "XML_TOSTR", key).isNotEmpty(), "$name XML_TOSTR 为空")
             assertEquals(1L, aiv(ctx, "XML_RELEASE", key), "$name 释放失败")
         }
-        // 语料事实：plugins 下 4 个 xml，其中 schema / tw_csv_chs / tw_taste_chs 带 BOM
-        assertEquals(4, files.size, "plugins 下 xml 文件数")
-        assertEquals(3, bomFiles, "带 BOM 的 xml 数")
+        // 语料事实（两根同值，实读）：plugins 下 4 个 xml，其中 schema / tw_csv_chs / tw_taste_chs 带 BOM
+        assertEquals(4, files.size, "plugins 下 xml 文件数（两根同值，实读）")
+        assertEquals(3, bomFiles, "带 BOM 的 xml 数（两根同值，实读）")
 
         // 独立 oracle：<map> 根文件里 <p> 的文本计数 == XML_GET 的命中数
-        val mapFile = files.first { it.fileName.toString() == "tw_csv_chs.xml" }
+        val mapFile = files.firstOrNull { it.fileName.toString() == "tw_csv_chs.xml" }
+            ?: throw AssertionError("$plugins 下缺 tw_csv_chs.xml：语料根形态不符 eraTW 规约")
         val mapRaw = Files.readString(mapFile, StandardCharsets.UTF_8)
         val pCount = "<p>".toRegex().findAll(mapRaw).count()
         assertTrue(pCount > 0, "tw_csv_chs.xml 里没有 <p>")
+        assertEquals(facts.mapEntries, pCount, "tw_csv_chs.xml 的 <p> 计数（按根取列）")
         assertEquals(1L, aiv(ctx, "XML_DOCUMENT", "TW_MAP", mapRaw))
         assertEquals(pCount.toLong(), aiv(ctx, "XML_GET_BYNAME", "TW_MAP", "/map/p"))
-        // 首个 <p> 是 <k> </k><v> </v>：纯空白文本节点在 PreserveWhitespace=false 下被丢弃，
+        // 纯空格 / 空 <k> 的条目序号按根取列：4.980 = p[1] / p[2]，4.981 = p[23] / p[24]。
+        // 纯空白/空文本节点在 PreserveWhitespace=false 下被丢弃，
         // 但 `<k>` 的 .NET `XmlElement.IsEmpty` 已经是 false（带结束标签的起始标签），
-        // 所以 OuterXml 写 `<k></k>` 而不是 `<k />`（dotnet 8.0.421 实测：语料同段
-        // `/map/p[1]/k` 的 OuterXml = `<k></k>`、InnerText = ""）。
-        assertEquals(1L, aiv(ctx, "XML_GET_BYNAME", "TW_MAP", "/map/p[1]/k", buf(), 3L))
+        // 所以 OuterXml 写 `<k></k>` 而不是 `<k />`（dotnet 8.0.421 实测口径不变，两根同值）。
+        assertEquals(1L, aiv(ctx, "XML_GET_BYNAME", "TW_MAP", "/map/p[${facts.emptyKEntry}]/k", buf(), 3L))
         assertEquals("<k></k>", bufAt(store, 0))
+        assertEquals(1L, aiv(ctx, "XML_GET_BYNAME", "TW_MAP", "/map/p[${facts.blankKEntry}]/k", buf(), 3L))
+        assertEquals("<k></k>", bufAt(store, 0))
+        // 首个有正文的条目按根取列：4.980 = p[3]（`　安眠薬`）、4.981 = p[1]（`营养`）
+        assertEquals(1L, aiv(ctx, "XML_GET_BYNAME", "TW_MAP", "/map/p[${facts.textEntry}]/k", buf(), 3L))
+        assertEquals("<k>${facts.textEntryK}</k>", bufAt(store, 0))
         assertEquals(1L, aiv(ctx, "XML_RELEASE", "TW_MAP"))
     }
 
@@ -644,31 +644,35 @@ class XmlFamilyAuditTest {
      */
     @Test
     fun `语料插件 XML 上的 text 步端到端`() {
-        val root = corpusGameRoot()
-        Assumptions.assumeTrue(root != null, "缺 ERATW_GAMEDIR/ERATW_CORPUS：跳过语料 XML")
-        val file = root!!.resolve("plugins/tw_csv_chs.xml")
-        Assumptions.assumeTrue(Files.isRegularFile(file), "plugins/tw_csv_chs.xml 不存在：跳过")
+        val facts = corpusFacts()
+        val file = facts.root.resolve("plugins/tw_csv_chs.xml")
+        if (!Files.isRegularFile(file)) throw AssertionError("缺 $file：语料根形态不符 eraTW 规约，判红不降级")
         val raw = Files.readString(file, StandardCharsets.UTF_8)
         val doc = XmlParser.parse(raw)
 
-        // 第 1 个 p 的 k 只有一个空格 ⇒ 纯空白文本节点已被丢弃，没有文本子节点
-        assertTrue(XmlPath.select(doc, "/map/p[1]/k/text()").isEmpty())
-        // 第 3 个 p 起是真实词条：text() 命中 1 个，值与元素 InnerText 相同
-        val kText = XmlPath.select(doc, "/map/p[3]/k/text()")
+        // 纯空格 / 空 <k> 的条目序号按根取列（4.980 = p[1] / p[2]，4.981 = p[23] / p[24]）：
+        // 纯空白文本节点已被丢弃，没有文本子节点 ⇒ text() 空
+        assertTrue(XmlPath.select(doc, "/map/p[${facts.blankKEntry}]/k/text()").isEmpty())
+        assertTrue(XmlPath.select(doc, "/map/p[${facts.emptyKEntry}]/k/text()").isEmpty())
+        // 首个有正文的条目按根取列：4.980 = p[3]「　安眠薬」、4.981 = p[1]「营养」；
+        // text() 命中 1 个，值与元素 InnerText 相同
+        val kText = XmlPath.select(doc, "/map/p[${facts.textEntry}]/k/text()")
         assertEquals(1, kText.size)
-        assertEquals(XmlPath.select(doc, "/map/p[3]/k").single().innerText, kText.single().value)
-        assertTrue(kText.single().value.isNotBlank(), "第 3 个 p 的 k 应有词条文本")
+        assertEquals(XmlPath.select(doc, "/map/p[${facts.textEntry}]/k").single().innerText, kText.single().value)
+        assertTrue(kText.single().value.isNotBlank(), "p[${facts.textEntry}] 的 k 应有词条文本")
+        assertEquals(facts.textEntryK, kText.single().value)
         // 独立 oracle：原始文本里非空 <k>…</k> 的个数 == //k/text() 的命中数
         val nonEmptyK = Regex("<k>([^<]*)</k>").findAll(raw).count { it.groupValues[1].isNotBlank() }
         assertTrue(nonEmptyK > 0, "tw_csv_chs.xml 里没有非空 <k>")
         assertEquals(nonEmptyK, XmlPath.select(doc, "//k/text()").size)
         // 联合同一节点只留一份（文档序去重）
-        assertEquals(1, XmlPath.select(doc, "/map/p[3]/k/text() | /map/p[3]/k/text()").size)
+        val onePath = "/map/p[${facts.textEntry}]/k/text()"
+        assertEquals(1, XmlPath.select(doc, "$onePath | $onePath").size)
 
         // 内建全链路：池 → 路径 → 结果数组
         val (ctx, store) = auditEnv()
         assertEquals(1L, aiv(ctx, "XML_DOCUMENT", "TW_MAP_TXT", raw))
-        assertEquals(1L, aiv(ctx, "XML_GET_BYNAME", "TW_MAP_TXT", "/map/p[3]/k/text()", buf()))
+        assertEquals(1L, aiv(ctx, "XML_GET_BYNAME", "TW_MAP_TXT", onePath, buf()))
         assertEquals(kText.single().value, bufAt(store, 0))
         assertEquals(1L, aiv(ctx, "XML_RELEASE", "TW_MAP_TXT"))
     }

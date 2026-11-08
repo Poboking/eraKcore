@@ -739,9 +739,58 @@ class L3HashChainTest {
         // [StateHash.rawPoolSnapshot] 只折进**末态**，而扁平池改成「分片惰性」后驻留池的构成
         // （哪些语句被解码过、串驻留到哪一步）随执行路径变化；游戏可见输出逐字节不变由
         // `E2EGoldenTest`（610 断言）+ `dualPathAudit`（20 万条 0 差异）单独背书。
+        // 2026-10-30 内存采样通道后重落**只有链尾**：链头 `94d30da083d7c2f5` 一字未动，链尾
+        // `4814083816222933021` → `7835760859817195493`（hex 6cbe36fc825037e5）。原因是
+        // `GraphicsBuffer` / `GraphicsPool` 各新增一枚诊断字段（像素驻留字节的原子计数器，
+        // 供 release 包的 UI 线程采样读「G 系像素常驻涨没涨」—— 板上那条 OOM 欠账的归因口），
+        // 而 [StateHash] 按**字段名**反射混入 aux:gfx 簇 ⇒ 池里一旦出现任何缓冲，簇值必变。
+        // 语义零改动由基线对照背书：把这两个字段撤掉后同装置重跑 (b) 判据绿（链尾回到旧值），
+        // 游戏可见输出另有 `E2EGoldenTest` 与图形簇单测（GraphicsPoolAccountingTest 5 例）。
+        // 2026-11-01 四落（4.981 语料切换 + G8/G9 批次，lane-golden 重落）：
+        // 装置树未动、仅 ERATW_CORPUS/ERATW_GAMEDIR 从 4.980（eratw-画蛇添足版eratw4.980）
+        // 切到 4.981（eraTW4.981-261017-EAGLOV3）后，(b) 节实测 链头 6b50957a5909ca4e /
+        // 链尾 14218d9d552a740c（build/l3-report.md「(b) 登记常量」）。
+        // 归因 = (b) 运行期从语料读入：4.981 语料的游戏 CSV（角色模板/名字表/尺寸表）、
+        // 游戏 ERH 顶层 #DIM 名单（ENUMVARENDSWITH 实证 +9 名）与 emuera.config 内容
+        // 进 StateHash 的 roster / sys-chara / sys-csv-const / string-pool / meta 各簇，
+        // 首节（#0 ROOT-INFO）即变 ⇒ 链头链尾同时重落。上一轮「三落」注的「链头不变」
+        // 只在 4.980 语料下成立，4.981 下被证伪。装置自洽背书：(a) 节两轮「差异: 无差异」、
+        // (f) 节 A/B/G 三轮逐节逐簇全量相同 ⇒ 非装置回归。链值是装置自产快照（非 PC 基准），
+        // 无 PC 对拍面；4.981 语料下语义面另有 E2EGoldenTest 全量对拍背书。
+        // 2026-11-01 audit-w2（GraphicsBuffer holder 换代）后重落**只有链尾**：链头
+        // `94d30da083d7c2f5` 一字未动。首落值 `-8080825638045515080`（hex 8fdb23e5706d82b8）取于
+        // W2 基线树；合流 origin/main（fix-strpool 串表压实 3b011ff8 + internStatementArgs 收紧
+        // 180fefaa）并入 main 后驻留池构成再变，合流树上 ERATW_L3_UPDATE=1 复跑重落为
+        // `8067141087527083726`（hex 6ff43e13db029ece）——原因同 10-30 条口径：[StateHash] 按
+        // 字段名反射混入 aux:gfx/语句池簇，holder 换代与串表压实都改驻留构成；游戏可见输出
+        // 由 host/fn 全量既有回归 + GraphicsBufferPublicationTest 4 例 + E2EGoldenTest 背书。
+        // 2026-11-01 主线合流（dev-4.981 收编 origin/main 184 条，merge 96d415c7 当日重落）：
+        // 上面两轮值各自只对自己那棵树成立；合流树 = main 的 r7b 前端下沉 + audit 修复 + 观察性波
+        // 与 dev-4.981 的 4.981 浮点族叠加，驻留构成再变 ⇒ ERATW_L3_UPDATE=1 复跑装置：
+        // **链头 6b50957a5909ca4e 一字未动**（= 4.981 批次四落值；首节 ROOT-INFO 簇对 main 侧
+        // 改动不敏感），**链尾 14218d9d552a740c → d67374e1090fecaf**（= -2993920817402745681；
+        // 归因同 10-30/audit-w2 口径：[StateHash] 按字段名反射混入 aux:gfx/语句池/串表簇，
+        // r7b 下沉与 fix-strpool 压实改驻留构成；装置自洽与游戏可见输出背书口径同上）。
+        // 2026-11-05 报告修复波合流头重落（本次）：语料根回到 §5 闸口径 **4.980**（上一笔登记值取于
+        // 4.981 树），且 11-01 以来 origin/main 收编了会进首节状态的初值喂池族
+        // （CONFIG-WIRE U1：EXPLV/PALAMLV/PBAND/RELATION/STAIN 初值 ← Config.cs:719-741 →
+        // VariableData.cs:3485-3504；以及 render/CONFIG-WIRE 面）⇒ **链头首次随之变化**
+        // （7732844912907504206 → 2243317918395005452，hex 1f21ddc2dc33fa0c），链尾
+        // -2993920817402745681 → -5121219222006767564（hex b8edc6403f626034）。
+        // 装置自洽背书：ERATW_L3_UPDATE=1 两遍复跑逐位相同（报告 md5 同、REPORTS_IDENTICAL=yes），
+        // (a)(c)(d)(e)(f) 判据全绿；未做逐提交 bisect，归因按「首节即变 = 初值/注册面变化」口径。
+        // 2026-11-07 HOST-02 重落（本次）：① 上一笔 2243317918395005452/-5121219222006767564 取于
+        // 4.980 语料根，与本机 BOARD 闸口径（golden 四类必须 4.981，见 BOARD「E2E golden 语料版本口径」）
+        // 不符 ⇒ (b) 在规定闸下必红；② 判据 (a)(f) 同进程两轮在 #11 GOLDEN_GVIEW 的 aux:gfx 分叉，
+        // 根因坐实为 `GraphicsBuffer.lastWriteAtMs`（D5 哨兵 `msSinceLastWrite` 的锚点，
+        // `System.nanoTime()` 派生）被 StateHash 按字段名反射混进簇 —— 宿主时钟派生字段按
+        // HOST_DERIVED_FIELDS 既定纪律排除（见该表 KDoc 2026-11-07 条），链头一字不动
+        // （ROOT-INFO 无图形写 ⇒ 7732844912907504206 与修复前 4.981 实测逐值同源），链尾重落。
+        // 装置自洽背书：ERATW_L3_UPDATE=1 两遍复跑报告 md5 逐位相同（e4c2a8c315514f01…），
+        // (a)(c)(d)(e)(f) 全绿；语义面另有 E2EGoldenTest 4.981 口径背书。非装置回归、非引擎回归。
         private const val REGISTRY_READY = true
-        private const val REGISTERED_HEAD = -7722813952952384779L
-        private const val REGISTERED_TAIL = 4814083816222933021L
+        private const val REGISTERED_HEAD = 7732844912907504206L
+        private const val REGISTERED_TAIL = 2845037848597185394L
 
         /** 私有 `#DIM` 的归属函数键（`FuncMeta.key` 大写去重排序），喂给 [StateHash] 的 user-private 簇。 */
         private val functionKeys: List<String> =

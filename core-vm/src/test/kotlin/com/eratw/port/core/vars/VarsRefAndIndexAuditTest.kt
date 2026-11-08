@@ -83,13 +83,13 @@ class VarsRefAndIndexAuditTest {
         s.declareUserVar(DimParser.parse("#DIM", "REF UR, 0", isPrivate = true), "F")
         s.declareUserVar(DimParser.parse("#DIMS", "REF US, 0", isPrivate = true), "F")
         s.enterFunction("F")
-        // spec: ReferenceToken.cs:32-43 —— array == null 一律 EmptyRefVar
+        // spec: ReferenceToken.cs:32-43 —— array == null 一律 EmptyRefVar（官方 zhs 见 VarErrorText）
         val e = assertFailsWith<CodeEE> { s.setAll("UR", 0) }
-        assertTrue(e.message!!.contains("EmptyRefVar"), e.message ?: "")
+        assertEquals("引用类型变量\"UR\"缺少引用对象", e.message)
         val e2 = assertFailsWith<CodeEE> { s.setAllStr("US", "") }
-        assertTrue(e2.message!!.contains("EmptyRefVar"), e2.message ?: "")
+        assertEquals("引用类型变量\"US\"缺少引用对象", e2.message)
         val e3 = assertFailsWith<CodeEE> { s.getLength("UR") }
-        assertTrue(e3.message!!.contains("EmptyRefVar"), e3.message ?: "")
+        assertEquals("引用类型变量\"UR\"缺少引用对象", e3.message)
         s.leaveFunction()
     }
 
@@ -131,9 +131,9 @@ class VarsRefAndIndexAuditTest {
         assertEquals(256L, target[18])
         assertEquals(0L, s.readInt("MAT", idx(0, 3)), "别的格子不得被连带写")
         assertEquals(0L, target[3])
-        // 逐维越界（Long 比较；文案按维号 + 该维长度，spec: ReferenceToken.cs:58-76）
+        // 逐维越界（Long 比较；文案按 1 基维号走官方 OoRVarArg，spec: ReferenceToken.cs:58-76）
         val e = assertFailsWith<CodeEE> { s.readInt("MAT", idx(0, 20)) }
-        assertTrue(e.message!!.contains("第 2 维下标 20"), e.message ?: "")
+        assertEquals("数组变量\"MAT\"的第2参数(20)超出数组范围", e.message)
         assertFailsWith<CodeEE> { s.writeInt("MAT", idx(5, 0), 1) }
         assertFailsWith<CodeEE> { s.writeInt("MAT", idx(-1, 0), 1) }
         assertEquals(0L, target[5], "越界写不得落到 1 号行")

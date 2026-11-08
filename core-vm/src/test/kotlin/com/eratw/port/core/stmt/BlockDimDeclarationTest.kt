@@ -8,6 +8,7 @@ import com.eratw.port.core.proc.SystemVariableBootstrap
 import com.eratw.port.core.vars.DimParseConfig
 import com.eratw.port.core.vars.DimParser
 import com.eratw.port.core.vars.VariableStore
+import java.util.Locale
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -120,6 +121,24 @@ class BlockDimDeclarationTest {
         assertTrue(spec.isRef)
         assertFalse(spec.isStatic, "REF 隐含 static=false（spec: UserDefinedVariableData.cs:115-116）")
         assertEquals(listOf(0, 0), spec.dims.toList(), "每个逗号一维 0（spec: UserDefinedVariableData.cs:309-320）")
+    }
+
+    /**
+     * 关键字归一锁 Locale.ROOT（2026-11-02 审查修正）：tr/az locale 下默认 `uppercase()`
+     * 会把 `i` 变成带组合点的 `İ`，`#dimf` 归一不出 `#DIMF` ⇒ 声明静默丢弃。
+     * 与 erbcc 侧 CorpusCompile.splitDeclaration 的 CMP-44 承诺同口径。
+     */
+    @Test
+    fun `splitDeclaration 在土耳其locale下仍识别dimf`() {
+        val original = Locale.getDefault()
+        try {
+            Locale.setDefault(Locale("tr", "TR"))
+            val split = assertNotNull(SystemVariableBootstrap.splitDeclaration("#dimf LOCALF, 3"))
+            assertEquals("#DIMF", split.first)
+            assertEquals("LOCALF, 3", split.second)
+        } finally {
+            Locale.setDefault(original)
+        }
     }
 
     // ---------------------------------------------------------------

@@ -1,6 +1,8 @@
 package com.eratw.port.core.proc
 
 import com.eratw.port.core.code.Program
+import com.eratw.port.core.code.InfiniteLoopAlert
+import com.eratw.port.core.code.InfiniteLoopAnswer
 import com.eratw.port.core.code.VmConfig
 import com.eratw.port.core.config.ConfigKey
 import com.eratw.port.core.config.ConfigStore
@@ -10,19 +12,24 @@ import com.eratw.port.core.data.csv.GameData
 import com.eratw.port.core.data.csv.GameDataLoader
 import com.eratw.port.core.data.csv.UserKeywordTables
 import com.eratw.port.core.expr.Expr
+import com.eratw.port.core.frontend.Symbols
 import com.eratw.port.core.fn.BuiltinHost
+import com.eratw.port.core.fn.ConfigMethods
 import com.eratw.port.core.fn.IdleInputState
 import com.eratw.port.core.fn.InputState
 import com.eratw.port.core.fn.TextMeasureRequest
+import com.eratw.port.core.host.FontDisplayWidth
 import com.eratw.port.core.host.GlyphMaskHost
 import com.eratw.port.core.host.InputSink
 import com.eratw.port.core.host.LineBufferConsoleSink
 import com.eratw.port.core.host.NoopSoundSink
 import com.eratw.port.core.host.SaveLoadHandoff
 import com.eratw.port.core.host.SoundSink
+import com.eratw.port.core.host.StaticFontDisplayWidth
 import com.eratw.port.core.host.mouseStateOf
 import com.eratw.port.core.lexer.installLexerMacros
 import com.eratw.port.core.loader.BootMetadata
+import com.eratw.port.core.loader.ModPatchLoader
 import com.eratw.port.core.save.EmSaveSets
 import com.eratw.port.core.save.FileSystemOps
 import com.eratw.port.core.save.RootedSaveFileIo
@@ -33,6 +40,7 @@ import com.eratw.port.core.sem.SemConfig
 import com.eratw.port.core.stmt.Statement
 import com.eratw.port.core.sem.SystemOps
 import com.eratw.port.core.vars.DimVarSizes
+import com.eratw.port.core.vars.GameBaseData
 import com.eratw.port.core.vars.VarConfig
 import com.eratw.port.core.vars.VariableRegistry
 import com.eratw.port.core.vars.VariableStore
@@ -116,9 +124,10 @@ import java.util.IdentityHashMap
  *   0（缺省）= 读 [configStore] 的 `PRINTCの文字数` 条目（注册缺省 25，spec: `ConfigData.cs:64`；
  *   静态字段读取点 spec: `Config.cs:327`）—— 设置页改这项后由下一局会话吃到。显式传 >0 时以宿主为准。
  * @param maxLines 显示行上限（原版 `Config.MaxLog`；语料 `emuera.config` 为 900）。
- * @param maxStepsPerRun 单次 `begin`/`resumeSystem` 的步数闸（防死循环）。缺省
- *   [DEFAULT_MAX_STEPS_PER_RUN] = 20,000,000 —— 5,000,000 会误伤重载模组的 `INIT_STARTINGLV`
- *   → `SHOW_ABLUP_SELECT`（红 J），详见该常量 KDoc。
+ * @param maxStepsPerRun 单次 `begin`/`resumeSystem` 的步数闸。ENGFIX-3（2026-11-05）起
+ *   **不再是死循环判据**——官方/skia 的死循环保护是墙钟 + 弹框问玩家（VmConfig.infiniteLoopAlertTimeMs
+ *   + VmHost.askInfiniteLoop），本字段降级为 [LoopGuardCause.DeviceBudget] 的装置预算/极端兜底，
+ *   语义见 [com.eratw.port.core.code.VmConfig.maxStepsPerRun] 的 KDoc。
  * @param randSeed RNG 种子。null = 交给 [ProcessRuntime] 的缺省（时钟，原版 `MTRandom` =
  *   `Environment.TickCount`，`MTRandom.cs:25-27`）；确定性地对拍时传常量。
  * @param soundSink 语句层音频 sink（缺省 [NoopSoundSink]；真机接 `TableSoundSink`）。
@@ -151,8 +160,11 @@ class GameSession(
      * [com.eratw.port.core.code.VmConfig.maxRunMillis]。
      *
      * **缺省 0 是刻意的**：装置（sweep / play / E2E）要的是「确定性复现」，墙钟在 CI 上
-     * 不稳定；生产由 [GameHost] 显式传 [DEFAULT_MAX_RUN_MILLIS] 当主判据，步数闸在那条路上
-     * 抬到 [PRODUCTION_MAX_STEPS_PER_RUN] 只作兜底。
+     * 不稳定；生产由 [GameHost] 显式传 [PRODUCTION_MAX_RUN_MILLIS]（同样 = 0，即不启用）。
+     * ENGFIX-3 起死循环判据归 [com.eratw.port.core.code.VmConfig.infiniteLoopAlertTimeMs]
+     * + [com.eratw.port.core.code.VmHost.askInfiniteLoop]（官方「弹框问玩家，不自动中止」
+     * 语义）；ENGFIX-4 起生产侧由 app 的 [infiniteLoopPrompt] 接 AlertDialog，
+     * 阈值取会话生效配置的 `InfiniteLoopAlertTime`（注册缺省 5000ms，置 0 关）。
      */
     maxRunMillis: Long = 0L,
     randSeed: Long? = null,
@@ -222,21 +234,41 @@ class GameSession(
      */
     private val stageMark: ((String) -> Unit)? = null,
     /**
-     * 脚本可见的屏幕像素两条：`CLIENTWIDTH` / `CLIENTHEIGHT` 的**设备像素**
-     * （消费点 ConsoleQueryMethods.kt:131/136）。缺省 = 原版出厂窗口值
+     * 屏幕**设备像素**两条（`CLIENTWIDTH` / `CLIENTHEIGHT` 的注入端，消费点
+     * ConsoleQueryMethods.kt:131/136）。缺省 = 原版出厂窗口值
      * （WindowX 760 / WindowY-LineHeight 461，spec: ConfigData.cs:56,57,67），
      * headless 与 PC 基准零行为差；真机由 GameHost 按控制台实测值注入
      * （缺省 760 会把状态页/体型图的像素换算缩到 1/3）。
+     *
+     * 这两条是**设备像素**，但交给脚本的读数不是：语料把 `CLIENTWIDTH()` 当脚本 px 用
+     * （拿它开 CG 画布），渲染层再按 `设备字号 / 配置字号` 折设备像素，所以会话把这两条
+     * 经 [ScriptPixels] 折回脚本坐标系后才给函数层（口径见 [ScriptScreenState] 的类文档）。
+     * 折算比例的另一半来自 [deviceFontPixelSize]。
      *
      * **字号不在这份注入里**（2026-10-29 修正）：`builtinHost.fontSize` 一律取会话自己算出的
      * 生效配置字号（[scriptFontPixelSize]），宿主喂不进来。为什么非不可喂，写在
      * [scriptFontPixelSize] 的 KDoc（一句话：语料的按钮网格用 `GETCONFIG("フォントサイズ")`
      * 当尺，量宽若换尺，一格就同时对不齐一次，攒到一行十几个就整排错位）。
-     * 这两条仍是设备像素、也仍由宿主注入 —— 它们没有「同源第二把尺」可对照，
-     * 原版读的就是真窗口像素。
+     * [deviceFontPixelSize] 是另一回事：它是**渲染层解算出的设备字号**（像素），只当折算比例
+     * 用，从不进 `GETCONFIG("フォントサイズ")` / `builtinHost.fontSize` 的读数。
+     *
+     * **只作为初值**（LIVE-REFLOW）：两条像素装进 [screenState] 交给 [builtinHost]，
+     * 之后窗口尺寸变化由 [resizeConsole] 就地更新，注入参数不再参与读数。
      */
     clientWidthPx: Long = BuiltinHost.DEFAULT_CLIENT_WIDTH,
     clientHeightPx: Long = BuiltinHost.DEFAULT_CLIENT_HEIGHT,
+    /**
+     * 渲染层解算出的**设备像素字号**（`ScreenLayout.resolve` 的 `fontPixelSize`）：
+     * 把 [clientWidthPx] / [clientHeightPx] 折回脚本 px 的比例分母，见 [ScriptPixels]。
+     *
+     * 0（缺省）= 未知 —— 折算恒等，headless / PC 基准 / 既有装置读数逐字不变。真机由
+     * GameHost 在会话装配前按 `view.cellMetrics().fontPixelSize` 取走；视口尺寸变化时由
+     * [resizeConsole] 跟随新版面更新（转屏会换字号档）。
+     *
+     * **不是** [scriptFontPixelSize]：后者是脚本坐标系的基准（生效 `Config.FontSize`），
+     * 两者只在 1:1 版面上同值。混用会把 2026-10-29 的指令按钮错位病灶重新引回来。
+     */
+    deviceFontPixelSize: Int = 0,
     /**
      * 带样式的分段量宽（FN-04 core）：`(请求) -> 像素宽`，生产由应用层把
      * `AndroidTextMeasure.measurePixels` 包一层传进来（字体族 / styleMask / charSpace）。
@@ -244,6 +276,20 @@ class GameSession(
      * headless 与既有基准读数零变化。
      */
     textMeasureRun: ((TextMeasureRequest) -> Long?)? = null,
+    /**
+     * **字体感知排版尺**（AA 画/老虎机字符画错位修复，2026-11）：控制台折行与按钮列位的
+     * 半角格宽度来源。`SETFONT` 在原版是「换字形**并**换尺」（每段宽度 =
+     * `StringMeasure.GetDisplayLength(Text, Font)` 的 GDI+ 实测，
+     * spec: `StringMeasure.cs:42-72` + `ConsoleStyledString.cs:25,82`）；移植版此前
+     * 折行恒走静态 CP932 表，块元素 `▂`/`▉` 被算成 2 格、比例字体的微调空格被放大，
+     * 红魔馆老虎机与觉的 AA 画因此在屏上错位/误折行。
+     *
+     * 真机由 `GameHost` 把 `CanvasConsoleView.fontDisplayWidth`（assets sidecar 的真实
+     * advance 尺）递进来 —— 它与绘制侧推进是同一只实例；缺省
+     * [StaticFontDisplayWidth] = 接线前的静态表，headless 与既有装置读数**逐值不变**。
+     * 契约与退化纪律见 [FontDisplayWidth]。
+     */
+    fontWidth: FontDisplayWidth = StaticFontDisplayWidth,
     /**
      * 存档目录迁移询问通道（M11-A-WIRE-2）。`USE SAV FOLDER` 由 NO→YES 且根目录还有旧档时，
      * [FileSystemOps] 会选「要不要搬」；null（缺省）= [SaveFolderMigration.AUTO_ACCEPT]，
@@ -255,6 +301,16 @@ class GameSession(
      */
     saveMigrationPrompt: ((title: String, message: String) -> Boolean)? = null,
     /**
+     * 死循环告警的宿主通道（ENGFIX-4），契约见 [com.eratw.port.core.code.VmHost.askInfiniteLoop]。
+     *
+     * null（缺省）= [InfiniteLoopAnswer.NoUi]：headless / 装置与改造前逐条一致。
+     * 真机由 `GameHost` 接一个 AlertDialog + `CountDownLatch` 的阻塞式实现：
+     * 本回调只在 **VM 线程**、两条语句之间同步调用，实现方必须阻塞到玩家作答为止，
+     * **不得在 UI 线程上调用本会话**；不得抛出（抛异常会被收口成脚本终局，
+     * [ProcessRuntime] 另有 runCatching 兜底）。
+     */
+    infiniteLoopPrompt: ((InfiniteLoopAlert) -> InfiniteLoopAnswer)? = null,
+    /**
      * **引擎级函数屏蔽表**（[EngineFunctionPolicy]）：命中名单的函数按「空体 `RETURN 0`」
      * 处理，与调用形态无关（静态 `CALL` / 动态 `CALLFORM` / `CALLF` / 尾跳 / 根级 API）。
      *
@@ -265,7 +321,143 @@ class GameSession(
      * 命中结果见 [stubbedFunctions]（宿主用来上屏/记日志，屏蔽本身是静默的）。
      */
     disabledFunctions: Set<String> = EngineFunctionPolicy.DEFAULT_DISABLED,
+    /**
+     * mods 补丁目录（R7-C4）。null（缺省）= 不装载补丁，装配行为与今天逐位一致（I1）；
+     * 非 null = 构造期走 [ModPatchLoader.load]（I5 全或无：任一补丁失败整体回退到无补丁
+     * 模式，结果见 [patchRolledBack] / [patchLoadFailures]），overlay 后的 Program 替换
+     * [program] 进运行期，补丁函数尾段拼进 FunctionTable、标签/数据节拼进 SidecarTables。
+     * 目录不存在或无补丁候选 = 行为与今天逐位一致。
+     */
+    val modsDirectory: Path? = null,
+    /**
+     * base `program.erbc` 的 SHA-256（64 位小写十六进制），补丁身份校验（I3）的比对对象。
+     * [modsDirectory] 非 null 时**必须**显式传入：Program 本身不记哈希（见
+     * `patchBaseIdentity` 的 KDoc），宿主装载 .erbc 时手里有字节，由它算出传入。
+     * null 且 [modsDirectory] 为 null = 与今天一致（该参数无消费点）。
+     */
+    val baseProgramSha256: String? = null,
+    /**
+     * LIVE-REFLOW 开关：false（缺省）= 现有「会话期宽度冻结」语义逐字不变，
+     * 横屏/竖屏的既有画面路径都走原分支；true = [LineBufferConsoleSink] 保留 journal，
+     * 允许 [resizeConsole] 在窗口尺寸变化时重排历史并更新脚本可见读数。
+     */
+    val reflowConsole: Boolean = false,
+    /**
+     * 键入回显（ECHO-INPUT）的引擎档位，正式定义见 [EchoInputMode]。
+     *
+     * - [EchoInputMode.REPLICA]（**core 层缺省**）= 原版 `EmueraConsole.cs:1280-1282`
+     *   那行回显照打且上屏；桌面装置、E2E golden 与全部既有定向用例都走这一档，逐字不变。
+     * - [EchoInputMode.SUPPRESSED] = **玩家侧缺省**：引擎在输入交付点就不产生那行显示行，
+     *   只由控制台行账本记一笔、并折算随后的 `deleteLine`。屏上没有数字，也没有帧差。
+     *
+     * 档位在会话装配期定死：输入 sink 按档位决定回显回调收到文本还是 null，控制台按同一
+     * 档位决定打印还是记账。壳层设置页改完重开一局生效（与 `reflowConsole` 同款口径）。
+     */
+    val echoInputMode: EchoInputMode = EchoInputMode.REPLICA,
+    /**
+     * 交给配置回填用的**脚本 px 版面宽**（R5.1；读数定义见 [BuiltinHost.windowWidthScriptPx]）。
+     *
+     * 0（缺省）= 未接线/未布局 ⇒ 回填层不写，`WindowX` 保持链读数（headless / 既有装置
+     * 逐值不变，R5.3）。
+     *
+     * 真机由 `GameHost` 喂 `CanvasConsoleView.windowWidthScriptPx()`：View 把**实际**排版用的
+     * 版面宽按 `CellMetrics.scriptPixels` 同一折算比反折成脚本 px，装配在三层链**之后**把它
+     * 回填成 `WindowX`（原版 MainWindow.cs:726 的「开窗后回填实际客户区宽」语义；链前播种
+     * 会被文件值/裸缺省 760 盖住，0.2.43 的「同源」就断在这一步）。核心
+     * `drawableWidth = WindowX - max(2, FontSize/6)` 折算到设备像素后与屏上可绘制宽同源
+     * （差不到一格；判据见计划 C-WINDOW-SEED 的同源验收算式）。
+     */
+    windowWidthScriptPx: Long = 0L,
 ) {
+
+    /**
+     * 会话期控制台尺寸变更（LIVE-REFLOW）：窗口尺寸变化时由宿主（UI 线程）调用。
+     *
+     * ## 语义（逐条对应冻结契约 CONTRACT-LIVE-REFLOW §4）
+     *
+     * 1. [reflowConsole] = false（缺省）⇒ 返回 false 且**不碰任何状态**（连参数校验都不做：
+     *    关闭态必须是彻底 no-op，含 `columns <= 0` 这类非法实参 —— 关态的调用方本就不该存在）。
+     * 2. `require(columns > 0)`、像素宽高非负（负像素是宿主算错，直接炸而不是静默记 0）。
+     * 3. 宽度是否真的变了由 [LineBufferConsoleSink.resize] 判定并执行重排，本类**不另判一次**
+     *    （同宽/仅高度变化 ⇒ sink 返回 false，历史行一个字都不动）。
+     * 4. 无论是否重排，像素宽高（以及本次解算出的设备字号）都写进 [screenState] ⇒
+     *    `CLIENTWIDTH()` / `CLIENTHEIGHT()` 的下一次求值即新值（原版这两条是控件活尺寸，
+     *    EmueraConsole.cs:232/234）。读数经 [ScriptPixels] 折成脚本 px 后交给脚本，
+     *    转屏换了字号档时那一格也必须一起更新，否则比例分母停在旧档。
+     * 5. 重排发生时同步 `DRAWLINESTR` 伪变量背衬：`store.drawLineStr = console.stBar`
+     *    （原版 PrintBar 与 DRAWLINESTR 读同一个 stBar 字段，EmueraConsole.cs:3392/3417 +
+     *    VariableData.cs:976-986；stBar 按宽度成型于 :3441 `setStBar`）。`optionsDirty` /
+     *    revision / serial / lineNo 的记账全部由 sink 负责，本类不插手。
+     * 6. 返回 sink 的重排结论（`false` = 开关关闭 / 宽度未变 / 无需重建，且前后无可见差异）。
+     *
+     * ## 明确不做
+     *
+     * - **不重算 `#DIM` 的 `GETLINESTR` 折叠**：装载期折叠（[SystemVariableBootstrap.install]
+     *   的 `consoleWidth`，实现 `vars/UserVariables.kt` 的 `getLineStr`）用的是**半角格**宽度，
+     *   而折叠结果是变量池里的**声明期常量** —— 原版同样只在装载期算一次，运行中改窗口不会
+     *   回写已声明的布局变量。这里重算等于改语义（见 `GameSession.kt` 装配段 4/4b 的两处注释）。
+     * - **不动 Config 层**：`PRINTCLENGTH` / `PRINTCPERLINE` / 字号 / MaxLog 一个都不改
+     *   （它们来自 `emuera.config` 条目表，属于下一次会话装配才重读的那一份）。
+     *
+     * ## 线程
+     *
+     * 调用方是 UI 线程（窗口尺寸变化回调）；与 VM 线程的并发由 sink 自己在
+     * `synchronized(displayLines)` 内处置（见 `LineBufferConsoleSink.resize`）。
+     * **不要**从 VM 步进线程内调用（会与正在执行的语句抢同一份显示行）。
+     *
+     * @return true = 历史行已按新宽度重排；false = 未重排（见上面第 6 条）。
+     */
+    fun resizeConsole(
+        columns: Int,
+        widthPx: Long,
+        heightPx: Long,
+        deviceFontPixelSize: Int? = null,
+    ): Boolean {
+        if (!reflowConsole) return false
+        require(columns > 0) { "控制台列数必须为正：$columns" }
+        require(widthPx >= 0 && heightPx >= 0) { "屏幕像素不能为负：$widthPx x $heightPx" }
+        require(deviceFontPixelSize == null || deviceFontPixelSize >= 0) {
+            "设备字号不能为负：$deviceFontPixelSize"
+        }
+        return applyResizeOutcome(console.resize(columns), widthPx, heightPx, deviceFontPixelSize)
+    }
+
+    /**
+     * [resizeConsole] 的**后置段**：像素读数落账 + 重排后同步 `DRAWLINESTR` 背衬。
+     *
+     * internal 只为定向单测：L1 路的 `LineBufferConsoleSink.resize` 在本次工作树里仍是
+     * 骨架（`reflowEnabled = true` 时显式抛错），`reflowed = true` 这一支在本树内无法
+     * 端到端产出；拆出这一段后，单测可以用真实 [store] / [console] 断言「重排后必须换串」
+     * 这条生产语句，而不是把分支留成未验证的死角。生产装配只从 [resizeConsole] 进来，
+     * 语义上不存在第二条入口。
+     *
+     * @param reflowed [LineBufferConsoleSink.resize] 的结论（宽度是否真的变了）
+     * @param deviceFontPixelSize 本次版面解算出的设备字号；null = 沿用现值（既有装置只报像素）
+     */
+    internal fun applyResizeOutcome(
+        reflowed: Boolean,
+        widthPx: Long,
+        heightPx: Long,
+        deviceFontPixelSize: Int? = null,
+    ): Boolean {
+        screenState.update(widthPx, heightPx, deviceFontPixelSize)
+        if (reflowed) store.drawLineStr = console.stBar
+        return reflowed
+    }
+
+    /**
+     * 脚本可见的屏幕像素（`CLIENTWIDTH()` / `CLIENTHEIGHT()` 的活数据源）。
+     *
+     * 初值 = 构造参数 [clientWidthPx] / [clientHeightPx]（真机 = 内容区实测值，headless =
+     * 出厂 760 x 461 ⇒ 读数与未接本类时逐字相同）；[resizeConsole] 之后跟着窗口尺寸走。
+     * 折算比例的两端：设备字号 = [deviceFontPixelSize]，脚本字号由**取数侧**每次现传
+     * （[scriptFontPixelSize]，生效配置字号），本属性只存设备侧的原始读数 —— 设备字号与
+     * 脚本字号都不在 `init` 之后才补，故**构造即可读**。
+     * 装配期即交给 [builtinHost] 的 `screenState`（同一实例，不复制），函数层的自定义
+     * getter 每次求值现读（见 [ConsoleBuiltinHost.clientWidth]）。
+     */
+    val screenState: ScriptScreenState =
+        ScriptScreenState(clientWidthPx, clientHeightPx, deviceFontPixelSize)
 
     init {
         require(metadata.functions.isNotEmpty()) {
@@ -296,7 +488,11 @@ class GameSession(
     /** 输入队列：宿主（UI/触屏/宏）把「回车提交的原始文本」投进来，脚本侧阻塞等它。 */
     val inputSink: QueueInputSink = QueueInputSink()
 
-    /** BEGIN 状态机的宿主面：四个 `await*` 全部接到 [inputSink] 的同一队列，`writeLine` 走 [console]。 */
+    /**
+     * BEGIN 状态机的宿主面：四个 `await*` 全部接到 [inputSink] 的同一队列，`writeLine` 走 [console]，
+     * 等待入口的脚本行身份走 [beginWaitScriptLineToken] + [beginWaitPageIdentity]
+     * （OBS2-L5：重等后屏上旧按钮保持可点）。
+     */
     val beginHost: ConsoleBeginHost
 
     /** 内建函数宿主（文件 IO / 时钟 / 存档槽探测 / 配置覆盖）；写请求在这里被拒并计数。 */
@@ -310,6 +506,20 @@ class GameSession(
 
     /** 运行期（语句/表达式/CALL 家族/BEGIN 状态机）。 */
     val runtime: ProcessRuntime
+
+    /**
+     * [runtime] 的**就绪标记**（跨线程读，`@Volatile`）：装配完成前为 null，
+     * [setBackgroundPaused] 据此决定「直接转发」还是「先记住意图」（消除启动期竞态）。
+     * 构造完成后与 [runtime] 是同一实例。
+     */
+    @Volatile
+    private var runtimeRef: ProcessRuntime? = null
+
+    /** [setBackgroundPaused] 的握手机（与 [runtimeRef] 的发布/消费配对，见该方法）。 */
+    private val backgroundPauseLock = Any()
+
+    /** runtime 尚未就绪时收到的暂停意图（true/false）；装配完成后立即应用并清空。 */
+    private var pendingBackgroundPause: Boolean? = null
 
     /**
      * 实际被**引擎屏蔽**的函数名（[EngineFunctionPolicy] 命中 `program.functions` 的结果；
@@ -336,6 +546,42 @@ class GameSession(
     val privateDimDeclared: Int
 
     /**
+     * R7-C4：mods 补丁装载的原始结果（装配期一次；公开读数经 [loadedPatches] 等投影）。
+     * null = [modsDirectory] 未启用（与今天一致）。
+     */
+    private val patchLoadResult: ModPatchLoader.Result?
+
+    /**
+     * R7-C4：补丁函数的运行期元数据尾段（FunctionTable 追加的输入，见
+     * [buildPatchFunctionMetas]）。空 = 无补丁或整体回退。internal 只为定向单测能直接
+     * 断言 argInt/argStr 分桶与装载序（I7 的函数级读数面）。
+     */
+    internal val patchFunctionMetas: List<FuncMeta>
+
+    /**
+     * R7-C4（I7）：已装载补丁清单（补丁名 + 函数数 + 补丁段指令数 + 函数键）。
+     * DevTools 的「已装载补丁」页（UI 面归 C5）吃这一份；整体回退时为空。
+     */
+    val loadedPatches: List<ModPatchLoader.LoadedPatch>
+        get() = patchLoadResult?.loadedPatches ?: emptyList()
+
+    /**
+     * R7-C4（I7）：装载失败清单。条目 = `补丁名: 原因`，原因自带补丁头内行号/pc/字段名
+     * （补丁头解析错带「第 N 行」、身份不符带「字段 期望/实为」、补丁体错带 pc）。
+     * 非空 ⇔ [patchRolledBack]（I5：任一失败整体回退）。
+     */
+    val patchLoadFailures: List<String>
+        get() = patchLoadResult?.failures ?: emptyList()
+
+    /** R7-C4（I7）：装载期非致命告警（如补丁容器缺形参名 ⇒ ARG/ARGS 桶不绑定）。 */
+    val patchLoadWarnings: List<String>
+        get() = patchLoadResult?.warnings ?: emptyList()
+
+    /** R7-C4（I5）：补丁装载是否整体回退（true = 补丁全部未生效，会话按无补丁模式运行）。 */
+    val patchRolledBack: Boolean
+        get() = patchLoadResult?.rolledBack ?: false
+
+    /**
      * ERD 装载期的告警清单（`erd名#下标位` 前缀的挂表失败文案 + 裸文案的 level 1 重名告警）。
      *
      * spec: ErhLoader.cs:328-332 —— 原版逐条 `#DIM` 套 try/catch，重键/重复登记降级成
@@ -356,6 +602,26 @@ class GameSession(
 
     /** [mouseWarnings] 的后备缓冲（装配期经 [mouseStateOf] 接到 MouseState.warnRecorder）。 */
     private val mouseWarnBuffer = ArrayList<String>()
+
+    /**
+     * CALLSHARP 的**装载趟警告**（CSHARP-WIRE C3，2026-11-06）：宿主装配段跑完
+     * core/fn 的 `prefillSharpLinks` 后回填的「No native method X found」清单
+     * （官方英文原样，`FunctionIdentifier.cs:1204`，ADR-005；顺序 = 语句池序 = 原版装载序）。
+     *
+     * 形态对齐原版 `ParserMediator.cs:143-158` 的 warningList：装载期记、装载完一起交出、
+     * **之后不重发**（预填对已裁决行幂等跳过）。呈现面 = 宿主的既有日志通道
+     * （GameHost 装配段 Log.w）；本清单是会话读数面（同 [erdWarnings] / [mouseWarnings]
+     * 的形状），给取证/诊断页直接读，不必再扫一遍语句池。
+     */
+    val sharpLoadWarnings: List<String> get() = sharpWarnBuffer
+
+    /** [sharpLoadWarnings] 的后备缓冲（宿主装配段经 [recordSharpLoadWarnings] 回填）。 */
+    private val sharpWarnBuffer = ArrayList<String>()
+
+    /** 宿主装配段把 `prefillSharpLinks`（core/fn）的返回值交进来（C3 的会话读数面）。 */
+    fun recordSharpLoadWarnings(warnings: List<String>) {
+        sharpWarnBuffer.addAll(warnings)
+    }
 
     /**
      * 会话配置（原版 `ConfigData.Instance` 的只读快照来源）。
@@ -400,7 +666,7 @@ class GameSession(
      * ## 机型自适应（2026-10-29 复查补的读数）
      *
      * 补齐段落的落地格数 = `ceil(补齐px × 机型字号 / 18 ÷ (0.52 × 机型字号))` —— **机型字号在分子
-     * 分母同时出现、整个约掉**，所以换任何 page-fit 档（`PageFitter` 从 30px 到平板那档 60+）
+     * 分母同时出现、整个约掉**，所以换任何字号档（30px 到平板那档 60+）
      * 落点都不变；会被机型影响的是**随包字体的半角前进量**（这条尺上 9 上下），语料这批指令
      * 标签（8–22 半角）的闭合区间约 8.94–9.30，黄金基线量到的 9.03 落在正中。区间外的最坏情况
      * 是少占**一格**，不再是从前那种「一枚差半格、一行攒成整排平移」。两条读数都钉在
@@ -422,6 +688,41 @@ class GameSession(
     val saveWiring: SaveWiring
 
     init {
+        // 0) mods 补丁装载（R7-C4，CONTRACT-R7-C §2/C4）。必须在 #DIM 注册（第 5 步）、
+        //    语句规范化（7b）与 ProcessRuntime（第 8 步）之前：overlay Program 要替换
+        //    [program] 进运行期，补丁的私有 #DIM / 标签 / 数据节要拼进各装配段。
+        //    I1：modsDirectory = null（或目录无候选）时 patchLoad 各段全空，
+        //    effectiveProgram === program，以下每一处拼接都退化为「原样传入」。
+        val patchLoad: ModPatchLoader.Result? = if (modsDirectory != null) {
+            val sha = requireNotNull(baseProgramSha256) {
+                "modsDirectory 非空时 baseProgramSha256 必须显式传入：补丁身份校验（I3）要比对 " +
+                    "base program.erbc 的 SHA-256，而 Program 本身不记哈希" +
+                    "（宿主装载 .erbc 时手里有字节，由它算出传入）。"
+            }
+            ModPatchLoader.load(modsDirectory, program, sha).also {
+                stageMark?.invoke("session.patches")
+            }
+        } else {
+            null
+        }
+        val effectiveProgram: Program = patchLoad?.program ?: program
+        if (effectiveProgram !== program) {
+            // overlay 产物的扁平通道开关是构造缺省（true），不会自动继承 base 装载路径的
+            // 开关；不同步的话 Android 生产（flatStatements = false，第 8b 步按 false 建
+            // 数据节反查表）会按 true 走错通道。overlay 是本模块构造的新实例，同步是
+            // 装配期一次性写，不影响 base（I4）。
+            effectiveProgram.flatStatementsEnabled = program.flatStatementsEnabled
+        }
+        val patchMetas: List<FuncMeta> =
+            buildPatchFunctionMetas(effectiveProgram, program, patchLoad, metadata.functions)
+        val patchLabels: Map<String, Map<String, Int>> = patchLoad?.labels ?: emptyMap()
+        val patchDataSections: Map<Int, List<List<Expr>>> = patchLoad?.dataSections ?: emptyMap()
+        patchLoadResult = patchLoad
+        patchFunctionMetas = patchMetas
+        // I1：段名轨迹只在启用 mods 时多两段（session.patches / session.patchwire）；
+        // modsDirectory = null 时轨迹必须与今天逐字一致（GameSessionStageMarkTest 钉死）。
+        if (patchLoad != null) stageMark?.invoke("session.patchwire")
+
         // 1) 游戏数据（缺失 = null，不阻断）
         gameData = GameDataLoader.load(gameRoot.resolve(CSV_DIR_NAME))
         stageMark?.invoke("session.csv")
@@ -436,6 +737,16 @@ class GameSession(
         // 落盘后由**下一次**会话构造吃到，见 SettingsActivity 的口径）。三条通道共用它：
         // 控制台（PRINTC 两项 / 字体 / 日志行数）、存档（SaveConfig / SAVENOS）、语句层。
         this.configStore = configStore ?: ConfigStore().also { rooted.applyChainTo(it) }
+        // R5.1 收口（0.2.43 同源补完）：`WindowX` 的**链后回填** —— 原版按配置开窗后把
+        // **实际**客户区宽回填 `Config.WindowX`（MainWindow.cs:726），移植侧的对应读数是
+        // [windowWidthScriptPx]（View 实际版面宽的同尺逆折算）。它必须落在三层链之后：
+        // 链前播种会被文件值/裸缺省 760 盖住（原版方向），core 的 `drawableWidth` 就停在
+        // 760 脚本 px ≈ 42 格而屏上是 139 列 —— `MAXWIDTH()` 掉进除零区（DEBUG.ERB
+        // `CFLAG_DEBUG` 行561/575 的 `/45`、`/90`），HTML_PRINT 折行尺也与屏上分叉。
+        // 外部传入 [configStore] 的装配者自己管配置，不回填（行为与接线前一致）。
+        if (configStore == null) {
+            ConfigMethods.backfillWindowWidth(this.configStore, windowWidthScriptPx)
+        }
         val effective = EffectiveConfig.of(this.configStore)
         // 脚本 px 的基准字号（渲染侧折设备像素用；口径见 [scriptFontPixelSize] 的 KDoc）。
         // 取**生效值**而不是条目原值：`Config.cs:431-435` 把 <8 抬到 8，条目原值是个会被
@@ -458,6 +769,12 @@ class GameSession(
         // 与变量池的 DRAWLINESTR 伪变量背衬（getDefStBar，spec: EmueraConsole.cs:3437-3441）——
         // 原版两处读同一个 stBar 字段，本层也必须同串。
         val drawLineUnit = effective.source.itemOf(ConfigKey.DrawLineString).string().ifEmpty { "-" }
+        // W8 刀四：`Config.ForeColor`（「文字色 / TEXT COLOR」，ConfigData.cs:68 出厂 192,192,192）。
+        // 原版在控制台构造期把它写进两个 StringStyle（EmueraConsole.cs:206-208），RESETCOLOR
+        // 的落点也是它（FunctionIdentifier.cs:1501）⇒ 与字体名/行数是同一条装配规矩。
+        // 解析走条目本体（effective.color ⇒ ConfigItem.cs:252-274 的 tryStringsToColor 口径），
+        // 语料 `emuera.config:24` = 192,192,192 与工厂常量同值 ⇒ 基准读数不变。
+        val foreColor = effective.color(ConfigKey.ForeColor)
         console = LineBufferConsoleSink(
             clientWidth = consoleWidth,
             // `Config.PrintCLength`（spec: `Config.cs:327` 读静态字段）：显式参数优先，
@@ -468,6 +785,61 @@ class GameSession(
             buttonWrap = buttonWrap,
             frameGateEnabled = frameGateEnabled,
             barUnit = drawLineUnit,
+            defaultForeColor = (foreColor.r shl 16) or (foreColor.g shl 8) or foreColor.b,
+            // CONFIG-WIRE U5 追加三色（与 ForeColor 同一条装配规矩，都是 EmueraConsole 构造期
+            // 从 Config 静态字段取的初值）：解析同走 effective.color（ConfigItem.cs:252-274）。
+            //   * defaultBackColor —— EmueraConsole.cs:200 bgColor 初值（ConfigData.cs:69 出厂
+            //     0,0,0；语料 `emuera.config:25` 同值 ⇒ 基准读数不变）。
+            //   * focusColor —— 按钮焦点绘制 + GETFOCUSCOLOR 的源（ConfigData.cs:70 出厂
+            //     255,255,0；语料 `emuera.config:26` 同值）。
+            //   * logColor —— 履历绘制前景（ConsoleStyledString.cs:115/:153；ConfigData.cs:71
+            //     出厂 192,192,192，语料 `emuera.config:27` = 128,128,128 **不同值** ⇒ 必须吃
+            //     生效条目，渲染壳层经 feed 链自取）。
+            defaultBackColor = effective.color(ConfigKey.BackColor).let { (it.r shl 16) or (it.g shl 8) or it.b },
+            focusColor = effective.color(ConfigKey.FocusColor).let { (it.r shl 16) or (it.g shl 8) or it.b },
+            logColor = effective.color(ConfigKey.LogColor).let { (it.r shl 16) or (it.g shl 8) or it.b },
+            reflowEnabled = reflowConsole,
+            // HTML 图形段折行计宽的基尺（2026-11-05 遗留①）：与 [scriptFontPixelSize] 同源
+            // （= 生效配置字号），渲染侧 `HtmlRunFlatten` 的图形格宽由同一把尺量化 ——
+            // 折行与屏上实占同格数，img/shape 行不再「攒到超宽才折、右沿裁切」。
+            scriptFontSize = effective.fontSize,
+            // 图元尺寸源（`<img>` 缺 width 时按基图纵横比推宽，原版 ConsoleImagePart.cs:66-70）：
+            // 现读 aux 的 SpritePool（与 BuiltinHost.imageSizeOf 同一份表，见 AuxMacroHost 的
+            // KDoc）。lambda 在**打印期**才求值 —— 池在会话装配后段才装好，构造期取到 null
+            // 会让缺 width 的图元一直计 0 格（神签/画像表示那类「只给 height」的写法）。
+            imageSizeOf = { name ->
+                store.aux.peek<com.eratw.port.core.host.SpritePool>(com.eratw.port.core.host.SPRITE_SLOT)
+                    ?.find(name)
+                    ?.let { com.eratw.port.core.host.ImageSizePx(it.width, it.height) }
+            },
+            // 文本像素真值（FONT-MEASURE，2026-11-06）：div 锚点/按钮列位的行内游标里，
+            // **文本段**的像素不再一律按「格 × FontSize/2」的等宽近似推进，改问宿主的真字体
+            // 度量 —— 与原版同一把尺（`StringMeasure.GetDisplayLength` 的 GDI+ 实测，
+            // StringMeasure.cs:42-72）：比例字体（语料 `SETFONT "Saitamaar"`）下等宽近似与
+            // 实测的差，就是锚点/按钮列位偏的像素量。
+            //
+            // 复用**已有的** `textMeasureRun` 注入口（app 侧 `GameHost` 包的是
+            // `AndroidTextMeasure.measurePixels`，`GameHost.kt:3485`；FN-04 也是这条链），
+            // 不新造表、不改 app。请求按「会话缺省三件套」组装：字体 = 生效 `FONT NAME`
+            // （语料 emuera.config:21 「黑体」），字号 = 生效字号（与 [scriptFontPixelSize] /
+            // 宿主 `fontSize` 同源），样式位 0 —— 本通道的签名只吃纯文本，SETFONT/FONTBOLD
+            // 的逐段样式不随字符区间携带（见 `LineBufferConsoleSink.textPxOf` 的 KDoc）。
+            //
+            // 求值时机 = **打印期**：lambda 在每次 div 锚点/列位量宽时才调宿主，装配期不量。
+            // null（缺省，golden / headless / 装置）= 未接线 ⇒ sink 回落旧算式，读数逐位不变。
+            textPxOf = textMeasureRun?.let { measure ->
+                { text: String ->
+                    measure(TextMeasureRequest(text, fontName, effective.fontSize.toLong(), 0))?.toInt()
+                }
+            },
+            // div 覆盖块逃逸判定的行高（CONTRACT-DIV-WIRE W3，替代出厂缺省 19）：
+            // `Config.LineHeight` 的生效值（Config.cs:334 读取 + :436-440 不足字号抬到字号，
+            // EffectiveConfig.lineHeight 同一条夹取），与 app 侧 `applyBootFontMetrics` 灌给
+            // View 的是**同一个 effective**（GameHost.kt）—— sink 的逃逸判定与真机版面同尺。
+            // 缺省 19 保持给不喂这参的构造点（headless 纯 JVM 测试零行为）。
+            lineHeightPx = effective.lineHeight,
+            // 排版尺（AA 画修复）：缺省静态表，真机注入 `CanvasConsoleView.fontDisplayWidth`。
+            fontWidth = fontWidth,
         )
         stageMark?.invoke("session.config")
 
@@ -493,6 +865,20 @@ class GameSession(
                 // 是否按 ERD 口径减一（FunctionMethodCreator.cs:3449-3452）。此前本构造点不喂，
                 // 该配置恒取缺省 false ⇒ 改成 YES 也不分叉。取值面在 `VarMethods.VARSIZE`。
                 varsizeDimConfig = effective.bool(ConfigKey.VarsizeDimConfig),
+                // CONFIG-WIRE U1/U2：初值四件改吃生效条目。原版链：emuera.config 条目 →
+                // `Config.SetReplace`（Config.cs:719-741，REPLACE 组连 _Replace.csv 链）→
+                // `VariableData.SetDefaultValue` 用静态字段灌池（EXPLV/PALAMLV：
+                // VariableData.cs:3485-3490 的 CopyTo+Min 截断；PBAND：:3501-3504；
+                // RELATION：CharacterData.cs:166-169 逐角色整列）。此前本构造点不喂这四件，
+                // 恒吃 VarConfig 缺省 ⇒ 玩家改「EXPLVの初期値」等条目永不生效。
+                // 条目侧解析（longList/long）与出厂缺省同值（ConfigData.cs:171-174），
+                // 语料 `emuera.config` 无 REPLACE 段 ⇒ 条目值 = 缺省值，基准零漂移。
+                // 取数走 [effective]（会话条目表，applyChainTo 已把 _Replace.csv 链放进去），
+                // 与喂给控制台/语句层的是同一份真相。
+                palamLvDef = effective.source.itemOf(ConfigKey.PalamLvDef).longList().toLongArray(),
+                expLvDef = effective.source.itemOf(ConfigKey.ExpLvDef).longList().toLongArray(),
+                pbandDef = effective.long(ConfigKey.pbandDef),
+                relationDef = effective.long(ConfigKey.RelationDef),
             ),
         )
         // `MONEYLABEL` 伪变量（spec: `VariableData.cs:962-971` 的 MONEYLABEL_Token 读
@@ -520,6 +906,16 @@ class GameSession(
         //     aux 槽实例即 fn 层 mouseState(c) 取到的同一份（MouseState.kt 的取用约定），
         //     一处装配全 VM 生效；aux.clear() 生产路径无人调用（grep 仅测试命中），不存在装配丢失面。
         mouseStateOf(store.aux).warnRecorder = mouseWarnSink ?: { mouseWarnBuffer.add(it) }
+
+        // 3b-2) MOUSEX() / MOUSEY() 的单位（2026-11-07，与 CLIENTWIDTH 同一把尺）：宿主报的是
+        //       **设备像素**坐标与客户区尺寸（命中测试/越界判定也在这个坐标系里做），读数出口
+        //       折回**脚本 px**。语料拿 MOUSEX() 排 UI 位置（`UI_Container_Framework.ERB:823`
+        //       的 `POS_X = MOUSEX() + MARGIN_PX`，该 px 直接写进脚本几何），又与
+        //       `GETCONFIG("ウィンドウ幅")` 比（`开锁系统.ERB:230`）；不折就是在放大
+        //       `设备字号 / 配置字号` 倍的坐标系里摆脚本 px 的 UI —— 弹窗出屏、角度过 1。
+        //       折算比例取 [screenState]（转屏换字号档自动跟随）；字号未注入（0）或 1:1
+        //       版面时恒等，既有装置读数逐字不变。
+        mouseStateOf(store.aux).pointerToScriptPx = { v -> screenState.scriptPx(v, scriptFontPixelSize) }
 
         // 3c) 运行期词法宏表（CMP-34 接线）：侧车 `dimParseConfig` 的 22 条 `#DEFINE` 投影到
         //     `VariableStore.aux` 的 `lexer.macros` 槽 —— 运行期 `STRFORM`/`GETVAR` 等词法入口
@@ -560,6 +956,23 @@ class GameSession(
         val foldKeywordTables: Map<String, Map<String, Int>> =
             erdFoldTables + (gameData?.registry?.systemKeywordTables() ?: emptyMap())
         stageMark?.invoke("session.tables")
+        // 4b) VARSIZE 折叠快照**并入用户全局**（a59cd7ff 的运行期半边）：原版 ERH 边装边
+        //     注册（IdentifierDictionary.cs:429），先声明的用户全局对后声明的
+        //     `#DIM X, VARSIZE("Y")`（Y 亦是用户全局）在装载期可见；erbcc 编译侧已按同
+        //     语义并快照（CorpusCompile.mergeGlobalUserDimSizes），而运行期这条重解析链
+        //     此前只喂系统表 ⇒ 折不出 → 声明被丢（level 2 告警）→ 运行到用点「未定义的
+        //     变量」。主线语料当前零命中，但 kojo-pack 烧包流程里第三方口上的 ERH 全局
+        //     声明走同一条链，可达面真实。base 口径不变（只吃 VariableSize.csv，见下方
+        //     注释），用户全局经 [SystemVariableBootstrap.mergedVarSizes] 不动点并入
+        //     （与编译侧同一份实现，不许各抄一份）。
+        val foldVarSizes = SystemVariableBootstrap.mergedVarSizes(
+            base = gameData?.let { DimVarSizes.ofRegistry(it.registry) }
+                ?: DimVarSizes.systemSnapshot(null),
+            declarations = metadata.globalDims.map { SystemVariableBootstrap.RawDeclaration(it.raw, it.file, it.line) },
+            config = metadata.dimParseConfig.copy(systemSaveInBinary = saveInBinary),
+            keywordTables = foldKeywordTables,
+            consoleWidth = console.clientWidth,
+        )
         globalDimInstall = SystemVariableBootstrap.install(
             store,
             metadata.globalDims.map { SystemVariableBootstrap.RawDeclaration(it.raw, it.file, it.line) },
@@ -570,8 +983,9 @@ class GameSession(
                     // 都只跑一次 VariableSizeLoader.load；GameBase 不参与 VarDef.dims，CsvLoader
                     // 只写 CsvNameTable、不回写 sizes ⇒ ofRegistry(gameData.registry) 与重新
                     // systemSnapshot(csvDir) 逐字段相同（省掉第二次 CSV 解析 + 第二只 VariableRegistry）。
-                    varSizes = gameData?.let { DimVarSizes.ofRegistry(it.registry) }
-                        ?: DimVarSizes.systemSnapshot(null),
+                    // 系统口径之上再并用户全局（见 4b 注释）——`withUserDecls` 只吃成功注册
+                    // 的用户 spec，不会触碰系统表条目。
+                    varSizes = foldVarSizes,
                     // GETNUM 的装载期折叠面（内置 29 张名字表 + CMP-59 的 ERD 表）。
                     keywordTables = foldKeywordTables,
                     // GETLINESTR：装载期控制台宽度（设备侧按字体度量传入，此处是同一把尺）。
@@ -581,9 +995,15 @@ class GameSession(
         stageMark?.invoke("session.dims")
 
         // 5) 私有 #DIM：逐条注册，失败不打断（与装置同口径：失败进清单，运行到使用点才暴露）
+        //    R7-C4：补丁侧声明追加在同一条注册链（ModPatchLoader 结果的 privateDims；
+        //    补丁头 v1 无 #DIM 载体 ⇒ 补丁段恒空表，追加零行为差 —— 载体扩展后由装载器
+        //    抽取，见其类 KDoc「私有 #DIM」节）。
+        val patchPrivateDims = patchLoad?.privateDims ?: emptyList()
+        val allPrivateDims =
+            if (patchPrivateDims.isEmpty()) metadata.privateDims else metadata.privateDims + patchPrivateDims
         var ok = 0
         val failures = ArrayList<String>()
-        for (p in metadata.privateDims) {
+        for (p in allPrivateDims) {
             runCatching { store.declareUserVar(p.spec, p.functionKey) }
                 .onSuccess { ok++ }
                 .onFailure { failures.add("${p.functionKey}/${p.spec.name}: ${it.message}") }
@@ -640,6 +1060,19 @@ class GameSession(
         // 写端在 FileSystemOps.loadData（Process.cs:1860-1861），读端在 ProcessRuntime。
         // aux 槽跨 resetValues 存活（见 RuntimeAux），故一次装配即可。
         SaveLoadHandoff.install(store)
+        // B1 自动存档链：实档通道**提前构造**（原第 8 步的内联实参上提，构造参数一个都不变，
+        // 只是把 `SaveFolderMigration` 的发生点从 runtime 装配挪到这里 —— 同一会话装配、
+        // 中间无失败面）。`BeginFlow` 的 `host.saveTo(99, SAVEDATA_TEXT)`（Process.cs:2583）
+        // 与语句 `SAVEDATA`（:1327-1349 → SystemOps.saveData）走**同一个** FileSystemOps，
+        // 不重造落盘路（VariableEvaluator.cs:2644-2685：SaveTo 吞异常返回 false 的口径
+        // 已由 FileSystemOps.saveData 复刻）。
+        val sessionSystemOps = systemOps
+            ?: FileSystemOps(
+                store,
+                RootedSaveFileIo(gameRoot, rooted.fileOps),
+                saveConfig,
+                saveMigrationPrompt = saveMigrationPrompt ?: SaveFolderMigration.AUTO_ACCEPT,
+            )
         stageMark?.invoke("session.save")
 
         // 7) 内建函数宿主 + BEGIN 宿主。ConsoleBeginHost 的两个配置项走**生效配置**（与
@@ -668,6 +1101,14 @@ class GameSession(
             printCPerLine = effective.int(ConfigKey.PrintCPerLine).toLong(),
             printCLength = effective.int(ConfigKey.PrintCLength).toLong(),
             textMeasureRun = textMeasureRun,
+            // LIVE-REFLOW：屏幕像素改读会话自持的活状态（同一实例）—— CLIENTWIDTH() /
+            // CLIENTHEIGHT() 从此跟着 resizeConsole 走（原版是控件活尺寸，EmueraConsole.cs:232/234）。
+            // 构造参数仍按 fixture 注入，作为「活状态缺席」时的回落值（同样经 ScriptPixels 折算，
+            // 折算比例的另一端就是下面这个设备字号）。
+            screenState = screenState,
+            deviceFontPixelSize = deviceFontPixelSize,
+            // R5.1 同源回填：脚本 px 版面宽（0 = 未接线/未布局 ⇒ 回填层不写，WindowX 保持链读数）。
+            windowWidthScriptPx = windowWidthScriptPx,
         )
         beginHost = ConsoleBeginHost(
             inputSink,
@@ -678,44 +1119,125 @@ class GameSession(
             // 变量池半边，经 BeginHost.shopHostModel 注入；`MaxShopItem` 不在
             // EffectiveConfig 的夹取集，条目原值即生效值。
             shopHostModel = StoreShopHostModel(store, this.configStore),
+            // OBS2-L5：系统菜单等待入口的脚本行身份 —— 此前**没传**，`scriptLine` 退化 -1，
+            // 等待身份回落到行水位（`LineBufferConsoleSink.kt:713-714`），报错/回显一推进行表，
+            // 第二次重等的入口世代就前移 ⇒ 屏上旧按钮失配 = 玩家「点了没反应」。
+            // 两条通道一起接：取用次序与各自的适用范围见
+            // [beginWaitScriptLineToken]（运行期现算通道，有帧才准）与
+            // [beginWaitPageIdentity]（本页来源函数，BEGIN 等待的实际所在时点）。
+            scriptLineToken = ::beginWaitScriptLineToken,
+            pageScriptLineIdentity = ::beginWaitPageIdentity,
+            // B1：AUTO_SAVE 链实档 = 与语句 SAVEDATA 同一个 FileSystemOps（见上一步注释）。
+            saveToHook = { slot, text -> sessionSystemOps.saveData(slot, text) },
+            // CONFIG-WIRE U4：默认标题版面（SYSTEM_TITLE 缺失分支，Process.cs:2138-2158）——
+            // gamebase 读数来自第 1) 步的 GameDataLoader（GameBase.cs:106 装载），菜单两行吃
+            // REPLACE 组键（Config.cs:732-733；只经 _Replace.csv 链生效，主配置写不动）。
+            gamebase = gameData?.gameBase ?: GameBaseData(),
+            titleMenuString0 = effective.string(ConfigKey.TitleMenuString0),
+            titleMenuString1 = effective.string(ConfigKey.TitleMenuString1),
         )
+        // 键入回显（ECHO-INPUT，2026-11-04）：交付消费点的生效文本 → console 的正常打印路径。
+        // 原版 = doInputToEmueraProgram 末尾 Print(str) + PrintFlush（EmueraConsole.cs:1280-1282）：
+        // 非临时、无按钮、参与 PRINTC 残留行合并与 LINECOUNT —— 该行是引擎级 deleteLine(1)/(2)
+        // 错误清理的删除对象（Process.cs:2194/:2498/:2648 等），缺了它同形 deleteLine 会误删真行。
+        // 回调由 QueueInputSink 在输入锁外、VM 线程上触发（时机与形态矩阵见其 onEchoInput KDoc）。
+        //
+        // 发布相位契约（回显不产生独立发布帧，详见 LineBufferConsoleSink.printEchoLine 的 KDoc）：
+        // 让出边界的顺序是 publishFrame（等前整帧上屏、闸开）→ waitInput → holdFrame
+        // （返回后关闸），而 onEchoInput 恰在 waitInput 返回之前触发。回显若走普通打印会落在
+        // 闸开窗口被直通发布，脚本随后的 CLEARLINE 只能删活表、删不掉 UI 已抓到的那一帧。
+        // 装配给 REPLICA 档的 printEchoLine 先关闸再打印，使回显与后续 CLEARLINE／重印在
+        // 同一发布边界成帧 —— 对齐原版 Print(str) 进缓冲、PrintFlush(force: false) 后脚本
+        // 继续同步执行（EmueraConsole.cs:1280-1282），真上屏等 RunEmueraProgram("") 跑完的
+        // forced paint（同文件 :1068/:1080），Running/Initializing 期间另有 16ms 节流（:1758）。
+        // 可观测形态：限时等待 `TINPUTS ANIMATERECOLOREDMAPS,"UPDATE",0,""`
+        // （COMF400 移動.ERB:162）每 tick 交付 "UPDATE"、剧本随后
+        // `CLEARLINE LINECOUNT - LINESTART`（同文件 :172）重印地图；不符契约时屏上在
+        // 「地图页」与「地图页 + UPDATE」两帧间交替。
+        //
+        // ECHO-INPUT 两档：REPLICA 按上述契约先关闸再打印；SUPPRESSED 在交付点就不产生
+        // 显示行，帧闸 / 行表 / revision 一概不动 ⇒ 冻结段前后两帧逐字相同。少掉的那行由
+        // 控制台行账本记进 LINECOUNT 并在 deleteLine 折算，脚本 CLEARLINE 不会误删菜单行。
+        inputSink.echoInputMode = echoInputMode
+        inputSink.onEchoInput = console::printEchoLine
+        inputSink.onEchoSuppressed = console::noteSuppressedEchoLine
         stageMark?.invoke("session.hosts")
 
         // 7b) 语句参数子树规范化去重（M6-PERFINT）：装载期一次摊销，必须在运行期开始前。
         //     幂等 —— `.erbc` 装载路径（ProgramLoader）可能已经跑过，此时直接复用读数。
-        program.internStatementArgs()
+        //     R7-C4：跑在 overlay Program 上 —— 补丁段的语句池条目是组合池新追加的，
+        //     未经规范化；base 段重跑一遍幂等（同一实例回写）。
+        effectiveProgram.internStatementArgs()
         stageMark?.invoke("session.intern")
 
         // 8) 运行期。存档/系统语句宿主缺省 = 真存档层：落盘走 `<gameRoot>`（原版 Program.ExeDir，
         //    Program.cs:207 的同一根），路径由 SaveConfig 产出（Config.cs:467-481）。
+        //    R7-C4：VM 吃 overlay Program（无补丁时 === program）；FunctionTable 尾段追加
+        //    补丁函数的 FuncMeta（[patchMetas]，装载序恒在全部 base 之后）。
         runtime = ProcessRuntime(
-            program,
+            effectiveProgram,
             store,
-            FunctionTable(metadata.functions),
-            VmConfig(maxStepsPerRun = maxStepsPerRun, maxRunMillis = maxRunMillis),
+            FunctionTable(
+                if (patchMetas.isEmpty()) {
+                    metadata.functions
+                } else {
+                    metadata.functions + patchMetas
+                },
+            ),
+            VmConfig(
+                maxStepsPerRun = maxStepsPerRun,
+                maxRunMillis = maxRunMillis,
+                // ENGFIX-4：唯一真源 = 会话生效配置（RootedBuiltinHost 重放包含游戏的
+                // emuera.config；注册缺省 5000ms，置 0 关，spec: ConfigData.cs:75）。
+                infiniteLoopAlertTimeMs = effective.int(ConfigKey.InfiniteLoopAlertTime).toLong(),
+            ),
             consoleSink = console,
             // 语句层缺省吃生效配置的 `PRINTCを並べる数`（spec: `Config.cs:326` 静态字段、
             // `ConfigData.cs:63` 注册缺省 3）；显式传入的 semConfig 优先（装置对拍固定传语料值）。
             // `saveDataNos` 无论哪条路都取生效值（Config.cs:338 + :441-450）。
             // `timesNotRigorousCalculation` 同理取生效值（ConfigData.cs:111，消费点
             // StatementExecutor.execTimes；本游戏 emuera.config 为 NO ⇒ false，与出厂缺省一致）。
+            // CONFIG-WIRE U2/U3/U4 追加五件（原版同为 `Config` 静态字段的直读直用）：
+            //   * moneyLabel/moneyFirst —— `PRINT_SHOPITEM` 的金额格式（Config.cs:199/:201 静态
+            //     字段；消费点 StatementExecutor 的商店打印面）。取数与上面 `store.moneyLabel`
+            //     同走 `rooted.moneyLabel`/`moneyLabelFirst`（configChain.store 条目，链+Replace
+            //     同源），保证 `%MONEYLABEL%` 伪变量与商店打印两把尺永不分叉。
+            //   * timeupLabel —— TINPUT 系第 5 参缺省（Config.cs:736 读条目；出厂
+            //     ConfigData.cs:170 = "時間切れ"）。语料无该配置行 ⇒ 条目值 = 缺省，零漂移。
+            //   * stainDefault —— RESET_STAIN 语句面（StatementExecutor 读 `ctx.config.stainDefault`；
+            //     C# 侧 = Config.StainDefault，spec VariableEvaluator.cs:1921 的 SetDefaultStain 口）。
+            //     BEGIN TRAIN 面的整列复位另有活读（ProcessRuntime.configLongList），两处同一条目。
+            //   * barChar1/barChar2 —— BAR 语句实部/空部字符（CONFIG-WIRE U3；出厂 '*'/'.'，
+            //     ConfigData.cs:164-165；消费点 ExpressionMediator.cs:155-156 的 CreateBar）。
+            //     BARSTR 函数侧已有独立活读（fn/HostMethods barChars），两处同一条目。
+            //     语料无 BAR文字 条目（全语料 grep 零命中）⇒ 与出厂同值，基准零漂移。
             semConfig = (semConfig ?: SemConfig(printCPerLine = effective.int(ConfigKey.PrintCPerLine)))
                 .copy(saveDataNos = effective.saveDataNos)
-                .copy(timesNotRigorousCalculation = effective.bool(ConfigKey.TimesNotRigorousCalculation)),
-            systemOps = systemOps
-                ?: FileSystemOps(
-                    store,
-                    RootedSaveFileIo(gameRoot, rooted.fileOps),
-                    saveConfig,
-                    saveMigrationPrompt = saveMigrationPrompt ?: SaveFolderMigration.AUTO_ACCEPT,
+                .copy(timesNotRigorousCalculation = effective.bool(ConfigKey.TimesNotRigorousCalculation))
+                .copy(
+                    moneyLabel = rooted.moneyLabel,
+                    moneyFirst = rooted.moneyLabelFirst,
+                    timeupLabel = effective.string(ConfigKey.TimeupLabel),
+                    stainDefault = effective.source.itemOf(ConfigKey.StainDefault).longList().toLongArray(),
+                    barChar1 = effective.char(ConfigKey.BarChar1),
+                    barChar2 = effective.char(ConfigKey.BarChar2),
                 ),
+            systemOps = sessionSystemOps,
             builtinHost = builtinHost,
             randSeed = randSeed,
             beginHost = beginHost,
             soundSink = soundSink,
             inputSink = inputSinkOverride ?: inputSink,
             disabledFunctions = disabledFunctions,
+            infiniteLoopPrompt = infiniteLoopPrompt,
         )
+        // 暂停开关的就绪发布（见 [setBackgroundPaused]）：先发布 runtime，再在**同一把锁**
+        // 下消费装配期间收到的意图 —— 两个方向都走 [backgroundPauseLock]，意图不会丢。
+        runtimeRef = runtime
+        synchronized(backgroundPauseLock) {
+            pendingBackgroundPause?.let { runtime.setBackgroundPaused(it) }
+            pendingBackgroundPause = null
+        }
         stageMark?.invoke("session.runtime")
         // 屏蔽是静默的（调用点直接得 0，语料侧看不到任何痕迹）⇒ 必须留一条可查的痕迹：
         // 真机上别人看到「标题没有彩蛋」时，这一行是唯一能对上号的读数。
@@ -733,7 +1255,13 @@ class GameSession(
         //    其余段（#DIM 原文 / 宏表 / fileByKey）随 metadata 一起可回收。
         //    标签查找的键由 ProcessRuntime.tryResolveLabel 前置大写（ProcessRuntime.kt 的
         //    `labelPc(functionKey.uppercase(), label.uppercase())`），投影层不再重复归一。
-        sidecar = SidecarTables(metadata.labels, metadata.dataSections)
+        //    R7-C4：补丁侧标签/数据节在此合并 —— 键域与 base 不相交（标签键 = 函数键，
+        //    重名闸在装载期已拦；数据节键 = 绝对语句池下标，补丁键必然 ≥ base 计数），
+        //    Map 相加不会遮蔽任何 base 条目。
+        sidecar = SidecarTables(
+            if (patchLabels.isEmpty()) metadata.labels else metadata.labels + patchLabels,
+            if (patchDataSections.isEmpty()) metadata.dataSections else metadata.dataSections + patchDataSections,
+        )
         stageMark?.invoke("session.sidecar")
         runtime.installLabelTable(object : ProcessRuntime.LabelTable {
             override fun labelPc(functionKey: String, label: String): Int? =
@@ -743,10 +1271,100 @@ class GameSession(
         // 扁平通道关闭（Android 生产：`GameHost` 的 `loadMapped(flatStatements = false)`）时
         // VM 走对象树通道，PRINTDATA/STRDATA 按**语句实例**取数据节 ⇒ 补一张反查表。
         // 扁平通道全开（桌面/测试）不需要，也不建（免得无故物化语句树）。
-        if (!program.flatStatementsEnabled) {
-            runtime.installDataSectionStatementIndex(sidecar.dataSectionStatementIndex(program))
+        // R7-C4：判据对象与反查表都走 effectiveProgram —— 开关已在编排点同步成 base 的
+        // 值，补丁语句的数据节下标也要进反查表（对象树通道对补丁 PRINTDATA 的消费面）。
+        if (!effectiveProgram.flatStatementsEnabled) {
+            runtime.installDataSectionStatementIndex(sidecar.dataSectionStatementIndex(effectiveProgram))
         }
         stageMark?.invoke("session.tail")
+    }
+
+    /**
+     * R7-C4：把 overlay 后函数表尾段（补丁函数）转成 [FuncMeta] —— `FunctionTable` 尾段
+     * 追加的输入（CONTRACT-R7.md §1 会话侧第 1 处）。
+     *
+     * 逐字段口径（补丁容器是 `.erbc` 窗口产物，函数元数据只能从
+     * [com.eratw.port.core.code.FunctionInfo] 与装载读数推得）：
+     * - `index` = 绝对函数下标（base 条数 + 尾段序；`_CALL` 的 a 与函数表下标同域）；
+     * - `key` / `name` 取 [FunctionInfo.upperKey] / [FunctionInfo.name]（大写归一）；
+     * - **事件面**（wave/mod-import-event-members 的装载侧对应）：PatchCompiler 给事件成员
+     *   编出的 Program 名是 `<事件名>#<绝对下标>`（CorpusCompile.kt:474 同款形状），裸事件名
+     *   留给合成入口。重建时按名还原：带 `#` 且主段是保留事件名 ⇒ `key` = 裸事件名、
+     *   `isEvent = true`（进 eventMembersByKey，NORMAL 桶装载序追加在 base 成员之后）；
+     *   裸事件名 ⇒ `isEvent = false` 的入口位（nonEventByKey 后装载者覆盖 base 入口）。
+     * - `isMethod` / `returnsStr` / `returnsFloat` / `floatLocalSize` / `localSize` /
+     *   `localsSize` 六项 = 头可选段 `function-metas`（4.981 浮点族 per-function 元数据，
+     *   装载侧 harvestFunctionMetas 已按 offset+name 与补丁体逐条互证）按补丁窗口内
+     *   offset 消费；缺记录（六项全缺省的函数不进段 / 旧头无段）走缺省（false/0）。
+     *   接线前 `#FUNCTIONF` 返回恒 0、`#FUNCTIONS` 恒空串、`#LOCALFSIZE` 退默认 10 ——
+     *   三个静默错值形态随本消费收口（PatchHeader 类 KDoc「可选段 function-metas」；
+     *   事件成员/入口不可能带 `#FUNCTION` 声明 ⇒ 与上面的 isEvent 还原互不相扰）。
+     *   其余 `isEvent` 恒 false：容器不带事件位（`.erbc` v1 函数标志恒 0）。
+     *   补丁定义的非事件同名 base 函数由装载器重名闸拒绝（R7 §0.1 第 4 条）。
+     * - `argIntCount` / `argStrCount` 按形参名的 `$` 后缀分桶（形参名是头部形参序，
+     *   `B$` = 字符串形参）。形参名缺失而 arity 大于 0 时桶为 0 ⇒ 函数体内 ARG:i 不绑定，
+     *   该状态已在装载告警里点名（I7），这里不再静默猜测。
+     * - `defIndex` = base 最大 defIndex + 1 + 尾段序：**装载序恒为最后**（R7 §0.1 第 1 条），
+     *   补丁函数在事件同桶排序与「后装载者生效」语义里都排在全部 base 之后。
+     * - `position` = `mods/<补丁名>`（[ModPatchLoader.PATCH_POSITION_PREFIX]）：FN-05
+     *   报错定位能反查补丁来源（I7）。
+     *
+     * 无补丁 / 整体回退（`effectiveProgram === baseProgram`）时尾段为空 ⇒ 返回空表。
+     */
+    private fun buildPatchFunctionMetas(
+        effectiveProgram: Program,
+        baseProgram: Program,
+        patchLoad: ModPatchLoader.Result?,
+        baseMetas: List<FuncMeta>,
+    ): List<FuncMeta> {
+        if (patchLoad == null || patchLoad.rolledBack) return emptyList()
+        val baseFnCount = baseProgram.functions.size
+        val tail = effectiveProgram.functions.drop(baseFnCount)
+        if (tail.isEmpty()) return emptyList()
+        val defIndexBase = baseMetas.maxOf { it.defIndex }
+        val out = ArrayList<FuncMeta>(tail.size)
+        var patchIdx = 0
+        var patchFnBase = 0
+        for ((offset, f) in tail.withIndex()) {
+            // 定位该函数所属的补丁（loadedPatches 按装载序累计函数数）。
+            while (patchIdx < patchLoad.loadedPatches.size &&
+                offset >= patchFnBase + patchLoad.loadedPatches[patchIdx].functionCount
+            ) {
+                patchFnBase += patchLoad.loadedPatches[patchIdx].functionCount
+                patchIdx++
+            }
+            val patchName = patchLoad.loadedPatches[patchIdx].name
+            // 事件面还原（PatchCompiler「事件函数成员」节的装载侧对应）：成员 Program 名
+            // = `<事件名>#<绝对下标>`，裸事件名 = 合成入口位。
+            val rootKey = f.upperKey.substringBefore('#')
+            val isMember = '#' in f.upperKey && Symbols.isEventLabelName(rootKey)
+            val isEntry = '#' !in f.upperKey && Symbols.isEventLabelName(f.upperKey)
+            // 4.981 浮点族 per-function 元数据（头可选段 `function-metas`，装载侧
+            // harvestFunctionMetas 已与补丁体逐条互证）：六项按补丁窗口内 offset 取记录；
+            // 缺记录（六项全缺省的函数不进段 / 旧头无段）走原缺省。接线前 `#FUNCTIONF`
+            // 返回恒 0、`#FUNCTIONS` 恒空串、`#LOCALFSIZE` 退默认 10 三个静默错值形态
+            // 在此收口（PatchHeader 类 KDoc「可选段 function-metas」）。
+            val rec = patchLoad.functionMetas[offset]
+            out += FuncMeta(
+                index = baseFnCount + offset,
+                key = if (isMember) rootKey else f.upperKey,
+                name = if (isMember) rootKey else f.name,
+                isEvent = isMember,
+                isMethod = rec?.isMethod ?: false,
+                argIntCount = f.paramNames.count { !it.endsWith("$") },
+                argStrCount = f.paramNames.count { it.endsWith("$") },
+                localSize = rec?.localSize ?: 0,
+                localsSize = rec?.localsSize ?: 0,
+                floatLocalSize = rec?.floatLocalSize ?: 0,
+                returnsStr = rec?.returnsStr ?: false,
+                returnsFloat = rec?.returnsFloat ?: false,
+                defIndex = defIndexBase + 1 + offset,
+                // 入口位带合成标记：userFunctionKinds 投影据此剔除（与全量路
+                // CorpusCompile 的 `·event-entry·` 同值），不当作脚本符号暴露。
+                position = if (isEntry) "·event-entry·" else ModPatchLoader.PATCH_POSITION_PREFIX + patchName,
+            )
+        }
+        return out
     }
 
     // ------------------------------------------------------------------
@@ -766,6 +1384,49 @@ class GameSession(
     fun resumeSystem(): StateStep = runtime.resumeSystem()
 
     /**
+     * 交给 [ConsoleBeginHost] 的**现算脚本行身份通道**（OBS2-L5；构造点见装配第 7 步）。
+     *
+     * 值不新造：直接取运行期现成的 `ExecContext.scriptLineToken`
+     * （`ProcessRuntime.kt:1093` 挂的 `::scriptLineTokenNow`，实现 `:1242-1247`，
+     * 打包口径 = 函数单调 id 高 32 位 + pc 低 32 位，见 [LineIdentityIds]，恒非负），
+     * 与语句层 `INPUT` 家族用的是**同一个**身份位（`StatementExecutor.kt:3912`）。
+     *
+     * **本通道在生产 BEGIN 等待点上恒 -1**：`scriptLineTokenNow` 无帧即 -1
+     * （`:1243` 的 `activeVm.currentFunctionKey ?: return -1L`），而 BEGIN 状态机的每一次等待
+     * 都发生在 `vm.run` **返回之后**（`Vm.unwindScopes` 把帧深收回 -1，`Vm.kt:947-955`；
+     * 引擎侧 `SHOW_SHOP` 这类调用走 `runEntry` → `vm.run`，`ProcessRuntime.kt:2901-2923`）。
+     * 桌面实测（真 [GameSession] + `begin(SHOP)` 泵到 `Shop_WaitInput`）：跑完 `SYSTEM_TITLE`
+     * 后、盖完按钮后、进等待前后读到的都是 -1 —— 只接这一条等于没接，故配
+     * [beginWaitPageIdentity] 一起接（取用次序与理由见 `ConsoleBeginHost.waitScriptLine`）。
+     * 留着它的理由：一旦等待点落到**有帧**时刻（语料在系统流程里 `INPUT`、或后续波次把等待
+     * 挪进语句帧），现算读数就是真行身份，比函数级更准，优先级也更高。
+     */
+    private fun beginWaitScriptLineToken(): Long =
+        runtimeRef?.execContext?.scriptLineToken?.invoke() ?: -1L
+
+    /**
+     * 交给 [ConsoleBeginHost] 的**「本页来源函数」→ 脚本行身份位**通道（OBS2-L5 的主通道；
+     * 登记时机、函数级粒度与「为什么必须粘这一层」见 [BeginHost.noteWaitPageProducer]，
+     * 现算通道为什么恒 -1 见 [beginWaitScriptLineToken]）。
+     *
+     * 身份位不新造：取的是运行期同一张 `LineIdentityIds` 表 —— aux 槽名与
+     * `ProcessRuntime.kt:4393` 的 `LINE_IDENTITY_SLOT`（`"proc.lineid"`，文件私有常量）
+     * **必须是同一个串**，两条通道才共享一个身份域、id 才全局唯一（否则「本页来源」的身份位
+     * 可能与某条真语句的身份位数值相撞，把该前移的世代冻住）。该串在本仓只有两处：
+     * 那个私有常量与本方法的 [BEGIN_LINE_IDENTITY_SLOT] —— 改一处必须改另一处
+     * （钉在 WaitInputGenerationTest 的用例面上；统一成公共常量需动 `ProcessRuntime.kt`，
+     * 非本路所有权 ⇒ 交组长）。
+     *
+     * `pc` 恒 [BeginFlow.PAGE_IDENTITY_PC]（=0）：无帧时刻拿不到 pc（`lastPc` 虽在，函数键已随
+     * `depth = -1` 不可读，`Vm.kt:2583-2590`），故取「该函数」这一级粒度；pc=0 与真语句
+     * token 只可能在**同一个函数**上重合（同函数不同行的两次等待被当同一身份 —— 那正是
+     * 原版对同一句 INPUT 重等的读法），跨函数不会折叠（id 按串内容分配，见 [LineIdentityIds]）。
+     */
+    private fun beginWaitPageIdentity(functionKey: String): Long =
+        store.aux.slot(BEGIN_LINE_IDENTITY_SLOT) { LineIdentityIds() }
+            .tokenOf(functionKey, BeginFlow.PAGE_IDENTITY_PC)
+
+    /**
      * 回到标题（GOTOTITLE-CHANNEL 的宿主面）：逐句对应原版
      * `EmueraConsole.GotoTitle()`（`EmueraConsole.cs:2569-2581`）+
      * `Process.BeginTitle()`（`Process.cs:480-485`），顺序与复位面见
@@ -775,6 +1436,20 @@ class GameSession(
      * 装载/标题级硬失败 `notToTitle`/`byError`）在 core-vm 判不出来，由宿主把关。
      */
     fun gotoTitle(): StateStep = runtime.gotoTitle()
+
+    /**
+     * 后台暂停开关（跨线程，宿主 UI 调）：true 后 VM 在**下一条语句执行前**阻塞，
+     * false 立即恢复；暂停不消耗步数、不改变执行顺序、不推进任何计时。
+     *
+     * 装配期竞态：`runtime` 还在构造中（同一时刻宿主在 UI 线程按了 Home）时经
+     * [backgroundPauseLock] 记住意图，构造完成后在装配线程上立即应用 —— 不丢、不早、不晚。
+     */
+    fun setBackgroundPaused(paused: Boolean) {
+        synchronized(backgroundPauseLock) {
+            val ready = runtimeRef
+            if (ready != null) ready.setBackgroundPaused(paused) else pendingBackgroundPause = paused
+        }
+    }
 
     /**
      * 关闭输入队列并唤醒等待方（Activity 销毁/退出游戏时调用；之后任何等待抛 `InputSinkClosedException`）。
@@ -796,11 +1471,23 @@ class GameSession(
      * 只能由 JVM 单测证明 `FileChannel` 的关闭动作发生）。
      */
     fun close(): Boolean {
+        // 暂停中的 VM 线程必须先放行：awaitResume 的循环条件是暂停位，不清位就只能靠
+        // interrupt 叫醒等待（GameHost.close 会 interrupt，但会话也可能被单独关闭）。
+        // 先清位再关输入队列：VM 恢复后若撞上输入等待，会按关闭口径抛 InputSinkClosedException。
+        setBackgroundPaused(false)
         inputSink.close()
         return program.releaseMmap()
     }
 
     companion object {
+        /**
+         * 「本页来源函数」身份位用的 aux 槽名 —— **必须与 `ProcessRuntime.kt:4393` 的
+         * `LINE_IDENTITY_SLOT`（文件私有常量，拿不到引用）同串**，两条通道才共用同一张
+         * `LineIdentityIds`、只有一个身份域。理由与钉测面见 [beginWaitPageIdentity] 的 KDoc
+         * 与 `WaitInputGenerationTest` 的「装配钉」用例（两处各写一份字面量，改一处必须改另一处）。
+         */
+        const val BEGIN_LINE_IDENTITY_SLOT = "proc.lineid"
+
         const val CSV_DIR_NAME = "CSV"
 
         /** `Config.MaxLog` 缺省（ConfigData.cs:62）；语料 emuera.config 覆盖为 900。 */
@@ -832,32 +1519,53 @@ class GameSession(
         const val DEFAULT_MAX_STEPS_PER_RUN = 20_000_000L
 
         /**
-         * 生产（真机 `GameHost`）用的步数兜底：抬到 5 亿步，让**时间闸当主判据**。
+         * 生产（真机 `GameHost`）用的步数闸：10 亿步，是**生产唯一的死循环判据**。
          *
-         * 为什么生产不再用 [DEFAULT_MAX_STEPS_PER_RUN]（2026-10-29 玩家反馈「读档有时报错」）：
-         * 2000 万步是「指令数」口径，原版根本没有这一维 —— 它的死循环保护看墙钟
-         * （`Process.cs:493-512`，默认 5000 ms 弹框且**玩家可选继续**）。移植层拿 2000 万步
-         * 硬中止，等于把「读长档恢复演出卡十几秒」判成死循环（BOARD 2026-10-27 真机复现：
-         * `EVENTTRAIN → CHARA_MOVEMENT → GMF_METHOD_UPDATE` 在 20,000,001 步被拦）。
+         * 口径与 [DEFAULT_MAX_STEPS_PER_RUN] 完全相同（**段落**计数：每次让出边界从 0 重算，
+         * `Vm.kt` 的 `steps`），只是取值按生产标定。
          *
-         * 5 亿步在 500 ns/指令 的机器上 ≈ 250 秒，远大于 [DEFAULT_MAX_RUN_MILLIS] 的 60 秒
-         * ⇒ 正常情况下永远是时间闸先触发；步数闸只兜「时钟被系统冻住」这类极端情形
-         * （Android 休眠/调试暂停时 `nanoTime` 不走，步数仍在涨）。
+         * 为什么是 10 亿（2026-10-30 玩家报「开了地图重修插件后启动失败」）：
+         * - 桌面用真产物 + `fixtures/saves/save03.sav`（第 47 日 `TIME=1345`、`CHARANUM=168`、
+         *   地图重修插件开启）实测一次 `EVENTTRAIN` 派发：连调 **24 次** `CHARA_MOVEMENT`，
+         *   共 123,496,792 条语句 ≈ **2.90 亿条 VM 指令**（单次 `CHARA_MOVEMENT` 12,080,416 条
+         *   指令、其中 97.8% 是 `GMF_METHOD_UPDATE`/`GMF_METHOD_RESTORE` —— 每次移动 2,303 次
+         *   地图切换、每次都整表重建 `MAPNAME`/`ROOMDATA`/`PRIVATEROOM`/`CFLAG:神社在住`，
+         *   语料 `DLC/GENSOKYO_MAP_FIX/幻想乡地图重修.ERB:40-92` 的合法 O(CHARANUM) 扫描）。
+         * - 玩家报告里那一段在 60,013 ms 时已跑 **133,496,832 步仍未到让出点**（≈2.22M 指令/秒），
+         *   即该段至少 1.33 亿条指令 —— 与上面 2.90 亿的整条链同量级。
+         * - 10 亿 = 实测最坏合法链的 **3.4 倍**，给 `CHARANUM` 继续增长与更慢机型留量。
+         *
+         * **代价（写清楚，别当免费）**：真死循环要到 10 亿步才报，在玩家机的速率下 ≈7.5 分钟。
+         * 原版在这一情形只是 5 秒弹一次框、玩家点「否」后**继续跑**（`Process.cs:507-510`），
+         * 从不自动中止 ⇒ 本仓的排序是「不误杀合法重负载」优先于「快判真死循环」。
+         * 要快判就把墙钟闸当**诊断旋钮**显式启用（[com.eratw.port.core.code.VmConfig.maxRunMillis]），
+         * 而不是把生产阈值压回合法链以下 —— 那正是本报告的发生方式。
+         *
+         * ENGFIX-3（2026-11-05）重定位：官方死循环保护从不按指令数中止（墙钟 + 弹框问玩家，
+         * `Process.cs:470-489`），core 侧已复刻该语义（VmConfig.infiniteLoopAlertTimeMs +
+         * VmHost.askInfiniteLoop）。本常量随之**降级为移植层极端兜底**（LoopGuardCause.DeviceBudget）：
+         * 量级取「正常游戏永不触及」（`EVENTTRAIN` 起床链实测 2.90 亿条仍有两个数量级余量），
+         * 不是官方语义 —— ADR-005 例外登记项（随 app 弹框接线波次一并落账）。
          */
-        const val PRODUCTION_MAX_STEPS_PER_RUN = 500_000_000L
+        const val PRODUCTION_MAX_STEPS_PER_RUN = 1_000_000_000L
 
         /**
-         * 生产（真机 `GameHost`）的单段落墙钟上限：60 秒。
+         * 生产（真机 `GameHost`）的单段落墙钟上限：**0 = 关**（生产不用墙钟当判据）。
          *
-         * 取值依据：原版 `Config.InfiniteLoopAlertTime` 注册缺省 5000 ms（`ConfigData.cs:75`），
+         * 原版 `Config.InfiniteLoopAlertTime` 注册缺省 5000 ms（`ConfigData.cs:75`），
          * 但它只是「弹框问一下」，玩家点「否」即继续（`Process.cs:507-510`）—— 原版的实际
-         * 行为是**从不中止**。移植层没有这个交互，只能选一个「远超任何合法负载」的值：
-         * 真机读 9/21 第 47 日旧档的整条恢复演出 3-4 分钟，但其中**单段**（两次让出之间）
-         * 远小于此（让出点是每帧 `AWAIT` 与每次输入等待）；60 秒留了一个数量级余量。
-         * 真死循环（`LOOP 1` 无让出）在 60 秒内被抓，玩家看到的是可重试的失败屏，
-         * 不会像现在这样「读个旧档就启动失败」。
+         * 行为是**从不中止**。core 侧该交互已由 ENGFIX-3 落地（VmHost.askInfiniteLoop），
+         * ENGFIX-4 起生产 app 已接 AlertDialog（阈值取会话生效配置 `InfiniteLoopAlertTime`，
+         * 见构造参数 `infiniteLoopPrompt`）。2026-10-29 曾取 60 秒当「远超任何合法负载」
+         * 的值；2026-10-30 的玩家报告证伪了这个前提：`EVENTTRAIN` 起床链实测 2.90 亿条指令，
+         * 在 2.22M 指令/秒 的机器上需要 ≈130 秒（详见 [PRODUCTION_MAX_STEPS_PER_RUN]），
+         * 60 秒只够跑到一半 ⇒ 必然误杀。
+         *
+         * 墙钟闸本身保留（[com.eratw.port.core.code.VmConfig.maxRunMillis] 缺省 0，
+         * 装置/诊断可显式启用），只是生产不再启用：它的误杀面（设备速度、后台抢占、降频）
+         * 无法用常量消除。
          */
-        const val DEFAULT_MAX_RUN_MILLIS = 60_000L
+        const val PRODUCTION_MAX_RUN_MILLIS = 0L
 
         /** 无 CSV 时种下的裸角色数（同 `GoldenPipeline`）。 */
         const val BARE_CHARACTERS = 4

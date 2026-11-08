@@ -1,0 +1,179 @@
+; ============================================================================
+; REPLAY_SCRIPTS.ERB - input-trace replay scripts (CONTRACT-MODERN-R2)
+;
+; One function per replay case; every function prints a START / END marker pair so
+; the console delta of a case is visible on its own. The replay device feeds a
+; production QueueInputSink from a second thread and diffs console + variables.
+;
+; Why this file does NOT live under fixtures/golden/:
+;   LabelTable.loadOrder is recursive (Symbols.kt:688-706, :718-730). Any ERB placed
+;   under fixtures/golden/ would be compiled into the E2E golden pipeline and change
+;   the ENUM_ERB=13 readout of the 610-line baseline.
+;
+; The @GOLDEN_ROOT stub is structural only: GoldenPipeline.build uses the
+; GOLDEN_ROOT slice as the loader root and splits header/footer around its CALLs
+; (GoldenPipeline.kt:491-496). The replay device never executes the entry; each
+; case calls its own target function by key.
+;
+; Why every replay target is #FUNCTION (and is invoked with CALLF):
+;   A plain function that falls off its end runs a synthesized `RESULT = 0` before
+;   returning (Process.cs:1059-1065 `if (!state.IsFunctionMethod) vEvaluator.RESULT
+;   = 0L`; Kotlin twin: ErbProgramCompiler.kt:363-372). An explicit RETURN would
+;   overwrite RESULT:0 with the return value instead (FunctionIdentifier.cs:3265-3271
+;   `SetResultX(...)` then `state.Return(RESULT:0)`). Only a #FUNCTION / #FUNCTIONS
+;   method keeps the last RESULT written inside the body after the frame ends --
+;   exactly how the corpus uses it (M_KOJO_K70_01_イベント.ERB:6087-6088). The
+;   expect-vars block therefore reads the *real* post-call store instead of a
+;   value the function-return tail already zeroed.
+; ============================================================================
+@GOLDEN_ROOT
+	CALL REPLAY_NOOP
+	PRINTL REPLAY-ROOT-END
+@REPLAY_NOOP
+	RETURN
+
+; ----------------------------------------------------------------------------
+; WAIT family. FunctionIdentifier.cs:762-798 (WAIT / FORCEWAIT / WAITANYKEY);
+; the three share Console.ReadAnyKey (anykey / stopMesskip bits, EmueraConsole.cs:876-895).
+; ----------------------------------------------------------------------------
+@REPLAY_WAIT_ENTER
+#FUNCTION
+	PRINTL START-WAIT-ENTER
+	WAIT
+	PRINTL AFTER-WAIT
+	PRINTL END-WAIT-ENTER
+
+@REPLAY_WAIT_ANYKEY
+#FUNCTION
+	PRINTL START-WAIT-ANYKEY
+	WAITANYKEY
+	PRINTL AFTER-WAITANYKEY
+	PRINTL END-WAIT-ANYKEY
+
+@REPLAY_FORCE_WAIT
+#FUNCTION
+	PRINTL START-FORCEWAIT
+	FORCEWAIT
+	PRINTL AFTER-FORCEWAIT
+	PRINTL END-FORCEWAIT
+
+; TWAIT 20, 0 = one timed wait, form EnterKey (FunctionIdentifier.cs:808-824:
+; arg2 == 0 -> EnterKey, else Void). No submission arrives => endTimer fires at
+; :1043, sets isTimeout, RunEmueraProgram("") advances the script.
+@REPLAY_TWAIT_TIMEOUT
+#FUNCTION
+	PRINTL START-TWAIT
+	TWAIT 20, 0
+	PRINTFORML ISTIMEOUT={ISTIMEOUT}
+	PRINTL END-TWAIT
+
+; Zero submissions on purpose: pins the blocking semantics (expect: blocked).
+@REPLAY_WAIT_BLOCKS
+#FUNCTION
+	PRINTL START-WAIT-BLOCKS
+	WAIT
+	PRINTL AFTER-WAIT-BLOCKS
+
+; ----------------------------------------------------------------------------
+; Value inputs. FunctionIdentifier.cs:827-1001 (INPUT / INPUTS / ONEINPUT /
+; ONEINPUTS); delivery switch at EmueraConsole.cs:1112-1288.
+; ----------------------------------------------------------------------------
+@REPLAY_INPUT_INT
+#FUNCTION
+	PRINTL START-INPUT-INT
+	INPUT
+	PRINTFORML INPUT={RESULT}
+	PRINTL END-INPUT-INT
+
+; MesSkip comes from the submission itself: WAIT consumes a keySkip submission
+; (PressEnterKey sets MesSkip at :1373, ReadAnyKey hands it over), then the
+; following INPUT(..., canskip) takes the default without waiting
+; (FunctionIdentifier.cs:853-863).
+@REPLAY_INPUT_CANSKIP
+#FUNCTION
+	PRINTL START-INPUT-CANSKIP
+	WAIT
+	INPUT 42, 0, 1
+	PRINTFORML INPUT={RESULT}
+	PRINTL END-INPUT-CANSKIP
+
+; Same fast path reached through SKIPLOG 1 = Process.SKIPLOG -> MesSkip = true
+; (Process.cs:1830-1833); zero submissions needed.
+@REPLAY_INPUT_CANSKIP_SKIPLOG
+#FUNCTION
+	PRINTL START-INPUT-CANSKIP-SKIPLOG
+	SKIPLOG 1
+	INPUT 42, 0, 1
+	PRINTFORML INPUT={RESULT}
+	PRINTL END-INPUT-CANSKIP-SKIPLOG
+
+@REPLAY_INPUT_STR
+#FUNCTION
+	PRINTL START-INPUT-STR
+	INPUTS
+	PRINTFORML INPUTS=%RESULTS:0%
+	PRINTL END-INPUT-STR
+
+; ONEINPUT truncates the submitted text to its first character
+; (EmueraConsole.cs:1440-1443).
+@REPLAY_ONEINPUT
+#FUNCTION
+	PRINTL START-ONEINPUT
+	ONEINPUT
+	PRINTFORML ONEINPUT={RESULT}
+	PRINTL END-ONEINPUT
+
+; INPUTANY: long.TryParse succeeds -> RESULT only; otherwise RESULTS only
+; (EmueraConsole.cs:1256-1274, never both). RESULT is pre-set to 11 so the
+; "string branch did not touch RESULT" claim is observable.
+@REPLAY_INPUT_ANY
+#FUNCTION
+	PRINTL START-INPUT-ANY
+	RESULT = 11
+	INPUTANY
+	PRINTFORML ANY_RESULT={RESULT}
+	PRINTFORML ANY_RESULTS=%RESULTS:0%
+	PRINTL END-INPUT-ANY
+
+; INPUTANY integer branch: RESULT is written, RESULTS untouched.
+@REPLAY_INPUT_ANY_INT
+#FUNCTION
+	PRINTL START-INPUT-ANY-INT
+	RESULTS:0 = KEEP
+	INPUTANY
+	PRINTFORML ANY_INT_RESULT={RESULT}
+	PRINTFORML ANY_INT_RESULTS=%RESULTS:0%
+	PRINTL END-INPUT-ANY-INT
+
+; ----------------------------------------------------------------------------
+; PRINTDATAW: the data section is one DATALIST group holding two items, so the
+; random pick (FunctionIdentifier.cs:244-317) has exactly one candidate and the
+; output order is fixed: items separated by newline, then the W wait.
+; ----------------------------------------------------------------------------
+@REPLAY_PRINTDATAW
+#FUNCTION
+	PRINTL START-PRINTDATAW
+	PRINTDATAW
+		DATALIST
+			DATA PD1
+			DATA PD2
+		ENDLIST
+	ENDDATA
+	PRINTL AFTER-PRINTDATAW
+	PRINTL END-PRINTDATAW
+
+; ----------------------------------------------------------------------------
+; Button click delivery. MainWindow.cs:824-849: a click writes RESULTS:1 =
+; selectedString (:834), RESULT:1 = 1 for the left button (:847) and only then
+; calls PressEnterKey(selectedString) -> normal text delivery.
+; ----------------------------------------------------------------------------
+@REPLAY_HTML_BUTTON
+#FUNCTION
+	PRINTL START-HTML-BUTTON
+	PRINTBUTTON "OK", 7
+	PRINTL
+	INPUT -1, 1
+	PRINTFORML BTN_RESULT={RESULT}
+	PRINTFORML BTN_RESULT1={RESULT:1}
+	PRINTFORML BTN_RESULTS1=%RESULTS:1%
+	PRINTL END-HTML-BUTTON

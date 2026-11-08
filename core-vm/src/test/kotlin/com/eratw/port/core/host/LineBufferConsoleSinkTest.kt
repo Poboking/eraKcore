@@ -153,7 +153,9 @@ class LineBufferConsoleSinkTest {
         assertEquals("あ", s.textOf(second))
         assertTrue(first.isLogicalLine, "段首行标记逻辑行起点")
         assertFalse(second.isLogicalLine)
-        assertFalse(first.isLineEnd, "折行续行的 IsLineEnd=false")
+        // 折行的中间排带的是**构造缺省**的行尾标志 true（ConsoleDisplayLine.cs:16/:32/:47，
+        // PrintStringBuffer.cs:193 建排时不传 lineEnd），Flush 只改写末排（:183）。
+        assertTrue(first.isLineEnd, "组内首排带构造缺省 IsLineEnd=true（ConsoleDisplayLine.cs:16）")
         assertTrue(second.isLineEnd)
     }
 
@@ -171,27 +173,34 @@ class LineBufferConsoleSinkTest {
         assertEquals(1L, s.lineCount)
     }
 
-    /** PRINTN 折行后仍不计数；下一次输入并入最后一段（不能把整段折行压成一行）。 */
+    /**
+     * PRINTN 折行的**待决窗口**：原版 LINECOUNT = 1，移植同判（AUD-h3-linecount 的正钉）。
+     *
+     * 形状（ConsoleDisplayLine.cs:16/:32/:47 的构造缺省 + PrintStringBuffer.cs:183 只改末排）：
+     * 一次 flush 折出 `[首排(isLogical=true, isLineEnd=true), 末排(isLogical=false,
+     * isLineEnd=isLastLineEnd=false)]`，而计数门是「组内首排 ∧ 该行带行尾标志」
+     * （EmueraConsole.cs:2971-2977）⇒ 首排入列即 +1，逻辑行虽未收尾仍计一枚。
+     * 旧断言「0」钉的是移植侧把**每一排**都写成 isLineEnd=false 的形状，与原版相反。
+     */
     @Test
-    fun wrappedPrintnStillDoesNotCountAndMergesOnlyLastSegment() {
+    fun wrappedPrintnPendingWindowCountsOneLikePc() {
         val s = LineBufferConsoleSink(clientWidth = 10)
 
         s.print("ああああああ", false)
         s.newLine()
 
-        assertEquals(0L, s.lineCount)
+        assertEquals(1L, s.lineCount, "折行的组内首排带行尾标志 ⇒ 原版计 1（:2971-2977）")
         assertEquals(2, s.snapshot().size)
-        assertFalse(s.snapshot()[0].isLineEnd)
-        assertFalse(s.snapshot()[1].isLineEnd)
+        assertTrue(s.snapshot()[0].isLineEnd, "首排 = 构造缺省 true（ConsoleDisplayLine.cs:16）")
+        assertFalse(s.snapshot()[1].isLineEnd, "只有末排被 Flush 写成 isLastLineEnd=false（PrintStringBuffer.cs:183）")
 
         s.print("x", true)
         s.newLine()
 
-        assertEquals(1L, s.lineCount)
-        assertEquals(2, s.snapshot().size, "只合并最后一段，前一段保持独立显示行")
-        assertEquals("あああああ", s.textOf(s.snapshot()[0]))
-        assertEquals("あx", s.textOf(s.snapshot()[1]))
-        assertTrue(s.snapshot()[1].isLineEnd)
+        assertEquals(1L, s.lineCount, "并入的 deleteLine(1) 吃到首排并扣回那枚，再结行 +1 ⇒ 稳态仍 1")
+        assertEquals(1, s.snapshot().size, "deleteLine(1) 摘到逻辑行首排，并入只剩末排内容（原版同形）")
+        assertEquals("あx", s.textOf(s.snapshot()[0]))
+        assertTrue(s.snapshot()[0].isLineEnd)
     }
 
     // ------------------------------------------------------------------
@@ -237,7 +246,7 @@ class LineBufferConsoleSinkTest {
         assertEquals("bc", s.textOf(second))
         assertEquals(listOf(LineBufferConsoleSink.Button(9, 10, 7L)), first.buttons)
         assertEquals(listOf(LineBufferConsoleSink.Button(0, 2, 7L)), second.buttons)
-        assertFalse(first.isLineEnd)
+        assertTrue(first.isLineEnd, "折行的中间排带构造缺省 IsLineEnd=true（ConsoleDisplayLine.cs:16）")
         assertTrue(second.isLineEnd)
     }
 
@@ -424,9 +433,14 @@ class LineBufferConsoleSinkTest {
         assertEquals(1, s.fontStyle)
     }
 
-    /** 背景色与对齐方式按行快照（Process.cs:1535-1552、EmueraConsole.cs:2844-2858）。 */
+    /**
+     * 对齐按行快照（Process.cs:1535-1552）；背景**不**按行快照——SETBGCOLOR 是控制台级
+     * 活值 `bgColor`（EmueraConsole.cs:200、:2844-2858），每帧 `graph.Clear(bgColor)`
+     * 整张清色（:1816），落 [LineBufferConsoleSink.backgroundColor] 供渲染层整屏铺底
+     * （2026-11 玩家反馈「时停只有文字背景变色」的修复）。
+     */
     @Test
-    fun lineSnapshotsBackgroundAndAlignment() {
+    fun lineKeepsAlignmentAndSetbgColorStaysConsoleWide() {
         val s = LineBufferConsoleSink(clientWidth = 80)
 
         s.setBackColor(0x11, 0x22, 0x33)
@@ -435,7 +449,8 @@ class LineBufferConsoleSinkTest {
         s.newLine()
 
         val right = s.snapshot().single()
-        assertEquals(0x112233, right.backColor)
+        assertEquals(0x112233, s.backgroundColor, "SETBGCOLOR 落控制台活值")
+        assertEquals(null, right.backColor, "行不快照整屏底色")
         assertEquals(Alignment.RIGHT, right.alignment)
 
         s.resetBackColor()
@@ -444,7 +459,8 @@ class LineBufferConsoleSinkTest {
         s.newLine()
 
         val left = s.snapshot()[1]
-        assertEquals(LineBufferConsoleSink.DEFAULT_BACK_COLOR, left.backColor)
+        assertEquals(null, s.backgroundColor, "RESETBGCOLOR 清回未显式设置（FunctionIdentifier.cs:1515）")
+        assertEquals(null, left.backColor)
         assertEquals(Alignment.LEFT, left.alignment)
     }
 
@@ -607,7 +623,13 @@ class LineBufferConsoleSinkTest {
         assertFalse(rows[1].isLogicalLine, "只有组内首行是逻辑行首（PrintStringBuffer.cs:206）")
         assertFalse(rows[2].isLogicalLine)
         assertTrue(rows.all { it.isLineEnd }, "直印行 IsLineEnd 构造缺省 true（ConsoleDisplayLine.cs:47）")
-        assertEquals(3L, s.lineCount, "三条已完成的逻辑行各计 1")
+        // 一次 HTML_PRINT = 一个 flush 组：组内只有首排 IsLogicalLine=true
+        // （HtmlManager.cs:698 → ButtonsToDisplayLines，firstLine 只在首排为真，
+        // PrintStringBuffer.cs:206/:212/:242/:261），计数门又要求「首排 ∧ 行尾」
+        // （EmueraConsole.cs:2971-2977）⇒ 三排只算 **1** 个逻辑行。
+        // 玩家侧的同一口径写在语料 ERB/fromEN/HTML_TALENTS/HTML_TALENTS.ERB:41 的注释里
+        // （「br 不往 LINECOUNT 上加」）。旧钉的 3 是移植侧漏掉 isLogicalLine 条件的过计。
+        assertEquals(1L, s.lineCount, "br 切出的三排同属一个 flush 组，LINECOUNT 只加 1")
         rows.forEach { line ->
             assertTrue(line.segments.all { it.kind == LineBufferConsoleSink.Kind.HTML && !it.htmlOption })
         }
@@ -697,51 +719,65 @@ class LineBufferConsoleSinkTest {
     }
 
     /**
-     * div：开/闭是断行边界，内容行带 div 的 `color` 底色
-     * （HtmlManager.cs:1225-1371、ConsoleDivPart.cs:68-70 的 backgroundColor）；
-     * div 外的行保持控制台背景快照。
+     * div 覆盖块（CONTRACT-HTMLDIV-B1 D2/D4 复刻后行为；旧「内容独立成行 + 染整行」钉子
+     * 已按复刻口径重钉，原断言 → 新断言的对应关系：
+     * - 「3 行（A/B/C 各一行）」→「**1 行**」：块零宽内嵌，前后文本与块同行
+     *   （HtmlManager.cs:646 把 ConsoleDivPart 塞进父节点列表当前位置；
+     *   ConsoleDivPart.cs:217-219 空 SetWidth 不占宽）；
+     * - 「内容行 backColor 染 div color」→「行 backColor 恒 null、color 落块的
+     *   [DisplayDivBlock.backgroundColor]」（D4 撤销染整行近似；原版染的是块矩形，
+     *   ConsoleDivPart.cs:186 的 DrawBorder 填充）；
+     * - 「div 标签从行文本剥除」→「区间原文保留在行文本、区间坐标记进块
+     *   [DisplayDivBlock.sourceRange]」（GETDISPLAYLINE 重建 / HTML_GETPRINTEDSTR 剔除按它圈）。
      */
     @Test
-    fun htmlDivSplitsIntoColoredLines() {
+    fun htmlDivBlockIsZeroWidthInlineWithOwnColor() {
         val s = LineBufferConsoleSink(clientWidth = 80)
-        s.printHtml("<div color='#363636'>A<br>B</div>C", false)
+        s.printHtml("<div width='10px' height='30px' color='#363636'>A<br>B</div>C", false)
 
         val rows = s.snapshot()
-        assertEquals(3, rows.size)
-        assertEquals("A", s.textOf(rows[0]))
-        assertEquals(0x363636, rows[0].backColor, "div 内容行染 div 的 color")
-        assertEquals("B", s.textOf(rows[1]))
-        assertEquals(0x363636, rows[1].backColor)
-        assertEquals("C", s.textOf(rows[2]), "div 之后的文本是普通行")
-        assertEquals(LineBufferConsoleSink.DEFAULT_BACK_COLOR, rows[2].backColor)
+        assertEquals(1, rows.size, "块零宽内嵌：div 不再断行，前后文本与块同行")
+        val row = rows[0]
+        assertEquals(null, row.backColor, "D4：div color 不再染整行")
+        assertEquals(1, row.divBlocks.size)
+        val block = row.divBlocks.single()
+        assertEquals(0x363636, block.backgroundColor, "color 是块矩形底色（ConsoleDivPart.cs:70）")
+        assertEquals(listOf("A", "B"), block.children.map { it.html }, "br 在块内结子行，不是显示行")
+        assertEquals(0, block.anchorCol, "块锚在行首（前面无文本）")
+        assertEquals(true, block.isRelative, "display 缺省 relative（HtmlManager.cs:1236）")
+        // 区间原文保留：GETDISPLAYLINE 的重建与 HTML_GETPRINTEDSTR 的剔除都按它圈
+        val raw = row.segments.single().text
+        assertEquals("<div width='10px' height='30px' color='#363636'>A<br>B</div>", raw.substring(block.sourceRange))
+        assertTrue(block.sourceRange.last < raw.length - 1, "块之后的 C 留在行文本里")
+        assertTrue(raw.endsWith("C"))
     }
 
     /**
-     * 语料的两栏 div 形态（TEMP_CHARA_LIST_BY_DT 系）：内容与顺序保持、各自底色。
-     * xpos/width 丢弃（登记分歧：浮动覆盖块在 [LineBufferConsoleSink.DisplayLine]
-     * 线性行模型上没有落点，两栏并排退化为上下堆叠）。
+     * 语料的两栏 div 形态（PRINT_STATE2.ERB:380 / ADD_CUSTOM_FALL_CONDITION.ERB:101 的
+     * 最小化）：两块并排、各自几何与子行，全部内嵌**同一条**显示行（D2 的「两栏并排
+     * 复现，不再退化堆叠」）。旧钉子断言「4 行上下堆叠 + 行底色」——按复刻口径重钉。
      */
     @Test
-    fun htmlDivTwoColumnsKeepsContentAndColors() {
+    fun htmlDivTwoColumnsInlineOnOneRow() {
         val s = LineBufferConsoleSink(clientWidth = 80)
         s.printHtml(
-            "<div xpos='0' width='10px' color='#111111'>L1<br>L2</div>" +
-                "<div xpos='20px' color='#222222'>R1<br>R2</div>",
+            "<div xpos='0' width='10px' height='30px' color='#111111'>L1<br>L2</div>" +
+                "<div xpos='20px' width='10px' height='30px' color='#222222'>R1<br>R2</div>",
             false,
         )
 
         val rows = s.snapshot()
-        assertEquals(4, rows.size, "两栏各 2 行：内容不塌行、顺序保持")
-        assertEquals("L1", s.textOf(rows[0]))
-        assertEquals(0x111111, rows[0].backColor)
-        assertEquals("L2", s.textOf(rows[1]))
-        assertEquals(0x111111, rows[1].backColor)
-        assertEquals("R1", s.textOf(rows[2]))
-        assertEquals(0x222222, rows[2].backColor, "第二个 div 换自己的底色")
-        assertEquals("R2", s.textOf(rows[3]))
-        assertEquals(0x222222, rows[3].backColor)
-        // div 标签本身（含 xpos/width）从行文本剥除
-        rows.forEach { line -> assertFalse(line.segments.single().text.contains("<div")) }
+        assertEquals(1, rows.size, "两栏并排：两块同一条显示行，不再退化堆叠")
+        val blocks = rows[0].divBlocks
+        assertEquals(2, blocks.size)
+        assertEquals(0x111111, blocks[0].backgroundColor)
+        assertEquals(0x222222, blocks[1].backgroundColor)
+        assertEquals(listOf("L1", "L2"), blocks[0].children.map { it.html })
+        assertEquals(listOf("R1", "R2"), blocks[1].children.map { it.html })
+        assertEquals(10, blocks[0].widthPx, "width='10px' 原值（px 不折算）")
+        assertEquals(0, blocks[0].xOffsetPx)
+        assertEquals(20, blocks[1].xOffsetPx, "xpos='20px' 进几何（旧近似整段丢弃）")
+        assertEquals(null, rows[0].backColor, "D4：行底色通路拆除")
     }
 
     /** `HTML_PRINT ..., 1`（toPrintBuffer）不切行：原版走 Html2ButtonList 提前返回（HtmlManager.cs:679-682）。 */
@@ -776,7 +812,9 @@ class LineBufferConsoleSinkTest {
         )
         assertEquals("B", s.textOf(rows[1]))
         assertTrue(rows[1].isLineEnd)
-        assertEquals(2L, s.lineCount, "并入行与 B 行各计 1（addDisplayLine 的 IsLogicalLine && IsLineEnd）")
+        // 计数门「组内首排 ∧ 行尾」（EmueraConsole.cs:2971-2977）：PRINTN 那一排没结行不计，
+        // HTML 组只算首排那一次 ⇒ 1 而不是 2。B 排 isLogicalLine=false，不该再涨一枚。
+        assertEquals(1L, s.lineCount, "并入行是 HTML 组的组内首排，计 1；续排 B 不计")
     }
 
     /** PrintError 用默认样式、强制左对齐、单行不折行（EmueraConsole.cs:3098-3115）。 */
@@ -885,5 +923,62 @@ class LineBufferConsoleSinkTest {
         val s2 = LineBufferConsoleSink(clientWidth = 80)
         s2.printHtml("<shape type='rect' color='#363636' width='60px' height='10px'>", false)
         assertEquals(1, s2.snapshot().size, "纯 shape 行同样留行")
+    }
+
+    // ------------------------------------------------------------------
+    // tailText：报告「屏上最后的内容」与 DevTools lines 的行文本口径
+    // ------------------------------------------------------------------
+
+    /**
+     * 尾部读数给**行文本**，不是 `DisplayLine.toString()`。
+     *
+     * 现场（2026-11-01 端点 100 份报告）：宿主这一路一直在打 data class 全貌
+     * （`serial` / `foreColor` / `Button(startCol=…)`），一行还没到报告的单行裁剪就已被
+     * 元数据填满 ⇒ 玩家眼前那段话整体读不出来。
+     */
+    @Test
+    fun tailTextGivesLineTextNotDisplayLineDump() {
+        val s = LineBufferConsoleSink(clientWidth = 80)
+        s.print("第一页", true)
+        s.newLine()
+        s.print("米斯蒂娅·萝蕾拉(好感度: G 4)", true)
+        s.newLine()
+        s.print("◆   大雨如注…", true)
+        s.newLine()
+
+        val tail = s.tailText(2)
+
+        assertEquals(listOf("米斯蒂娅·萝蕾拉(好感度: G 4)", "◆   大雨如注…"), tail)
+        assertTrue(tail.none { "DisplayLine(" in it || "segments=" in it }, "不许回落到对象 dump：$tail")
+    }
+
+    /** 取窗口的**首部**空白行丢掉（口径同 `vmdbg` 的 `consoleTailLocked`），行数上限照收。 */
+    @Test
+    fun tailTextDropsLeadingBlankRowsOfWindow() {
+        val s = LineBufferConsoleSink(clientWidth = 80)
+        s.print("正文", true)
+        s.newLine()
+        s.print(" ", true)
+        s.newLine()
+        s.print(" ", true)
+        s.newLine()
+        s.print("下一页", true)
+        s.newLine()
+
+        // 窗口起于空白行 ⇒ 头部两行被摘掉；窗口起于正文 ⇒ 一行都不摘（尾部空行留着，
+        // 玩家屏上那几行空白本身就是现场）。
+        assertEquals(listOf("下一页"), s.tailText(2))
+        assertEquals(listOf("正文", " ", " ", "下一页"), s.tailText(5))
+        assertEquals(emptyList(), s.tailText(0), "max<=0 不出行")
+    }
+
+    /** HTML 行的标签**保留原文**（这一节要的是屏上原样，剥标签是 E2E 对拍专用的 htmlVisibleText）。 */
+    @Test
+    fun tailTextKeepsHtmlSourceVerbatim() {
+        val s = LineBufferConsoleSink(clientWidth = 80)
+        s.printHtml("<p align='right'><img src='钟表_05_00' height='500'></p>", false)
+        val tail = s.tailText(10)
+        assertEquals(1, tail.size)
+        assertTrue("<img src='钟表_05_00'" in tail.single(), "HTML 段保留原文：${tail.single()}")
     }
 }

@@ -1,0 +1,5 @@
+{
+  "stats": {"totalDefs": 2, "uniqueNames": 2, "duplicateNames": 0, "nonEventDuplicates": 0, "eventDuplicates": 0, "shadowedDefs": 0, "methodDefs": 0, "collator": "ORDINAL"},
+  "duplicates": [
+  ]
+}

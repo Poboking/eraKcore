@@ -3,6 +3,7 @@ package com.eratw.port.core.fn
 import com.eratw.port.core.data.save.SaveEntry
 import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.Expr
+import com.eratw.port.core.expr.FloatLiteral
 import com.eratw.port.core.expr.IntLiteral
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.StrLiteral
@@ -13,6 +14,7 @@ import com.eratw.port.core.xml.XmlElement
 import com.eratw.port.core.xml.XmlParseException
 import com.eratw.port.core.xml.XmlParser
 import com.eratw.port.core.xml.XmlPool
+import java.util.Locale
 
 /**
  * MAP / DataTable 家族（[registerMapMethods] / [registerDataTableMethods]）。
@@ -109,6 +111,29 @@ internal fun registerMapMethods(r: BuiltinRegistry) {
     r.register(BuiltinMethod("MAP_FROMXML", I_, 2, 2, evalRef = { c, e -> mapFromXml(c, e) }) { c, a ->
         mapFromXml(c, a.toExprs())
     })
+
+    // ---- 4.981 上游新增 MAP 增强集（自改说明 :34-41；reference/emuera-cs 零命中）----
+    // 权威 = spec（builtin-functions.yaml:2241-2271，源 fork-src Creator.Method.cs:2434-2602）：
+    // 返回码/边界逐条对 spec 落地——MERGE 缺表 0、REMOVEIF 缺表 0/非法条件 -1/成功返回删除条数、
+    // FINDKEY 缺表 "" + 写 RESULT + 无 VAL_NE 分支（未列条件落 switch 之外）。语料只有注释里的
+    // 等价实现（`_List.ERB:47/176`、`:49/340`、`:53/369`、`STRINGSET.ERB:26`），无真实调用点。
+    // 参数序与语料注释一致：`MAP_FINDKEY "listName", val, "VAL_EQ"`、`MAP_REMOVEIF "listName", val, "VAL_EQ"`。
+    r.register(BuiltinMethod("MAP_MERGE", I_, 2, 2, evalRef = { c, e -> mapMerge(c, e) }) { c, a ->
+        mapMerge(c, a.toExprs())
+    })
+    r.register(BuiltinMethod("MAP_REMOVEIF", I_, 3, 3, evalRef = { c, e -> mapRemoveIf(c, e) }) { c, a ->
+        mapRemoveIf(c, a.toExprs())
+    })
+    // 元数按 fork 的 `argumentTypeArray = [String, String, String]`（Creator.Method.cs:2505-2510）
+    // 恰好 3 参；specs `name, matchValue, mode` 同口径。
+    r.register(BuiltinMethod("MAP_FINDKEY", S_, 3, 3, evalRef = { c, e -> mapFindKey(c, e) }) { c, a ->
+        mapFindKey(c, a.toExprs())
+    })
+    // fork 的实参表 3 槽、OmitStart=1（spec builtin-functions.yaml:2270「Dimension 个数由 OmitStart=1 决定」；
+    // fork-src Creator.Method.cs:2575-2602）⇒ 下界 1 走原版「至少需要1个参数」文案（FunctionMethod.cs:283）。
+    r.register(BuiltinMethod("MAP_TOSTRING", S_, 1, 3, omitStart = 1, evalRef = { c, e -> mapToString(c, e) }) { c, a ->
+        mapToString(c, a.toExprs())
+    })
 }
 
 internal fun registerDataTableMethods(r: BuiltinRegistry) {
@@ -149,16 +174,23 @@ internal fun registerDataTableMethods(r: BuiltinRegistry) {
     })
 
     // ---- 行（DataTableRowSetMethod :2253-2322 / RowRemoveMethod :2383-2428）----
-    r.register(BuiltinMethod("DT_ROW_ADD", I_, 1, -1, evalRef = { c, e -> dtRowAdd(c, e) }) { c, a ->
+    // Add 第一份形态 ArgTypes = String,VariadicString,VariadicAny（3 槽）、OmitStart=1
+    // ⇒ 固定前缀 1、组大小 2、个数下界 1；第二份 4 槽数组形态精确实参 4
+    // （FunctionMethodCreator.cs:2141-2166，MatchVariadicGroup 判据 FunctionMethod.cs:186-193）。
+    r.register(BuiltinMethod("DT_ROW_ADD", I_, 1, -1, variadicGroup = VariadicGroup(1, 2, 4, 1), evalRef = { c, e -> dtRowAdd(c, e) }) { c, a ->
         dtRowAdd(c, a.toExprs())
     })
     // Set 分支第一份 ArgTypeList 是 4 槽 String,Int,VariadicString,VariadicAny + MatchVariadicGroup，
     // OmitStart 缺省 -1 ⇒ 下限 = 槽数 4、上限变长（FunctionMethodCreator.cs:2168-2199，注册在 :9267；
     // 个数判据 FunctionMethod.cs:183/266）；第二份 5 槽数组形态单列。2/3 参在原版解析期就报
     // ArgsCountNotMatches —— CMP-70 裁决（C# 权威）把注册下界从 2 抬回 4。
-    // 变参的「列名,值」成对约束（MatchVariadicGroup，:186-193）移植侧仍在运行期 CodeEE（dtRowSet 内），
-    // 相位不同、报错等价（MapDataAuditTest 的审计 KDoc 已登记）。
-    r.register(BuiltinMethod("DT_ROW_SET", I_, 4, -1, evalRef = { c, e -> dtRowSet(c, e) }) { c, a ->
+    // 变参的「列名,值」成对约束（MatchVariadicGroup，:186-193）原是运行期 CodeEE
+    // （dtRowAdd :1128 / dtRowSet :1214），本波起由装载期接线：声明 [VariadicGroup] 后
+    // `tools/erbcc` 装载期即上屏 ParserMediator 告警（见 PairedArgLoadCheck.kt）。
+    // 运行期 CodeEE 保留为**非 erbcc 装载路径**（直接 evalRef 调用 / 补丁编译装置）的兜底：
+    // 对 erbc 产物相位它已成不可达防线，但删掉会让直接构造 Expr 列表的调用静默少写一对。
+    // 报错文案两侧一致（MapDataAuditTest 的审计 KDoc 登记相位差已闭合）。
+    r.register(BuiltinMethod("DT_ROW_SET", I_, 4, -1, variadicGroup = VariadicGroup(2, 2, 5, 4), evalRef = { c, e -> dtRowSet(c, e) }) { c, a ->
         dtRowSet(c, a.toExprs())
     })
     r.register(BuiltinMethod("DT_ROW_REMOVE", I_, 2, 3, evalRef = { c, e -> dtRowRemove(c, e) }) { c, a ->
@@ -207,6 +239,8 @@ private fun List<Value?>.toExprs(): List<Expr?> = map { v ->
         null -> null
         is Value.IntV -> IntLiteral(v.v)
         is Value.StrV -> StrLiteral(v.v)
+        // 浮点值包成 FloatLiteral（4.981 升版；写回路径由各被调函数自行拒绝）
+        is Value.FloatV -> FloatLiteral(v.v)
     }
 }
 
@@ -271,6 +305,23 @@ private fun mapPool(c: BuiltinContext): MapPool = mapPoolOf(c.store)
 
 /** 存档层（[com.eratw.port.core.save.SaveCapture]）用的池入口：同一 aux 槽，不经 [BuiltinContext]。 */
 private fun mapPoolOf(store: VariableStore): MapPool = store.aux.slot("map") { MapPool() }
+
+/**
+ * 诊断口：MAP 池快照 —— 每个 map 的（名字, 元素数），只计数、不取键值内容。
+ *
+ * 消费方是壳层错误报告（2026-11-01 报告收编）：语料 ResourceManager 的图像簿记
+ * `RM_GMAP = "map:グラフィックス"`（ResourceManager.ERH:18，注意键**含 `map:` 前缀**，
+ * 该常量的值才是传给 MAP 一族的表名），它的元素数与位图簿记位占用（壳层侧读）并排，
+ * 才能判「图像过多」（RM_G_ID 行257 的 THROW）是**真耗尽**（位图位打满且图像表同步涨）
+ * 还是**簿记泄漏**（释放钩子被语料 [SKIPSTART] 整块禁用、位只增不放 ——
+ * ResourceManager.ERB:304-365 的既定行为）。
+ *
+ * 竞态口径：本函数跑在崩溃线程上、VM 线程可能还活着，迭代 [MapPool.maps] 与
+ * VM 线程的写入可能撞 CME —— 诊断读数允许近似，撞了就给空表（调用方对空表如实
+ * 写「读数不可用」），绝不为一份读数加锁拖住 VM 线程。
+ */
+fun mapPoolDiagnostics(store: VariableStore): List<Pair<String, Int>> =
+    runCatching { mapPoolOf(store).maps.entries.map { it.key to it.value.size } }.getOrDefault(emptyList())
 
 /** MAP_CREATE：已存在 0，否则建空表 1（:2799-2805）。 */
 private fun mapCreate(c: BuiltinContext, e: List<Expr?>): Value {
@@ -346,7 +397,10 @@ private fun mapGetKeys(c: BuiltinContext, e: List<Expr?>): Value {
     if (e.size <= 1) return Value.StrV(map.keys.joinToString(","))
     if (e.size == 3) {
         if (e.intAt(c, 2) == 0L) return Value.StrV("")
-        val dest = arrArg(e[1]) ?: return Value.StrV("")
+        // 目标不是数组变量时原版在 `arguments[1] as VariableTerm` 上裸 NRE
+        // （spec: FunctionMethodCreator.cs:2968-2973）；返回空串等于把「一个键都没写」
+        // 伪装成「表里没有键」，折成 CodeEE（与同族 DT_ROW_ADD 的 :919 口径一致）。
+        val dest = arrArg(e[1]) ?: throw CodeEE("函数 MAP_GETKEYS 的第 2 个参数必须是字符串一维数组变量")
         val len = dest.length(c)
         var i = 0
         for (k in map.keys) {
@@ -380,6 +434,112 @@ private fun mapToXml(c: BuiltinContext, e: List<Expr?>): Value {
     for ((k, v) in map) sb.append("<p><k>").append(k).append("</k><v>").append(v).append("</v></p>")
     sb.append("</map>")
     return Value.StrV(sb.toString())
+}
+
+/**
+ * MAP_MERGE：把源表的键值覆盖进目标表（自改说明 :36「将源 MAP 合并到目标 MAP（覆盖同 key）」）。
+ *
+ * 成功 → 1；dest 或 src **任一不存在 → 0**、不抛错
+ * （权威：spec builtin-functions.yaml:2246；fork-src Creator.Method.cs:2434-2452）。
+ * 键比较沿用 MAP 池的区分大小写 + 插入序（覆盖已有 key 不改变其位置）。语料零真实调用点。
+ */
+private fun mapMerge(c: BuiltinContext, e: List<Expr?>): Value {
+    val pool = mapPool(c)
+    val target = pool.maps[e.strAt(c, 0)] ?: return Value.IntV(0L)
+    val source = pool.maps[e.strAt(c, 1)] ?: return Value.IntV(0L)
+    for ((k, v) in source) target[k] = v
+    return Value.IntV(1L)
+}
+
+/** MAP 条件集：自改说明 :37 逐字列出的六个（MAP_REMOVEIF 支持全集）。 */
+private val MAP_IF_CONDS = listOf("KEY_CONTAINS", "KEY_PREFIX", "KEY_SUFFIX", "VAL_CONTAINS", "VAL_EQ", "VAL_NE")
+
+/**
+ * MAP_FINDKEY 支持的条件集：fork 的 switch **没有 VAL_NE 分支**
+ * （权威：spec builtin-functions.yaml:2262；fork-src Creator.Method.cs:2505-2573）——
+ * 传 VAL_NE 落到 switch 之外 ⇒ 结果空。**须原样复刻，不补齐 VAL_NE**（ADR-005）。
+ */
+private val MAP_FINDKEY_CONDS = listOf("KEY_CONTAINS", "KEY_PREFIX", "KEY_SUFFIX", "VAL_CONTAINS", "VAL_EQ")
+
+/** 条件名是否在 [allowed] 内（OrdinalIgnoreCase，与 MAP 池的 String 比较器口径无关）。 */
+private fun isKnownCond(cond: String, allowed: List<String>): Boolean =
+    allowed.any { it.equals(cond, ignoreCase = true) }
+
+/**
+ * 按条件判定一条键值对（要求 [cond] 已在调用方所属的允许集内；未列条件落在 else → false）。
+ *
+ * 折叠钉 [Locale.ROOT]：下面的分支是**源码里的字面量**，与 `key_contains` 这类小写写法
+ * 不是两侧同折叠的键。裸 `uppercase()` 在本闸实测的 Kotlin 2.0.20 + JDK 17 上走 ASCII 快路径、
+ * 不随文化折叠，但显式 `uppercase(tr)`（以及 Java 的 `toUpperCase(tr)`）会把 `i` 折成 U+0130
+ * ⇒ 六个条件全落 else。无参版的安全只是**当前标准库版本**的实现细节、不是合同
+ *（本仓同类键折叠口径见 specs/verify-notes.md §16 第 20 条）。
+ */
+private fun mapMatch(k: String, v: String, pattern: String, cond: String): Boolean =
+    when (cond.uppercase(Locale.ROOT)) {
+        "KEY_CONTAINS" -> k.contains(pattern)
+        "KEY_PREFIX" -> k.startsWith(pattern)
+        "KEY_SUFFIX" -> k.endsWith(pattern)
+        "VAL_CONTAINS" -> v.contains(pattern)
+        "VAL_EQ" -> v == pattern
+        "VAL_NE" -> v != pattern
+        else -> false
+    }
+
+/**
+ * MAP_REMOVEIF：`(map, pattern, cond)` 批量删匹配的键值对。
+ *
+ * 权威：spec builtin-functions.yaml:2249-2256；fork-src Creator.Method.cs:2454-2503：
+ * - 映射不存在 → **0**（不抛错）；
+ * - mode 非法 → **-1**（不抛错）；
+ * - 成功 → **删除条数**。
+ * mode 支持全集六个（含 VAL_NE），全部按区分大小写的字符串比较（[mapMatch]）。
+ */
+private fun mapRemoveIf(c: BuiltinContext, e: List<Expr?>): Value {
+    val map = mapPool(c).maps[e.strAt(c, 0)] ?: return Value.IntV(0L)
+    val cond = e.strAt(c, 2)
+    if (!isKnownCond(cond, MAP_IF_CONDS)) return Value.IntV(-1L)
+    val pattern = e.strAt(c, 1)
+    // 先收集再删（LinkedHashMap 迭代中删除会 CME）。
+    val doomed = map.filter { (k, v) -> mapMatch(k, v, pattern, cond) }.keys.toList()
+    doomed.forEach { map.remove(it) }
+    return Value.IntV(doomed.size.toLong())
+}
+
+/**
+ * MAP_FINDKEY：`(map, pattern, cond)` 查匹配的 key，返回逗号分隔列表。
+ *
+ * 权威：spec builtin-functions.yaml:2257-2264；fork-src Creator.Method.cs:2505-2573：
+ * - 三参必填（fork `argumentTypeArray = [String, String, String]` 无 OmitStart，:2505-2510）；
+ * - 映射不存在 → `""`（不写 RESULT，与 MAP_GETKEYS 的缺表早退同口径）；
+ * - 其余路径把**匹配条数**写入 `RESULT`（实现用「结果串按逗号 split 的长度」，空串记 0）；
+ * - mode 只认 [MAP_FINDKEY_CONDS] 五个：fork 的 switch **无 VAL_NE 分支**，未列条件
+ *   （含 VAL_NE）落到 switch 之外 ⇒ 返回 `""` 且 `RESULT=0`，**不抛错**（须原样复刻，ADR-005）。
+ * TODO(verify)：缺表时是否也写 `RESULT=0`（spec 只写「返回空串」，未及 RESULT 侧；取早退不写）。
+ */
+private fun mapFindKey(c: BuiltinContext, e: List<Expr?>): Value {
+    val map = mapPool(c).maps[e.strAt(c, 0)] ?: return Value.StrV("")
+    val pattern = e.strAt(c, 1)
+    val cond = e.strAt(c, 2)
+    val keys = if (isKnownCond(cond, MAP_FINDKEY_CONDS)) {
+        map.entries.filter { (k, v) -> mapMatch(k, v, pattern, cond) }.map { it.key }
+    } else {
+        emptyList()
+    }
+    val result = keys.joinToString(",")
+    writeResult0(c.store, if (result.isEmpty()) 0L else result.split(',').size.toLong())
+    return Value.StrV(result)
+}
+
+/**
+ * MAP_TOSTRING：`(map[, sep[, kvSep]])` 序列化成字符串（自改说明 :39）。
+ * 缺省分隔符按「与 MAP_FROMSTRING 对称」取 `,` 与 `=`（TODO(verify)：缺省值无手册证据）。
+ * 缺表 → ""（与 MAP_TOXML 同口径）。
+ */
+private fun mapToString(c: BuiltinContext, e: List<Expr?>): Value {
+    val map = mapPool(c).maps[e.strAt(c, 0)] ?: return Value.StrV("")
+    val sep = if (e.size >= 2) e.strAt(c, 1) else ","
+    val kv = if (e.size >= 3) e.strAt(c, 2) else "="
+    return Value.StrV(map.entries.joinToString(sep) { (k, v) -> k + kv + v })
 }
 
 /**
@@ -611,15 +771,24 @@ private class DtTable(var name: String) {
     }
 
     /**
-     * `DataRow` 单列初值（`DataTable.NewRow()` 与 `DataColumnCollection.Add` 补老行的共同口径）：
-     * DefaultValue → 可空列 DBNull → 不可空列的类型零值。
+     * `DataRow` 单列初值 —— `DataTable.NewRow()`、`DataColumnCollection.Add` 补老行、
+     * ReadXml 缺元素三条路径**同一条派生规则**：`DefaultValue`，未设即 `DBNull`（本模型 null）。
+     *
+     * .NET Framework DataTable 语义 + 推演依据（dotnet 8 探针，netcoreapp8.0 与游戏运行时
+     * 同源 —— reference/emuera-cs/Emuera.csproj:7；临时工程不落仓，编号是探针输出行标）：
+     * - A1/A3：对有行的表 `Columns.Add` 后，老行新格**恒 DBNull**（数值列与字符串列同读数），
+     *   不是类型零值 —— 旧实现「不可空列补 0/空串」的分支是框架性误推，已删；
+     * - A5：`NewRow()` 对不可空列同样 DBNull，`Rows.Add` 当场抛 `NoNullAllowedException`
+     *   ⇒ PC 上「不可空列预填 0」不可观测（该行加不进去），verify-notes §13.2 旧登记名作废；
+     * - D3：不可空列设了 `DefaultValue` 则 NewRow 填默认值、`Rows.Add` 通过；
+     * - B3：DBNull 格的「数字列读 0、字符串列读空串」由**取值函数的合并面**兑现
+     *   （DT_CELL_GET DBNull→0 = FunctionMethodCreator.cs:2486-2490、GETS DBNull→"" =
+     *   :2536-2541、ISNULL DBNull→1 = :2484-2485），存储层不需要预填字面零值。
+     * 非 DBNull 约束（不可空列不许留 DBNull）的触发点在**提交边界**、不在本函数：
+     * Rows.Add（[dtRowAdd]）、AllowDBNull setter（[dtColumnAdd]）、单元格写（[dtCellSet]）、
+     * ReadXml 装载（[readRowsInto]）。
      */
-    fun emptyCell(col: DtColumn): Any? = when {
-        col.defaultValue != null -> col.defaultValue
-        col.allowDBNull -> null
-        col.type == DtType.STRING -> ""
-        else -> 0L
-    }
+    fun emptyCell(col: DtColumn): Any? = col.defaultValue
 
     /** `DataTable.NewRow()`：逐列取 [emptyCell]。 */
     fun newRow(): ArrayList<Any?> = ArrayList<Any?>(columns.size).apply {
@@ -646,7 +815,9 @@ private fun dtPoolOf(store: VariableStore): DtPool = store.aux.slot("dt") { DtPo
  * 再乘 10000 —— 旧实现直接 `clockMillis * 10000`，Asia/Shanghai 下与原版差 8 小时的 ticks
  * （2.88e11 ticks）。位数仍是 18 位，`DATA_LEN=179` 那条读数不受影响。
  * 严格递增由 lastRowId 保证（原版靠 Stopwatch 的 100ns 分辨率，同一毫秒内两次
- * DT_ROW_ADD 不会撞主键）。
+ * DT_ROW_ADD 不会撞主键）；lastRowId 管不到的来源（DT_FROMXML 载入的既有行）若与
+ * 自产 id 对撞，由 [dtRowAdd] 的主键唯一闸按 .NET ConstraintException 复刻
+ * （RESIDUE-BX2 R3，dotnet 8 探针 R3a）。
  */
 private fun nextRowId(c: BuiltinContext): Long {
     val pool = dtPool(c)
@@ -716,9 +887,21 @@ private fun dtNoCase(c: BuiltinContext, e: List<Expr?>): Value {
  *   "指定了不支持的类型"（:2111-2115）；不给类型 → .NET 默认 **string**（:2118 `Columns.Add(name)`）；
  * - 第 4 参给 0 → AllowDBNull=false，缺省/非 0 → true（:2117）。
  *
- * TODO(verify): 第 4 参为 0 且表内已有行时，.NET 的 `AllowDBNull = false` 可能因新列
- * 全为 DBNull 抛 NoNullAllowed（DataColumn.AllowDBNull setter，仓内无 .NET 行号）；
- * 本实现按类型零值补齐、不复刻该异常（语料无「先建行再加非空列」形态）。
+ * **分歧 B（扩老行）+ 分歧 D（AllowDBNull=false 的提交边界）已复刻**：
+ * `:2118 Columns.Add` 是表级操作 —— 所有老行同步扩到新列宽、新格按 [DtTable.emptyCell]
+ * 取 DefaultValue / DBNull（旧实现只 columns.add 不碰 rows，导致 CELL 族在 rows[ri][ci]
+ * 直接越界）。随后 `:2119 dataColumn.AllowDBNull = allowDBNull` 的 setter 在**表内已有行**
+ * （新列刚回填全 DBNull）且置 false 时抛 .NET `DataException`（"Column 'n' has null values
+ * in it."；dotnet 8 探针 A2），且整条 GetIntValue 无 try（FunctionMethodTerm.cs:20-23）
+ * ⇒ 想定外中止，移植侧按分歧 C 的裸 CLR→裸 JVM 映射抛 [IllegalStateException]。
+ * 探针 A2b：异常后**列已在表内**、AllowDBNull 仍 true、老行新格仍 DBNull —— 部分状态
+ * 一并复刻（先 add + 回填、后抛）。空表上加不可空列不抛（探针 B4），此后缺赋值的
+ * DT_ROW_ADD 在 [dtRowAdd] 的 Rows.Add 边界拦下。
+ *
+ * 语料可达性（T6 普查，4.980/4.981 两版）：DT_COLUMN_ADD 共 37/48 处，**0 处**带第 4 参 0，
+ * 列恒先于行建（TEMP_CHARA_LIST_BY_DT.ERB:260-280、MAP_NODE_TO_XML.ERB:55-58、
+ * ModularCharacterUpdate.ERB:81-84 均为 CREATE→加列→加行序）⇒ 抛点语料 0 处可达，
+ * 老行×新列的 DBNull 回填亦 0 处可达（构造用例钉，MapDataTableMethodsTest / MapDataAuditTest）。
  */
 private fun dtColumnAdd(c: BuiltinContext, e: List<Expr?>): Value {
     val t = dtPool(c).tables[e.strAt(c, 0)] ?: return Value.IntV(-1L)
@@ -731,14 +914,21 @@ private fun dtColumnAdd(c: BuiltinContext, e: List<Expr?>): Value {
         DtType.STRING
     }
     val allowDBNull = e.size != 4 || e.intAt(c, 3) != 0L
-    val col = DtColumn(colName, type, allowDBNull)
+    // :2118 Columns.Add 先行：列以**可空**态进表、老行回填（:2119 的 setter 还没跑）。
+    val col = DtColumn(colName, type, allowDBNull = true)
     t.columns.add(col)
-    // `DataColumnCollection.Add` 是**表级**操作：.NET 会把所有老行同步扩到新列宽，
-    // 新格取该列 DefaultValue / DBNull（无 DefaultValue 且不可空则类型零值）。
-    // C# 见 FunctionMethodCreator.cs:2118 `dataTable.Columns.Add(...)`；旧实现只
-    // columns.add 不碰 rows，导致 CELL 族的 rows[ri][ci] 直接越界。
     for (row in t.rows) {
         while (row.size < t.columns.size) row.add(t.emptyCell(t.columns[row.size]))
+    }
+    if (!allowDBNull) {
+        if (t.rows.isNotEmpty()) {
+            // :2119 setter 的框架校验（探针 A2/A2b）：老行新格全 DBNull ⇒ DataException，
+            // 列已入表、AllowDBNull 保持 true（部分状态照抄）。
+            throw IllegalStateException(
+                "复刻 .NET DataException（FunctionMethodCreator.cs:2119 AllowDBNull setter）：列 $colName 含 DBNull 值（表内已有 ${t.rows.size} 行），不能设为不可空；列已加入且保持可空",
+            )
+        }
+        col.allowDBNull = false // 空表无 DBNull 可撞（探针 B4）
     }
     return Value.IntV(1L)
 }
@@ -879,7 +1069,18 @@ private fun dtRowLength(c: BuiltinContext, e: List<Expr?>): Value {
 // DT：行 / 单元格
 // ======================================================================
 
-/** 写一个单元格（`SetValue`，:2210-2251）。列名 "id" 一律拒绝（:2200-2203，区分大小写）。 */
+/**
+ * 写一个单元格（`SetValue`，:2210-2251）。列名 "id" 一律拒绝（:2200-2203，区分大小写）。
+ *
+ * `v == null → row[name] = DBNull.Value`（:2215）镜像分支的**可达性**（RESIDUE-BX2 R4
+ * 探针定谳）：成对形态的空位实参在原版解析期就被 CheckArgumentTypeEx 拒绝
+ * （[dtRowAdd]/[dtRowSet] 的 ArgTypeList 无 OmitStart ⇒ 缺省 -1，FunctionMethod.cs:198-205），
+ * 数组形态走 string/long 重载（:2228-2248）无空位——两者都到不了这里，移植侧已在
+ * 两个成对循环同文案拒绝。本分支按 :2215 原文保留：新行（[dtRowAdd]）写 DBNull
+ * 不当场抛、约束在 Rows.Add 边界落（探针 R4d/R4e）；已是附加行的 DBNull 写入在
+ * .NET 当场抛 NoNullAllowedException（探针 R4a/R4b）——那是 [dtCellSet]（DT_CELL_SET，
+ * OmitStart=3 可省参）的路径，其不可空闸见该函数，不落这里。
+ */
 private fun setCell(c: BuiltinContext, t: DtTable, row: ArrayList<Any?>, colName: String, fn: String, v: Expr?) {
     if (colName == "id") throw CodeEE("函数 $fn 不能写入 id 列")
     val ci = t.colIndex(colName)
@@ -932,8 +1133,57 @@ private fun dtRowAdd(c: BuiltinContext, e: List<Expr?>): Value {
         var i = 1
         while (i < e.size) {
             if (i + 1 >= e.size) throw CodeEE("函数 DT_ROW_ADD 的「列名, 值」参数个数不成对")
-            setCell(c, t, row, e.strAt(c, i), "DT_ROW_ADD", e[i + 1])
+            // 空位实参（如 `DT_ROW_ADD "T", "C", ` 尾随逗号）在原版**解析期**就被
+            // CheckArgumentTypeEx 拒绝（本函数 ArgTypeList 无 OmitStart ⇒ 缺省 -1，
+            // FunctionMethodCreator.cs:2140-2155；FunctionMethod.cs:198-205
+            // `arguments[j] == null` 两条件皆不成立 ⇒ ArgCanNotBeNull，Lang.cs:3734，
+            // zhs 文案 `{0}函数: 第{1}个参数不能省略`），
+            // :2215 的 `v == null → DBNull` 分支对成对形态**不可达**。移植侧运行期
+            // 同文案拒绝（RESIDUE-BX2 R4）——旧实现把空位静默写成 DBNull，方向相反。
+            setCell(
+                c, t, row, e.strAt(c, i), "DT_ROW_ADD",
+                e[i + 1] ?: throw CodeEE("DT_ROW_ADD函数: 第${i + 2}个参数不能省略"),
+            )
             i += 2
+        }
+    }
+    // :2318 Rows.Add 是 .NET 的提交边界：行内仍有 DBNull 的**不可空**列当场抛
+    // NoNullAllowedException（"Column 'n' does not allow nulls."；dotnet 8 探针 A5），
+    // 异常后行不落表（探针 A5b）。id 列已先赋（:2278），只有其余不可空列会踩；
+    // 设了 DefaultValue 的列已被 [DtTable.emptyCell] 填上默认值、放行（探针 D3）。
+    // 链路无 try（FunctionMethodTerm.cs:20-23）⇒ 按分歧 C 的裸异常映射抛
+    // [IllegalStateException]。语料 4.980/4.981 的 DT_COLUMN_ADD 0 处带第 4 参 0
+    // ⇒ 除 id 外不存在不可空列，本抛点语料 0 处可达（构造用例钉）。
+    // 空约束先于唯一约束（探针 R3g：重复主键 + DBNull 不可空列并存时 .NET 报
+    // NoNullAllowedException 而非 ConstraintException）⇒ 本循环在前、主键闸在后。
+    for ((ci, col) in t.columns.withIndex()) {
+        if (!col.allowDBNull && row[ci] == null) {
+            throw IllegalStateException(
+                "复刻 .NET NoNullAllowedException（FunctionMethodCreator.cs:2318 Rows.Add）：列 ${col.name} 不可空而新行未赋值且无 DefaultValue，行未落表",
+            )
+        }
+    }
+    // 主键唯一约束（RESIDUE-BX2 R3）：:2001 `PrimaryKey = {id}`（:1999 `Unique = true`）
+    // 在 Rows.Add 提交时对撞抛 ConstraintException——dotnet 8 探针 R3a 实测
+    // "Column 'id' is constrained to be unique.  Value '1' is already present."
+    // （unique 后双空格，原样），异常后行不落表（探针 R3b）。:2749-2752 的
+    // `catch { return 0L; }` 只在 DataTableFromXmlMethod 内，**不**覆盖本路
+    // （DataTableRowSetMethod 无 try）⇒ 与分歧 C 同判：裸 CLR 异常 → 裸 JVM 映射。
+    // 无主键的表（探针 R3c：ReadXmlSchema 未声明 msdata:PrimaryKey ⇒ UniqueConstraint
+    // 不存在，重复 id 照加）不设闸；nextRowId 的严格递增只保证**本池自产 id**不撞，
+    // DT_FROMXML 载入的行不经它，对撞由本闸拦（构造用例钉）。
+    t.pkCol?.let { pkName ->
+        val pkIdx = t.colIndex(pkName)
+        if (pkIdx >= 0) {
+            val pkValue = row[pkIdx]
+            if (pkValue != null && t.rows.any { it.size > pkIdx && it[pkIdx] == pkValue }) {
+                val colName = t.columns[pkIdx].name
+                throw IllegalStateException(
+                    "复刻 .NET ConstraintException（FunctionMethodCreator.cs:2318 Rows.Add，主键 :2001）：" +
+                        "列 $colName 受主键唯一约束，值 $pkValue 已存在" +
+                        "（Column '$colName' is constrained to be unique.  Value '$pkValue' is already present.），行未落表",
+                )
+            }
         }
     }
     t.rows.add(row) // :2318
@@ -969,7 +1219,15 @@ private fun dtRowSet(c: BuiltinContext, e: List<Expr?>): Value {
         var i = 2
         while (i < e.size) {
             if (i + 1 >= e.size) throw CodeEE("函数 DT_ROW_SET 的「列名, 值」参数个数不成对")
-            setCell(c, t, row, e.strAt(c, i), "DT_ROW_SET", e[i + 1])
+            // 空位实参同 [dtRowAdd] 成对形态：原版 CheckArgumentTypeEx 解析期拒绝
+            //（本函数第一份 ArgTypeList 无 OmitStart ⇒ 缺省 -1，FunctionMethodCreator.cs:2168-2187；
+            //FunctionMethod.cs:198-205 ⇒ ArgCanNotBeNull），运行期同文案拒绝（RESIDUE-BX2 R4）。
+            // 若放行到 setCell 的 DBNull 分支，会绕过 .NET 在附加行写入点当场抛
+            // NoNullAllowedException 的框架行为（探针 R4a/R4b），旧实现正是静默写 null。
+            setCell(
+                c, t, row, e.strAt(c, i), "DT_ROW_SET",
+                e[i + 1] ?: throw CodeEE("DT_ROW_SET函数: 第${i + 2}个参数不能省略"),
+            )
             i += 2
             n++
         }
@@ -1047,13 +1305,23 @@ private fun dtCellGets(c: BuiltinContext, e: List<Expr?>): Value {
     val ci = t.colIndex(e.strAt(c, 2))
     if (ri < 0 || ci < 0) return Value.StrV("")
     val v = t.rows[ri][ci] ?: return Value.StrV("")
-    // byId=1 + 非字符串单元格：原版 GetStrValue 的 byId 分支是 `(string)obj` 强转
-    // （FMC.cs:2529），整数列装箱值强转抛 InvalidCastException 且链路无 try
-    // （FunctionMethodTerm.cs:20-23）⇒ 想定外中止；行号寻址走 Convert.ToString 不经此路。
-    // 语料 DT_CELL_GETS 全打字符串列（CHARALIST_DT / BODY_INFO 实测），复刻中止零行为风险
-    // （2026-10-26 fixcore 审查 fn-data-B1）。
-    if (v is Long && e.size == 4 && e.intAt(c, 3) != 0L) {
-        throw CodeEE("函数 DT_CELL_GETS 的单元格不是字符串")
+    // 分歧 G（已复刻，2026-11-05 主人指令推翻 fn-data-B1 的 CodeEE 折面）：原版 GetStrValue
+    // 的 byId 分支是 `(string)obj` 强转（FMC.cs:2529），装箱整数强转抛 InvalidCastException
+    // （dotnet 8 探针 C：`Unable to cast object of type 'System.Int64' to type 'System.String'.`）
+    // 且链路无 try（FunctionMethodTerm.cs:20-23 → Process.cs 非 EmueraException 分支）
+    // ⇒ 想定外中止；行号寻址走 obj.ToString()（:2538）不经此路。移植侧按分歧 C 的
+    // 裸 CLR→裸 JVM 映射（同 [dtColumnNames] 的 IndexOutOfBoundsException 先例）抛
+    // [ClassCastException]，不是 CodeEE。
+    // 语料可达性（T6 普查，4.980/4.981 各 12 处）：全部带类型闸或直打字符串列 ——
+    // TEMP_CHARA_LIST_BY_DT_TYPE定義.ERB 的 CASEELSE 分支 `DT_COLUMN_EXIST(...) == 5`
+    // 才走 GETS、数值列走 DT_CELL_GET（:394-399 同构段），CASE 14/15 是字符串组，
+    // bbas_dataset/GET_BODY_SETS 的目标列在 plugins/schema.xml 全部 xs:string，
+    // ModularCharacterUpdate.ERB:129/:135 是 3 参行号形态 ⇒ 强转中止语料 0 处可达，
+    // 用构造用例钉（MapDataAuditTest）。
+    if (v !is String && e.size == 4 && e.intAt(c, 3) != 0L) {
+        throw ClassCastException(
+            "复刻 .NET InvalidCastException（FunctionMethodCreator.cs:2529 (string)obj）：DT_CELL_GETS 按 id 取到非字符串单元格",
+        )
     }
     return Value.StrV(v.toString())
 }
@@ -1072,12 +1340,20 @@ private fun dtCellSet(c: BuiltinContext, e: List<Expr?>): Value {
     val ri = if (byId) t.findRow(rowKey) else if (rowKey in 0 until t.rows.size.toLong()) rowKey.toInt() else -1
     val ci = t.colIndex(colName)
     if (ri < 0 || ci < 0) return Value.IntV(-3L)
+    val col = t.columns[ci]
     val v = e.getOrNull(3)
     if (v == null) {
+        // :2596-2599 写 DBNull；不可空列在 .NET 的 DataRow 写入点当场抛
+        // NoNullAllowedException（dotnet 8 探针 D2），异常后原值不动（探针 D2b）。
+        // 列定位（:2594）先于该写入 ⇒ 与行/列未命中 -3 的判定先后同序。
+        if (!col.allowDBNull) {
+            throw IllegalStateException(
+                "复刻 .NET NoNullAllowedException（FunctionMethodCreator.cs:2598）：列 ${col.name} 不可空，不能写 DBNull；原值保持不变",
+            )
+        }
         t.rows[ri][ci] = null
         return Value.IntV(1L)
     }
-    val col = t.columns[ci]
     if (col.type == DtType.STRING) {
         if (v.operandType != OperandType.STR) return Value.IntV(-2L)
         t.rows[ri][ci] = v.getStrValue(c)
@@ -1132,6 +1408,10 @@ private fun dtSelect(c: BuiltinContext, e: List<Expr?>): Value {
     val sort = if (e.size > 2 && e[2] != null) e.strAt(c, 2) else null
     val ids = dtSelectRows(t, filter, sort).map { rowIdOrThrow(it, "DT_SELECT") }
     val noDest = e.size != 4
+    // 4 参形态的第 4 槽留空 / 写成非变量：原版 `(arguments[3] as VariableTerm).Identifier`
+    // 裸 NRE（spec: FunctionMethodCreator.cs:2656-2657）。这里原先静默回落 RESULT，结果是
+    // 「不写计数头、却从 RESULT:0 起裸写 id」两头不靠——折 CodeEE。
+    if (!noDest && e[3] !is VarRef) throw CodeEE("函数 DT_SELECT 的第 4 个参数必须是数组变量")
     val dest = destArray(e.getOrNull(3), "RESULT")
     val len = c.store.getLength(dest.name, -1)
     if (noDest) {
@@ -1351,7 +1631,8 @@ private fun dtToXml(c: BuiltinContext, e: List<Expr?>): Value {
 
 /**
  * DT_FROMXML(name, schema, data)（:2734-2761）：先 `ReadXmlSchema` 再 `ReadXml`，
- * 任一步抛异常 → **0**（:2749-2752，`catch` 全捕获，含表名不匹配）。
+ * 任一步抛异常 → **0**（:2749-2752，`catch` 全捕获，含表名不匹配与装载期约束违例
+ * —— [readRowsInto] 的非空/唯一约束探针 J13/J14、类型错探针 J11 都落这里）。
  * 成功后按名覆盖/新建表，返回 1。
  *
  * 解析层 2026-10-24 起走 core/xml/XmlParser（ARCH1 P3b 双轨合一；原私有 MiniXml 已删）。
@@ -1544,6 +1825,14 @@ private fun dtDataXml(t: DtTable): String {
  * plugins/schema.xml:3 写的是宿主库名 `db`，而表元素与数据行都叫 `bbas_dataset`），
  * **不参与** DataTable 级的表名匹配 —— 旧实现拿它卡表名，导致语料
  * `BBAS_DATASET.ERB:11` 的 `DT_FROMXML "bbas_dataset"` 恒返回 0。
+ * 2026-11-05 dotnet 8 探针（netcoreapp8.0 与游戏运行时同源）把这条口径从推演升级为实测：
+ * - J1/J6：`ReadXmlSchema` **不消费** `msdata:MainDataTable` —— 指向不存在的 "ghost" 也
+ *   静默无视，`TableName` 保持构造名、列照建；
+ * - J3/J4/J7：ERB 名匹配不到**表元素名**时抛 `ArgumentException`
+ *   "DataTable 'T' does not match to any DataTable in source."（与 MainDataTable 无关，
+ *   J3 的 MainDataTable="db" 与元素 "db" 一致也照抛）→ [dtFromXml] 的 catch → 0；
+ * - J2：装载成功后 `TableName` 不变，后续 `ReadXml` 按它匹配行元素（J8：行元素名不匹配
+ *   ⇒ 静默 0 行，不是错误）；J2b：随后 `WriteXmlSchema` 输出的 MainDataTable 是表自身名。
  *
  * 找不到同名表元素时抛错（DT_FROMXML 侧全捕获成 0，:2749-2752）。
  *
@@ -1590,9 +1879,14 @@ private fun readTableFromSchema(root: XmlElement, name: String): DtTable {
             DtColumn(
                 colName,
                 type,
-                // schema 里 `minOccurs="0"` 是 AllowDBNull 的唯一信号（见 dtSchemaXml）；
-                // id 列在 .NET 侧恒为 AllowDBNull=false，缺省按不可空处理。
-                allowDBNull = el.attribute("minOccurs") != null || colName != "id",
+                // AllowDBNull 的读入口径（DT-FRAME 波修正）：XSD 的 element 缺省 minOccurs=1
+                // （必需）⇒ .NET 把「属性缺席或值非 "0"」读成 AllowDBNull=false、`minOccurs="0"`
+                // 读成 true（探针 J13：无 minOccurs 的 req 列缺元素时 ReadXml 抛非空约束
+                // ConstraintException，即该列被判不可空）。写侧同构 —— dtSchemaXml 只对
+                // AllowDBNull=true 的列输出 minOccurs="0"（见 dtSchemaXml），id 列恒不可空
+                // （:1997-1998）恒缺席。旧实现 `|| colName != "id"` 把非 id 列的缺席误读成
+                // 可空，是框架性偏差。
+                allowDBNull = (el.attribute("minOccurs")?.attrValue ?: "1") == "0",
                 // `default` 在 .NET 侧存的是**按列类型转换后**的值（xs:int → Int32），
                 // 不是原文；不转换会让 newRow 把字符串塞进整数列，DT_SELECT 排序在
                 // 1058/1084 的 `as Long` 处抛 ClassCastException。
@@ -1628,17 +1922,36 @@ private fun readSchemaDefault(type: DtType, raw: String?, colName: String): Any?
     return clampTo(type, v)
 }
 
-/** data → 追加行。列按 schema 顺序映射；缺元素 = 该列初值（DefaultValue / DBNull）。 */
+/** ReadXml 装载期约束违例（探针 J13/J14 的 `ConstraintException` → [dtFromXml] 的 catch → 0）。 */
+private fun readConstraintError(detail: String): IllegalStateException =
+    IllegalStateException("复刻 .NET ConstraintException（DataTable.ReadXml 装载期约束）：$detail")
+
+/**
+ * data → 追加行。列按 schema 顺序映射。
+ *
+ * 畸形面的 .NET 官方表现（dotnet 8 探针，netcoreapp8.0 与游戏运行时同源；编号是探针输出行标）：
+ * - J9：**不校验根元素名** —— 根为 `<Foo>` 的 `<Foo><bb>…</bb></Foo>` 照样按行元素名载入；
+ *   J12：空根 0 行无错。旧实现卡「根必须是 DocumentElement」是移植侧自定，删。
+ * - J10：行里多出的未知元素忽略；J11：整数列值非整数抛 `FormatException`（移植侧 CodeEE，
+ *   同落 [dtFromXml] 的 catch → 0）；J16/J17：整数列空元素/自闭合同样 FormatException → 0；
+ *   J18：字符串列空元素读 ""（非 DBNull）—— 三者与移植侧现状同读数。
+ * - J13：缺**不可空**列元素且无 DefaultValue → `ConstraintException`（装载期非空约束）→ 0；
+ *   D3：有 DefaultValue 则填默认值放行。缺元素初值 = [DtTable.emptyCell]（DefaultValue 或
+ *   DBNull，与 NewRow 同一条派生规则）。
+ * - J14：`xs:unique`/`msdata:PrimaryKey` 的唯一性在装载期校验，重复主键 → `ConstraintException` → 0。
+ * 缺元素 = .NET WriteXml 对 DBNull 格的写法（整元素省略），可空列常态。
+ */
 private fun readRowsInto(t: DtTable, root: XmlElement) {
-    if (root.name != "DocumentElement") throw CodeEE("数据根元素不是 DocumentElement")
-    for (rowNode in root.childrenByName(t.name)) {
+    for (rowNode in root.descendantsByName(t.name)) {
         val row = ArrayList<Any?>(t.columns.size)
         for (col in t.columns) {
             val cell = rowNode.childByName(col.name)
             if (cell == null) {
-                // .NET ReadXml 缺元素时保留 NewRow 的初值（有 DefaultValue 用默认值，
-                // 否则 DBNull / 不可空列的类型零值），不是无条件 DBNull。
-                row.add(t.emptyCell(col))
+                val initial = t.emptyCell(col)
+                if (initial == null && !col.allowDBNull) {
+                    throw readConstraintError("列 ${col.name} 不可空而数据行缺元素且无 DefaultValue")
+                }
+                row.add(initial)
             } else {
                 // innerText：单元格里只有文本/CDATA 时等于原 MiniXml 的 text；纯空白文本节点
                 // 在 preserveWhitespace=true 模式下保留（Parse 侧两档口径见 XmlParser.parse）。
@@ -1652,6 +1965,14 @@ private fun readRowsInto(t: DtTable, root: XmlElement) {
             }
         }
         t.rows.add(row)
+    }
+    val pk = t.pkCol ?: return
+    val pki = t.colIndex(pk)
+    if (pki < 0) return
+    val seen = HashSet<Long>()
+    for (row in t.rows) {
+        val id = row.getOrNull(pki) as? Long ?: continue
+        if (!seen.add(id)) throw readConstraintError("主键列 $pk 出现重复值 $id")
     }
 }
 

@@ -25,7 +25,7 @@ import kotlin.test.assertTrue
  * | 3 | `EmueraConsole.cs:2328-2331` 命中 `num3 = num2 - Height / LineHeight` | [ConsoleAdapter.HIT_EXTRA_ABOVE]=0 | 与第 2 条**同一个** `num3`（见下），本仓也落在同一行 |
  * | 4 | `EmueraConsole.cs:1808-1811`、`:2329-2332` `if (num3 < 0) num3 = 0` | `topRingIndex` 的 `coerce` | 一致 |
  * | 5 | `EmueraConsole.cs:1852` `for (i = num3; i <= num2 && i < Count; i++)` | `visibleRange` 的 `first..last` + `rowsAt` | 一致（闭区间，两端各夹一次） |
- * | 6 | `EmueraConsole.cs:2543-2567` `verticalScrollBarUpdate`：`num = count - Maximum`，`num > 0` 时 `Value += num`，`num < 0` 时抬到 `count` | [Viewport.sync] 的 `offsetFromEnd` 守恒 / **只夹取** | 增长一致；缩短**观感差异**（2026-10-29：本移植按折行后的显示行数计数，整屏重印会让它摆几行，抬到 `count` = 每个重印周期把上翻的读者扔回底部；取舍与出处见 Viewport 类文档「缩短不再拽回」，与第 7 条同一先例） |
+ * | 6 | `EmueraConsole.cs:2543-2567` `verticalScrollBarUpdate`：`num = count - Maximum`，`num > 0` 时 `Value += num`，`num < 0` 时抬到 `count` | [Viewport.sync] 的 `offsetFromEnd` 守恒 / **只夹取**（Int 版）；`LogBuffer` 版在**逻辑行**净减超阈值时抬到 `count` | 增长一致；缩短按口径分流（2026-11-04）：折行显示行数天然摆动、只夹取（2026-10-29 取舍）；逻辑行与原版 `displayLineList.Count` 同口径，净收缩弹回归（补丁页滚动错位修复），同页重印净值 0 不拽回 —— 依据见 Viewport 类文档 2026-11-04 追记 |
  * | 7 | `MainWindow.cs:1276-1287` 滚轮 `Value += -sign(delta) * SmallChange * ScrollHeight`，夹在 `[Minimum, Maximum]` | [Viewport.onWheel] / `shift` 夹到 `[0, max(0, retainedLines - heightLines)]` | **观感差异**（M11-B：上界按平台最优收紧，不复刻 `Value == 0` 的整屏空，取舍见 Viewport 类文档；步长与下界仍一致，`ScrollHeight` 默认 1，`ConfigData.cs:74`） |
  * | 8 | `MainWindow.cs:1379-1398` PageUp/PageDown 固定 10 行 | [Viewport.PAGE_STEP] | 一致 |
  * | 9 | `MainWindow.cs:799-805`、`:1402-1406` 点击/按键回贴底 `Value = Maximum` | [Viewport.snapToBottom] | 一致 |

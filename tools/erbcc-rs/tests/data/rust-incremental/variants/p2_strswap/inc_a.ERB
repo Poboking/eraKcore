@@ -1,0 +1,6 @@
+; 探针语料 A（装载序前档：改它会牵动后档 B/C 的产物区间）
+@IFA_ONE(ARG, ARG:1, ARGS)
+	PRINTFORML A1-STR {ARG} {ARG:1} %ARGS%
+@IFA_TWO
+	PRINTFORML A2-STR
+	CALL IFA_ONE, 1, 2, "A-CALL-LIT-2"

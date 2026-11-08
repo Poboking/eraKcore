@@ -193,4 +193,81 @@ class CharacterTableTest {
         }
         assertTrue(s.characters.allocatedCapacity >= 9)
     }
+
+    // ---------------- 复位归还（fix-resetrelease） ----------------
+    // 原版对拍：VariableEvaluator.cs:1336-1346 / :1275-1285 逐角色 Dispose
+    // （CharacterData.cs:756-770 置 null 归还）再 CharacterList.Clear；
+    // 本层列式存储的等价形态 = clear 把列数组缩回起步容量。
+
+    @Test
+    fun `clear 把列容量归还到起步档`() {
+        val s = VariableStore(initialCharaCapacity = 1)
+        repeat(9) { s.addPseudoCharacter() }
+        assertTrue(s.characters.allocatedCapacity >= 9, "2 倍翻倍后容量至少 16")
+        s.deleteAllCharacters()
+        assertEquals(0, s.characters.count, "角色数归零（spec: CharacterList.Clear）")
+        assertEquals(1, s.characters.allocatedCapacity, "列容量回起步档（对照 Dispose 置 null 归还）")
+    }
+
+    @Test
+    fun `起步容量由构造参数决定且 clear 回到该档`() {
+        val s = VariableStore(initialCharaCapacity = 8)
+        assertEquals(8, s.characters.allocatedCapacity)
+        repeat(20) { s.addPseudoCharacter() }
+        assertTrue(s.characters.allocatedCapacity >= 20)
+        s.deleteAllCharacters()
+        assertEquals(8, s.characters.allocatedCapacity, "回到**起步**档而不是 1：起步档是构造提示")
+        // clear 幂等：再清一次不报错、容量不动
+        s.deleteAllCharacters()
+        assertEquals(8, s.characters.allocatedCapacity)
+        assertEquals(0, s.characters.count)
+    }
+
+    @Test
+    fun `clear 后 ADDCHARA 链正常重建并重新驻留模板串`() {
+        val s = store(template(10, "フラン"))
+        s.addCharacter(10)
+        s.addCharacter(10)
+        s.deleteAllCharacters()
+        // 复位后重建：addBare → ensureCapacity 从起步档再 2 倍翻倍；模板串在
+        // applyTemplate 现场 pool.intern（VariableStore.kt:1388-1391），下标自然为新值。
+        assertEquals(0, s.addCharacter(10))
+        assertEquals(1L, s.readInt("CHARANUM", idx()))
+        assertEquals("フラン", s.readStr("NAME", idx(0)))
+        assertEquals("cstr-フラン", s.readStr("CSTR", idx(0, 0)))
+        assertEquals(50L, s.readInt("BASE", idx(0, 5)))
+        // 复位后读旧角色位 1 越界报错（count=0 的口径不因归还容量而变）
+        assertFailsWith<CodeEE> { s.readInt("NO", idx(1)) }
+    }
+
+    @Test
+    fun `clear 保留用户 CHARADATA 追加列且随后扩容覆盖该列`() {
+        val s = VariableStore()
+        s.declareUserVar(DimParser.parse("#DIM", "CHARADATA CV, 5", false))
+        repeat(9) { s.addPseudoCharacter() }
+        s.writeInt("CV", idx(3L, 2), 77)
+        s.deleteAllCharacters()
+        // 列定义保留（col 索引不失效），数据回到全 0；随后建角色该列随表一起翻倍扩容。
+        repeat(9) { s.addPseudoCharacter() }
+        assertEquals(0L, s.readInt("CV", idx(3L, 2)), "复位后旧值不残留")
+        s.writeInt("CV", idx(8L, 4), 5)
+        assertEquals(5L, s.readInt("CV", idx(8L, 4)))
+        assertFailsWith<CodeEE> { s.readInt("CV", idx(9L, 0)) }
+    }
+
+    @Test
+    fun `resetData 归还角色表容量但 GLOBALS 串槽跨复位存活`() {
+        val s = VariableStore()
+        s.writeStr("GLOBALS", idx(5), "跨复位串")
+        s.addPseudoCharacter()
+        repeat(9) { s.addPseudoCharacter() }
+        s.resetData()
+        assertEquals(0, s.characters.count)
+        assertEquals(1, s.characters.allocatedCapacity, "resetData 的角色表半边随 clear 归还")
+        // spec: VariableData.cs:3417-3418 —— SetDefaultValue 跳过 GLOBALS；
+        // 该槽存的**旧池下标**跨复位存活 ⇒ 这正是 StringTable.clear 不能进复位链的原因
+        // （清池会把这里打成悬空下标）。本用例同时钉住两侧：归还的归还、保留的保留。
+        assertEquals("跨复位串", s.readStr("GLOBALS", idx(5)))
+        assertEquals("", s.readStr("RESULTS", idx(0)), "系统串槽复位后读到空串")
+    }
 }

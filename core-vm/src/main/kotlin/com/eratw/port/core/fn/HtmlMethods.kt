@@ -6,6 +6,8 @@ import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.Value
 import com.eratw.port.core.host.Alignment
 import com.eratw.port.core.host.CellWidth
+import com.eratw.port.core.host.DisplayDivBlock
+import com.eratw.port.core.host.ImageSizePx
 import com.eratw.port.core.host.LineBufferConsoleSink
 import java.util.Locale
 
@@ -50,21 +52,41 @@ import java.util.Locale
  * 1. 字宽模型。原版走 GDI+ `MeasureCharacterRanges` / `TextRenderer.MeasureText`
  *    （StringMeasure.cs:42-72），结果依赖宿主字体。core 层拿不到字体度量，故内置
  *    「半角 = fontSize/2、全角 = fontSize」的等宽近似；该模型在默认 FontSize=18
- *    （ConfigData.cs:66）下对 ASCII 给出 9 px，与基准 36 完全一致。宿主可用
- *    [BuiltinHost.measureText] 注入真实度量。**全角/半角的名单不在本文件**，
- *    唯一取自 [CellWidth.isFullWidth]（WIDTH-SINGLE 收口，口径 = CP932 字节数；
- *    与像素口径为什么能混用、以及收口后变大的那一侧，逐条写在 [approxTextWidth]）。
+ *    （ConfigData.cs:66）下对 ASCII 给出 9 px，与基准 36 完全一致。
+ *    **宿主接线后近似仅为纯 JVM 回落**（FONT-MEASURE A3 收口，2026-11-06）：生产宿主
+ *    `ConsoleBuiltinHost` 经 `GameSession` 接 `AndroidTextMeasure.measurePixels`
+ *    （android.graphics.Paint，GameHost.kt 的 `textMeasureRun` 闭包），量宽走
+ *    [measureText] 的三段回落链：`measureTextRun`（带 fontName/styleMask/charSpace，
+ *    粗斜体与 `<font face>` 各得独立读数）→ 旧 [BuiltinHost.measureText] →
+ *    [approxTextWidth]。headless / 装置（无宿主度量）读数与收口前逐位一致。
+ *    **全角/半角的名单不在本文件**，唯一取自 [CellWidth.isFullWidth]
+ *    （WIDTH-SINGLE 收口，口径 = CP932 字节数；与像素口径为什么能混用、以及收口后
+ *    变大的那一侧，逐条写在 [approxTextWidth]）。
  * 2. ~~`img` / `shape` 标签的宽度此处记 0~~ —— **已收口（M11-A L6 / FN-01）**：按
- *    `ConsoleImagePart.cs:60-87` / `ConsoleShapePart.cs:46-79` 折成像素宽。仅剩「无 `width`
- *    属性的 `<img>` 要按图元宽高比」（core 层无 sprite 度量表）回落成量 AltText。
+ *    `ConsoleImagePart.cs:60-87` / `ConsoleShapePart.cs:46-79` 折成像素宽。「无 `width`
+ *    属性的 `<img>` 按图元宽高比」**也已收口（IMG-A4 I1，2026-11-06）**：宿主尺寸源
+ *    [BuiltinHost.imageSizeOf]（生产经 `AuxMacroHost` 现读 aux 的 SpritePool，见其 KDoc）
+ *    查到 `DestBaseSize` 就按 `宽 * 折算高 / 高` 折算（ConsoleImagePart.cs:67-71，
+ *    消费点在 `HtmlStrict.kt` 的 `imgGroupNode` —— img/shape 计宽段的物理所在）；
+ *    查不到（宿主缺位 / 图元缺失）仍回落量 AltText（:61-64、:110-114）—— 纯 JVM 读数零变化。
  * 3. ~~自动折行未模拟~~ —— **已收口（M11-A L6 / FN-03）**：按 `Config.DrawableWidth`
  *    折行（`PrintStringBuffer.cs:196-266`），可绘制宽由 [drawableWidthPx] 从条目表现取
- *    （`Config.cs:461-466`）。`<div>` 子层的 `SubDivisionWidth`（FN-02）仍不折。
- * 4. `div` 的版面语义（xpos/ypos/depth/border 等，HtmlManager.cs:606-648）未模拟：
- *    输出侧把 `<div>` 的内容收成独立的 [HtmlRunKind.DIV] 段（子行在
- *    [HtmlPrintRun.divRows]，见 [htmlPrintDocument]），量宽侧仍按普通文本累计
- *    （既有行为，`HtmlStrictTest` 的 div 用例钉住）。畸形输入的抛错口径由
- *    [HtmlStrictParser] 对齐原版。
+ *    （`Config.cs:461-466`）。`<div>` 子层的 `SubDivisionWidth`（FN-02）**已派生**
+ *    （CONTRACT-HTMLDIV-B1 D5：`DivSpec.geometry`，HM :618-635 口径 —— `ToPixel(width)`
+ *    取原值不取 abs、减 margin/border/padding 左右各一份）；量宽面的读数**不因它变化**：
+ *    `HtmlLength` 只累加 `array[0].Buttons[].Width`（HM :176-181），div 节点 0 宽
+ *    （ConsoleDivPart.cs:217-219）、子行宽留在递归层（HM :636-642），SubDivisionWidth
+ *    只作用于**子行**的折行与对齐（HM :698/:702-704），对父行首行宽不可观测 ——
+ *    既有读数由 `HtmlDivWidthTest` 钉住。
+ * 4. ~~`div` 的版面语义未模拟~~ —— **已复刻（CONTRACT-HTMLDIV-B1 D1/D2/D4，2026-11-06）**：
+ *    `<div>` 属性全量解析（xpos/ypos/width/height/depth/color/bcolor/size/rect/display/
+ *    margin/padding/border/radius）落 [com.eratw.port.core.host.DisplayDivBlock]（零宽
+ *    内嵌覆盖块：几何 + depth + IsRelative/IsEscaped + 子行 + altHeadTag）；div `color`
+ *    染**块矩形**（原版 `DrawBorder` 填充，ConsoleDivPart.cs:186），不再染整行；
+ *    GETDISPLAYLINE 重现块的头尾标签（D6，`ConsoleDivPart.ToString`，ConsoleDivPart.cs:221-233），
+ *    HTML_GETPRINTEDSTR 剔除块（`DisplayLine2Html` 对块无分支，HtmlManager.cs:446-464）。
+ *    [htmlPrintDocument] 的 [HtmlRunKind.DIV] 段（量宽/文档面）行为不变，由
+ *    `HtmlStrictTest` / `HtmlDivWidthTest` 钉住。
  */
 internal fun registerHtmlMethods(r: BuiltinRegistry) {
     val I = OperandType.INT
@@ -160,6 +182,9 @@ internal fun registerHtmlMethods(r: BuiltinRegistry) {
     // ---- GETDISPLAYLINE(lineNo) ---- :8415-8440
     // 直接按**显示行**下标取 DisplayLineList[lineNo]（EmueraConsole.cs:238），
     // 越界（含负数）返回 ""（:8431-8434）；文本 = ConsoleDisplayLine.ToString()（:8437）。
+    // div 覆盖块按 ConsoleDivPart.ToString()（ConsoleDivPart.cs:221-233）重建：altHeadTag
+    // + 子行（每条后跟 "\r\n"）+ "</div>"（CONTRACT-HTMLDIV-B1 D6；黄金锚
+    // pc-golden-root.txt:71 的标题屏五子棋块）。
     r.register(BuiltinMethod("GETDISPLAYLINE", S, 1, 1) { c, a ->
         val lineNo = argInt(a, 0, "GETDISPLAYLINE")
         val lines = c.host.consoleLines
@@ -201,14 +226,20 @@ internal fun registerHtmlMethods(r: BuiltinRegistry) {
  *   `<font bcolor>`（HM :887-891）与 `<shape bcolor>`（ConsoleShapePart.cs:39-44）都比它。
  *   宽度与可见文本不受这两个值影响。
  *
+ * 两个缺省值 = 出厂配置：字号 [BuiltinHost.DEFAULT_FONT_SIZE]（18）、
+ * 焦点色 [LineBufferConsoleSink.DEFAULT_FOCUS_COLOR]（0xFFFF00）。**只服务未接线的调用点**
+ * （headless / 纯 JVM 装置）；生产回读链（宿主 → [consolePrintedLine] →
+ * [htmlSegmentReadback]）必须把会话生效值显式传进来，否则玩家改过 `Config.FontSize` / `HIGHLIGHT COLOR`
+ * 之后回读串与屏上分叉（[consolePrintedLine] 的「配置注入面」节）。
+ *
  * TODO(verify)：`<div>` 段在父行里只保留子行、不重现 `<div ...>` 头尾标签
  * （`ConsoleDivPart.ToString()`，ConsoleDivPart.cs:221-231 会重现）；等宿主真要对
  * `HTML_GETPRINTEDSTR` 逐字节对拍浮动块时再补 MixedNum 归一化文案。
  */
 fun htmlPrintDocument(
     html: String,
-    fontSize: Long = 18L,
-    focusColor: Int = 0xFFFF00,
+    fontSize: Long = BuiltinHost.DEFAULT_FONT_SIZE,
+    focusColor: Int = LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
 ): HtmlPrintDoc = HtmlStrictParser(html, { 0L }, { htmlUnescape(it) }, fontSize, focusColor).document()
 
 /**
@@ -223,6 +254,7 @@ fun htmlPrintDocument(
  * - [html]：该行的**行体 HTML**（按钮 `<button value='...'>` 与样式标签、文本已转义），
  *   但**不含** `<p align=...>` / `<nobr>` 外壳 —— 外壳由 [displayLine2Html] 按
  *   DisplayLine2Html :387-400 与 :473-477 生成。HTML_PRINT 的段保留原文（标签即样式），
+ *   只剥掉其中行级的 p/nobr 外壳并把 `<p align>` 折回 [align]（[stripRowShell]），
  *   其余段按 DisplayLine2Html 的逐节点规则重建，见 [consolePrintedLine]。
  * - [htmlParts]：HTML 段的分部（节点）快照，含每个分部的 `StringStyle.ButtonColor`
  *   （= HTML `<font bcolor>` 写进的分部背景，HtmlManager.cs:887-891）；空表 = 该行没有
@@ -238,6 +270,15 @@ data class ConsolePrintedLine(
     val align: Alignment = Alignment.LEFT,
     val isLogicalLine: Boolean = true,
     val htmlParts: List<HtmlPrintRun> = emptyList(),
+    /**
+     * 行体 HTML 是否由 [consolePrintedLine] 按 `DisplayLine2Html` 的逐节点规则**算出**
+     * （true = [html] 为空就是真空行）。[displayLine2Html] 只在本标志为假时才回落
+     * `Escape(text)` —— div 覆盖块的行体**就该是空的**（原版 `DisplayLine2Html`
+     * 对 `ConsoleDivPart` 无分支：HtmlManager.cs:446-464 只处理 StyledString /
+     * ImagePart / ShapePart，块整段跳过、子行也不出现），回落会把 GETDISPLAYLINE 的
+     * 块重建文本再逃逸一遍吐进 HTML_GETPRINTEDSTR，与原版分叉。
+     */
+    val htmlBuilt: Boolean = false,
 )
 
 // ---------------------------------------------------------------------------
@@ -255,13 +296,39 @@ data class ConsolePrintedLine(
  *
  * @param lines 显示行快照（[LineBufferConsoleSink.lines] 的返回值，元素不可变）。
  * @param defaultFontName 宿主环境的 `Config.FontName`，用于判断是否写 `<font face>`。
+ * @param graphicFontPx 图形段的**脚本字号**（`<img>` / `<shape>` 折算像素宽的基尺）；
+ *   必须与控制台排版用的那一份同源 —— [LineBufferConsoleSink.scriptFontSize]，
+ *   生产装配点 = 生效 `Config.FontSize`（[com.eratw.port.core.proc.GameSession] 同一个值
+ *   同时喂 sink 与 [BuiltinHost.fontSize]）。0（缺省）= 不接图形，读数与收口前逐位一致。
+ * @param imageSizeOf `<img>` 缺 `width` 时按基图纵横比推宽的尺寸源（[ImageSizePx]）；
+ *   null（缺省）= 宿主未接线，缺 width 的图元计 0 格（见 [consolePrintedLine] 的 KDoc）。
+ * @param fontSize 回读链的**配置字号**（`Config.FontSize`，`ConfigData.cs:66` 缺省 18）：
+ *   [htmlSegmentReadback] 重建 `<img>` 的 AltText 时，非 px 的 height/width/ypos 按
+ *   `num * fontSize / 100` 归一。缺省 = 出厂 18（未接线调用点与改动前读数逐值相同）。
+ * @param focusColor 回读链的**配置焦点色**（`Config.FocusColor`，`ConfigData.cs:70` 缺省
+ *   0xFFFF00）：`<font bcolor>` / `<shape bcolor>` 的省略判据（值比较）。缺省 = 出厂
+ *   0xFFFF00（同上）。
+ *
+ * 两个配置项与 [graphicFontPx] 的关系见 [consolePrintedLine] 的「配置注入面」节：
+ * [graphicFontPx] 管**列坐标**（0 = 不接图形），这两个管**回读文案**（永远有值）。
  */
 internal fun consolePrintedLines(
     lines: List<LineBufferConsoleSink.DisplayLine>,
     defaultFontName: String,
+    graphicFontPx: Long = 0L,
+    imageSizeOf: ((String) -> ImageSizePx?)? = null,
+    fontSize: Long = BuiltinHost.DEFAULT_FONT_SIZE,
+    focusColor: Int = LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
 ): List<ConsolePrintedLine> = object : AbstractList<ConsolePrintedLine>() {
     override val size: Int get() = lines.size
-    override fun get(index: Int): ConsolePrintedLine = consolePrintedLine(lines[index], defaultFontName)
+    override fun get(index: Int): ConsolePrintedLine = consolePrintedLine(
+        lines[index],
+        defaultFontName,
+        graphicFontPx,
+        imageSizeOf,
+        fontSize,
+        focusColor,
+    )
 }
 
 /**
@@ -281,9 +348,10 @@ internal fun consolePrintedLines(
  *   `<s>/<u>/<i>/<b>`（:452-454、getStringStyleStartingTag :864-915、
  *   getClosingStyleStartingTag :917-940），文本过 `Escape`（:719-742）。
  *   `<p align>`/`<nobr>` 外壳不在这里加（[displayLine2Html] 按 needPandN 生成）。
- *   HTML 段直接保留原文：原版这些节点内部的样式/按钮标签在解析后由 DisplayLine2Html
- *   逐节点重建（:446-464），本仓没有解析 HTML 段，保留原文是唯一不丢其内部标签的表示
- *   （外层 `<font>` 也**不**包它：原版 HTML 文本的基准色是 `Config.ForeColor`，不是
+ *   HTML 段保留原文（其内部样式/按钮标签在原版由 DisplayLine2Html 逐节点重建，:446-464），
+ *   只按 [stripRowShell] 剥掉行级的 p/nobr 外壳 —— 原版行体里永远没有这两枚标签，
+ *   不剥则回读串带两层外壳、再喂 `HTML_PRINT` 必抛「<p>标签重复使用」（判式见
+ *   HtmlManager.cs:1113-1116；外层 `<font>` 也**不**包 HTML 段：原版 HTML 文本的基准色是
  *   当前 SETCOLOR 的值，见 HtmlAnalzeState.GetSS，HtmlManager.cs:128-150）。
  * - [ConsolePrintedLine.align] / [ConsolePrintedLine.isLogicalLine] 直接取显示行快照
  *   （原版 `ConsoleDisplayLine.Align`/`IsLogicalLine`，ConsoleDisplayLine.cs:10-32）。
@@ -316,34 +384,88 @@ internal fun consolePrintedLines(
  * HTML_GETPRINTEDSTR 的黄金夹具没有图元行，没有对拍读数；语料静态 grep 未见 HTML_PRINT
  * 里的裸 `&`，动态拼接的串无法在装载期穷举。
  *
- * TODO(verify)：`htmlSegmentReadback` 用 [htmlPrintDocument] 的缺省 `fontSize`/`focusColor`
- * （18 / 0xFFFF00，即 ConfigData.cs:66/:70 的出厂值）。宿主把 `Config` 改过之后，
- * `<img height='50'>` 的重建文案与 `<font bcolor>` 的省略判据应随现值变，而
- * [consolePrintedLine] 目前拿不到这两个值 ⇒ 需组长从宿主（`ConsoleBuiltinHost`）把
- * `EffectiveConfig` 的字号与 FocusColor 传进 [consolePrintedLines]。
+ * 配置注入面（`Config.FontSize` / `Config.FocusColor` 的回读侧）：
+ * - 这两个值**只**影响 [htmlSegmentReadback] 里 `<img>` 重建文案的像素折算
+ *   （`num * FontSize / 100`，ConsoleImagePart.cs:45-59 + Utils.cs:364-371）与
+ *   `<font bcolor>` / `<shape bcolor>` 的省略判据（`!= Config.FocusColor` 才写，
+ *   HtmlManager.cs:887-891、ConsoleShapePart.cs:39-44）。**不**影响可见文本、行体原文、
+ *   宽度与列坐标。
+ * - [fontSize] / [focusColor] = 会话生效配置值，由生产装配点
+ *   ([com.eratw.port.core.proc.ConsoleBuiltinHost] 的 `printedLinesOf`）从 sink 自持的
+ *   `scriptFontSize`（生效 `Config.FontSize`）与 `focusColor`（生效 `Config.FocusColor`）
+ *   注入；缺省 = 出厂 18 / 0xFFFF00，未接线的调用点读数与注入前**逐字节相同**。
+ * - 与 [graphicFontPx] 的分工：那个是**列坐标**的图形尺（0 合法 = 图形不计格），
+ *   这两个是**回读文案**的配置值（永远有值，哪怕是出厂值）。别把两者合成一个参数：
+ *   headless 装置要「图形不计格但仍按 FontSize=18 归一 AltText」，正是改动前的形态。
+ * - focusColor 的来源下溯同 `consoleStyleOf`（`BuiltinHost` 没有该读数、`ConsoleSink`
+ *   接口也没有）：`(console as? LineBufferConsoleSink)?.focusColor`，落空（Noop / 诊断
+ *   假 sink）回落出厂常量。TODO(verify)：自定义 `ConsoleSink` 实现不携带焦点色时按出厂值
+ *   回读，与屏上真值可能分叉；卡点＝接口文件不在本路文件面，且生产装配恒为
+ *   `LineBufferConsoleSink`（`GameSession` 喂 `effective.color(ConfigKey.FocusColor)`）。
  *
  * TODO(verify)：`<div>` 段（[HtmlRunKind.DIV]）在父行文本里只拼子行文本，不重现
  * `<div ...>` 头尾标签（`ConsoleDivPart.ToString()`，ConsoleDivPart.cs:221-231 会重现）；
  * 本路不触达（`div` 不在 [HTML_NODE_TRIGGER] 内，文本仍按 Html2PlainText）。
  *
- * TODO(verify)：HTML 段的行体按**原文**输出，没有按 Html2DisplayLine 的解析结果规范化
- * （原版会把 `<nobr>`/`<p>` 折成行级标志、注释与布局标签走各自的节点；见
- * HtmlManager.cs:517-710）。文本比较（HTML_TOPLAINTEXT）与按钮值不受影响；
- * 依赖规范化形态的调用点需要 PC 侧对拍后才能定案（卡点：golden 只覆盖纯文本行）。
+ * TODO(verify)：HTML 段的行体按**原文**输出，只按 [stripRowShell] 剥掉行级的 p/nobr 外壳
+ * （原版会把这两枚折成行级标志并据此重建外壳，HtmlManager.cs:700-710、:387-402，剥壳后
+ * 「回读 → 再打印」的往返不再自产脏串，判性见 `HtmlPrintedStrRoundTripTest`）；注释与其余
+ * 布局标签仍**不**按 Html2DisplayLine 的解析结果规范化（见 HtmlManager.cs:517-710）。
+ * 文本比较（HTML_TOPLAINTEXT）与按钮值不受影响；依赖全量规范化形态的调用点需要 PC 侧
+ * 对拍后才能定案（卡点：golden 只覆盖纯文本行）。
+ *
+ * 段列坐标（[graphicFontPx] / [imageSizeOf]）：`starts`/`end` 是**格**坐标系，必须与
+ * [LineBufferConsoleSink] 排版时的 `Button.startCol` 同一把尺（sink 的 `segmentWidth`：
+ * HTML 段 = `visibleHtmlCells(seg.text, scriptFontSize, imageSizeOf)`，其余 = `CellWidth.of`）。
+ * 收口前这里对 HTML 段量的是「剥标签后的可见文本」（`visible[i]`），`<img>` / `<shape>`
+ * 因此记 0 格 ⇒ 段列偏小，紧随其后的按钮（`line.buttons` 的列号由 sink 带图形宽算出）
+ * 落不进本段或落错段，HTML_GETPRINTEDSTR / GETDISPLAYLINE 回读的 `<button>` 包裹位置
+ * 就与屏上不一致（GFX 段最典型：`<img width='40px'>` 后接 PRINTBUTTON）。
+ * 现在 HTML 段直接走 [CellWidth.visibleHtmlCells]（图形感知、与 sink / 渲染侧同尺），
+ * 非 HTML 段仍是 [CellWidth.of]。
+ *
+ * [graphicFontPx] = 0（缺省，纯 JVM 装置 / 未接线的构造点）时 [CellWidth.visibleHtmlCells]
+ * 只算文本，读数与本收口前**逐值一致**（标签照旧 0 宽）。生产装配点
+ * （[com.eratw.port.core.proc.ConsoleBuiltinHost]）从 sink 现取 `scriptFontSize` 与
+ * `imageSizeOf` 传进来 —— 必须取 sink 那一份而不是 `BuiltinHost.fontSize`：
+ * sink 的列坐标是构造期按 `scriptFontSize` frozen 的，两边字号分叉会重新错位。
+ *
+ * TODO(verify)：`<img>` **缺 `width`** 的占宽依赖 [imageSizeOf]；宿主未接（null）时
+ * 仍计 0 格（与收口前同读数，原版按基图纵横比推宽，ConsoleImagePart.cs:66-70）。
+ * 生产 sink 已接（`GameSession` 现读 aux 的 SpritePool），headless 装置与
+ * `consolePrintedLines` 的缺省调用点没有尺寸源 ⇒ 这类行在纯 JVM 下的回读列坐标照旧偏小，
+ * 单测只能靠注入尺寸源钉纵横比支（见 `HtmlPrintedWidthGraphicsTest`）。
  */
 internal fun consolePrintedLine(
     line: LineBufferConsoleSink.DisplayLine,
     defaultFontName: String,
+    graphicFontPx: Long = 0L,
+    imageSizeOf: ((String) -> ImageSizePx?)? = null,
+    fontSize: Long = BuiltinHost.DEFAULT_FONT_SIZE,
+    focusColor: Int = LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
 ): ConsolePrintedLine {
     val segments = line.segments
     // 两套口径分开算，别混用（混用会把按钮列坐标算坏）：
     // - visible：玩家读到的**字符**，HTML 段去标签 + 还原实体（Html2PlainText :714-717）；
     //   sink 的按钮区间与折行也按这个口径计宽（visibleHtmlWidth），列坐标必须同源。
-    // - 回读文本：ConsoleDisplayLine.ToString()，HTML 段里的 img/shape 节点给 AltText。
+    //   div 区间的子行文本**留在** visible 里：块不占行宽、子行文本的列坐标只用于
+    //   选项快照排序（过渡期内联渲染也按它计宽），与 sink 的 visibleHtmlWidth 同源。
+    // - 回读文本：ConsoleDisplayLine.ToString()，HTML 段里的 img/shape 节点给 AltText；
+    //   div 区间按 [DisplayDivBlock.sourceRange] **整段替换**成块的重建文案
+    //   （[divBlockReadback]，ConsoleDivPart.ToString，ConsoleDivPart.cs:221-233 ——
+    //   CONTRACT-HTMLDIV-B1 D6，黄金锚 pc-golden-root.txt:71）。
     val visible = ArrayList<String>(segments.size)
     val readback = ArrayList<String>(segments.size)
     val htmlParts = ArrayList<HtmlPrintRun>()
-    for (seg in segments) {
+    // 每段的 div 块（按区间起点排序；GETDISPLAYLINE 拼接与 HTML_GETPRINTEDSTR 剔除共用）。
+    val blocksBySegment = Array(segments.size) { ArrayList<DisplayDivBlock>() }
+    for (b in line.divBlocks) {
+        if (b.sourceSegment in blocksBySegment.indices && !b.sourceRange.isEmpty()) {
+            blocksBySegment[b.sourceSegment].add(b)
+        }
+    }
+    for (i in blocksBySegment.indices) blocksBySegment[i].sortBy { it.sourceRange.first }
+    for ((i, seg) in segments.withIndex()) {
         if (seg.kind != LineBufferConsoleSink.Kind.HTML) {
             visible.add(seg.text)
             readback.add(seg.text)
@@ -351,10 +473,20 @@ internal fun consolePrintedLine(
         }
         val plain = htmlToPlainText(seg.text)
         visible.add(plain)
-        readback.add(htmlSegmentReadback(seg.text, plain, htmlParts))
+        readback.add(divSplicedReadback(seg.text, blocksBySegment[i], htmlParts, fontSize, focusColor))
     }
-    // 列坐标必须与 sink 的 DisplayLine.buttons 同一坐标系（CellWidth 网格，见 segmentsOf）。
-    val widths = visible.map { CellWidth.of(it) }
+    // 列坐标必须与 sink 的 DisplayLine.buttons 同一坐标系（CellWidth 网格，见 segmentsOf）：
+    // HTML 段走 [CellWidth.visibleHtmlCells]（图形感知；[graphicFontPx] 为 0 时只算文本），
+    // 非 HTML 段仍是 [CellWidth.of]。旧写法对 HTML 段量 `visible[i]`（剥标签后的文本），
+    // `<img>`/`<shape>` 记 0 格 ⇒ 段列偏小、按钮开在错段（见函数 KDoc 的「段列坐标」节）。
+    val widths = IntArray(segments.size) { i ->
+        val seg = segments[i]
+        if (seg.kind == LineBufferConsoleSink.Kind.HTML) {
+            CellWidth.visibleHtmlCells(seg.text, graphicFontPx, imageSizeOf)
+        } else {
+            CellWidth.displayCells(seg.text)
+        }
+    }
     val starts = IntArray(segments.size)
     var col = 0
     for (i in segments.indices) {
@@ -364,6 +496,9 @@ internal fun consolePrintedLine(
 
     val text = StringBuilder()
     val html = StringBuilder()
+    // 从 HTML 段行体里剥出的外壳对齐（原版行级标志 `ConsoleDisplayLine.Align` 的载体，
+    // 判据与剥壳口径见 [stripRowShell]）；null = 该行体没写 `<p align>`，回落显示行自己的对齐。
+    var shellAlign: Alignment? = null
     var buttonIndex = 0
     var openButtonEnd = -1
     for (i in segments.indices) {
@@ -389,8 +524,21 @@ internal fun consolePrintedLine(
         }
         if (seg.kind == LineBufferConsoleSink.Kind.HTML) {
             // 原文已是 HTML；内部样式/按钮由原文自身表达（见上方 KDoc）。
+            // 但**行级外壳**（p/nobr）必须剥掉 —— 原版行体是逐节点重建，里面永远没有
+            // p/nobr（它们被 html2DisplayLine 折成行级标志 Align/FlagNobr，HtmlManager.cs:700-710），
+            // 外壳由 [displayLine2Html] 按 needPandN 唯一添加（:387-402、:478-482）。
+            // 不剥 → 回读串带两层外壳，再喂 HTML_PRINT 时第二枚 `<p>` 命中原版
+            // 「开 `<p>` 查 `FlagNobr`」那条复制粘贴判式（:1113-1116，ADR-005 必须复刻）而抛
+            // 「<p>标签重复使用」——端点 0.2.35 `qol_EVENTCOMEND.ERB` 那条自产脏串的成因。
+            // div 块区间**整段剔除**（CONTRACT-HTMLDIV-B1 D6）：原版 `DisplayLine2Html`
+            // 对 `ConsoleDivPart` 无分支（HtmlManager.cs:446-464），块的子行/头尾标签
+            // 在 HTML_GETPRINTEDSTR 的产物里**不出现** —— 与 GETDISPLAYLINE（走
+            // `ToString()`，块重建完整吐出）行为刻意不同，两边都按原版。
+            val bodyRaw = cutDivRanges(seg.text, blocksBySegment[i])
+            val (rowBody, rowAlign) = stripRowShell(bodyRaw)
+            if (rowAlign != null) shellAlign = rowAlign
             text.append(readback[i])
-            html.append(seg.text)
+            html.append(rowBody)
         } else {
             text.append(readback[i])
             html.append(styleStartTag(seg, defaultFontName))
@@ -406,11 +554,179 @@ internal fun consolePrintedLine(
     return ConsolePrintedLine(
         text.toString(),
         html.toString(),
-        line.alignment,
+        shellAlign ?: line.alignment,
         line.isLogicalLine,
         htmlParts,
+        htmlBuilt = true,
     )
 }
+
+/**
+ * 把 [blocks] 的区间从 [raw] 里剔除（半开化为端点裁剪，区间不重叠 —— sink 侧按开块序
+ * 圈区间）。用于 HTML_GETPRINTEDSTR 的行体：原版对 div 节点无分支（HtmlManager.cs:446-464）。
+ */
+private fun cutDivRanges(raw: String, blocks: List<DisplayDivBlock>): String {
+    if (blocks.isEmpty()) return raw
+    val out = StringBuilder(raw.length)
+    var pos = 0
+    for (b in blocks) {
+        val start = b.sourceRange.first.coerceIn(0, raw.length)
+        val end = (b.sourceRange.last + 1).coerceIn(0, raw.length)
+        if (start > pos) out.append(raw, pos, start)
+        if (end > pos) pos = end
+    }
+    if (pos < raw.length) out.append(raw, pos, raw.length)
+    return out.toString()
+}
+
+/**
+ * GETDISPLAYLINE 的段回读：[blocks] 的区间替换成块重建（[divBlockReadback]），其余碎片
+ * 走既有的逐节点回读（[htmlSegmentReadback]，img/shape 给 AltText）。
+ *
+ * 对应原版 `ConsoleDisplayLine.ToString()`（ConsoleDisplayLine.cs:127-140）的节点序：
+ * 文本节点与 div 节点按父节点表的顺序拼接（div 在 HtmlManager.cs:646 进入父列表的位置
+ * = `<div>` 开标签处），块前后文本与块**同行**。
+ */
+private fun divSplicedReadback(
+    raw: String,
+    blocks: List<DisplayDivBlock>,
+    partsOut: MutableList<HtmlPrintRun>,
+    fontSize: Long,
+    focusColor: Int,
+): String {
+    if (blocks.isEmpty()) return htmlSegmentReadback(raw, htmlToPlainText(raw), partsOut, fontSize, focusColor)
+    val sb = StringBuilder()
+    var pos = 0
+    for (b in blocks) {
+        val start = b.sourceRange.first.coerceIn(0, raw.length)
+        val end = (b.sourceRange.last + 1).coerceIn(0, raw.length)
+        if (start > pos) {
+            val frag = raw.substring(pos, start)
+            sb.append(htmlSegmentReadback(frag, htmlToPlainText(frag), partsOut, fontSize, focusColor))
+        }
+        sb.append(divBlockReadback(b, partsOut, fontSize, focusColor))
+        if (end > pos) pos = end
+    }
+    if (pos < raw.length) {
+        val frag = raw.substring(pos)
+        sb.append(htmlSegmentReadback(frag, htmlToPlainText(frag), partsOut, fontSize, focusColor))
+    }
+    return sb.toString()
+}
+
+/**
+ * 一颗 div 块的 GETDISPLAYLINE 重建 = `ConsoleDivPart.ToString()`
+ * （ConsoleDivPart.cs:221-233）：`altHeadTag` + 每条子行的 `BuildString` + `"\r\n"`
+ * （**每条**子行后都带，含最后一条）+ `"</div>"`。
+ *
+ * 子行的回读走与行文本同一套逐节点口径（文本节点给文本、img/shape 给 AltText）；
+ * 黄金锚：`pc-golden-root.txt:71`（标题屏五子棋入口，TITLE.ERB:81-85 经
+ * `HTML_PRINT …, 1` 的缓冲路径）的头标签字节 `xpos='1600px' ypos='-937px'
+ * width='180px' color='#363636' height='50px' padding='10px' border='2px'
+ * radius='4px' bcolor='#A5A5A5'` —— 属性次序/省略规则/大小写全由
+ * [com.eratw.port.core.host.DivSpec.altHeadTag] 逐字节复刻。
+ */
+private fun divBlockReadback(
+    block: DisplayDivBlock,
+    partsOut: MutableList<HtmlPrintRun>,
+    fontSize: Long,
+    focusColor: Int,
+): String {
+    val sb = StringBuilder(block.altHeadTag)
+    for (child in block.children) {
+        val plain = htmlToPlainText(child.html)
+        sb.append(htmlSegmentReadback(child.html, plain, partsOut, fontSize, focusColor))
+        sb.append("\r\n")
+    }
+    sb.append("</div>")
+    return sb.toString()
+}
+
+/**
+ * 一条 HTML 段行原文 → 去外壳行体（`DisplayLine2Html` 的逐节点重建口径，HtmlManager.cs:446-464）。
+ *
+ * 原版把 `<p align=…>` 与 `<nobr>` 折成**行级标志**（`HtmlAnalzeState.Alignment`/`FlagNobr` →
+ * 每条显示行 `SetAlignment`，HtmlManager.cs:700-710；strict 判式只在行首放行这两枚标签，
+ * :1093、:1109-1112），行体由 [displayLine2Html] 按 `needPandN` 唯一地补一层外壳
+ * （:387-402、:478-482）。本仓 sink 的 HTML 段保留**原文**（含原文自带的那层外壳与
+ * splitHtmlLines 的行首重放），原样交回就会让回读串带上**两层**外壳：
+ * 再喂一次 `HTML_PRINT` 时，内层那枚 `<p>` 命中原版「开 `<p>` 查 `FlagNobr`」的复制粘贴判式
+ * （:1113-1116，ADR-005 必须原样复刻）抛「<p>标签重复使用」，而外层那两枚闭标签被
+ * [displayLine2Html] 补齐后还会再多出一对无主的 `</p>`/`</nobr>`（strict 判 `</p>` 未开过即抛
+ * UnexpectedCloseTag，:985-997）。⇒ 交回前必须**剥掉 p/nobr 外壳**，行体只剩节点级标签
+ * （font/样式/按钮/图元原样保留，与原版行体逐形一致）。
+ *
+ * 剥除按**顶层标签**判定：属性值引号内的尖括号不算标签边界（原版属性是 LiteralStringWord），
+ * 所以 `<button title='a<p>b'>` 里的 `<p>` 随所属标签整段原样带走、不误删。标签名大小写不敏感
+ * （`tagAnalyze` 先 ToLower，HtmlManager.cs:1163-1166）。无闭合 '>' 的孤立 '<' 当文本照抄
+ * （与 sink 的 splitHtmlLines 同一宽容口径）。
+ *
+ * @return 去壳行体 + 从第一枚开 `<p align=…>` 读到的对齐；没有 `<p>`（或没写 align）时对齐为
+ *   null，调用方回落到显示行自身的对齐快照。原版正是用 `lines[0].Align` 重建外壳（:387、:390-401）。
+ */
+private fun stripRowShell(raw: String): Pair<String, Alignment?> {
+    val out = StringBuilder(raw.length)
+    var align: Alignment? = null
+    var i = 0
+    val n = raw.length
+    while (i < n) {
+        if (raw[i] != '<') {
+            out.append(raw[i])
+            i++
+            continue
+        }
+        var j = i + 1
+        var inSingle = false
+        var inDouble = false
+        var closed = false
+        while (j < n) {
+            val c = raw[j]
+            when {
+                inSingle -> if (c == '\'') inSingle = false
+                inDouble -> if (c == '"') inDouble = false
+                c == '\'' -> inSingle = true
+                c == '"' -> inDouble = true
+                c == '>' -> closed = true
+            }
+            if (closed) break
+            j++
+        }
+        if (!closed) {
+            // 孤立 '<'：原版抛 CodeEE（HtmlManager.cs:597-599），此处与 sink 切行同口径当文本带走。
+            out.append(raw, i, n)
+            break
+        }
+        val tag = raw.substring(i, j + 1)
+        when (htmlTagName(tag)) {
+            "p" -> align = htmlAlignAttr(tag) ?: align // 外壳：剥除，对齐随第一枚开 p 折给行级标志
+            "nobr" -> Unit // 外壳：剥除（原版 FlagNobr 不落行体）
+            else -> out.append(tag)
+        }
+        i = j + 1
+    }
+    return out.toString() to align
+}
+
+/** 标签名：`<` 之后、跳过 `/`，读到 '>' 或空白为止，小写（原版 `tagAnalyze` 先 ToLower）。 */
+private fun htmlTagName(tag: String): String {
+    var s = 1
+    if (s < tag.length && tag[s] == '/') s++
+    var e = s
+    while (e < tag.length && tag[e] != '>' && tag[e] != ' ' && tag[e] != '\t') e++
+    return tag.substring(s, e).lowercase(Locale.ROOT)
+}
+
+/** `<p>` 的 `align='left|center|right'`（属性名与值都不区分大小写，值允许单/双引号或裸写）。 */
+private val HTML_ALIGN_ATTR = Regex("(?i)\\balign\\s*=\\s*['\"]?\\s*(left|center|right)")
+
+private fun htmlAlignAttr(tag: String): Alignment? =
+    HTML_ALIGN_ATTR.find(tag)?.groupValues?.get(1)?.lowercase(Locale.ROOT)?.let {
+        when (it) {
+            "center" -> Alignment.CENTER
+            "right" -> Alignment.RIGHT
+            else -> Alignment.LEFT
+        }
+    }
 
 /**
  * HTML 段的严格解析触发条件（正则口径见 [consolePrintedLine] 的两条 TODO(verify)）。
@@ -435,14 +751,20 @@ private val HTML_NODE_TRIGGER = Regex("(?i)<(?:img|shape)\\b|<font\\b[^>]*\\bbco
  *
  * 解析出的节点一律追加进 [partsOut]，供 [ConsolePrintedLine.htmlParts] 记录分部背景
  * （FN-11，`HtmlPrintStyle.buttonColor`）。`rows` 为空（空串）时什么也不加。
+ *
+ * [fontSize] / [focusColor] 原样透传给 [htmlPrintDocument]：重建 `<img>` AltText 的
+ * 百分比折算与 `bcolor` 的省略判据都发生在那一次解析里（见 [consolePrintedLine] 的
+ * 「配置注入面」节）。调用点必须传会话生效值，别让这里回落到出厂缺省。
  */
 private fun htmlSegmentReadback(
     html: String,
     plain: String,
     partsOut: MutableList<HtmlPrintRun>,
+    fontSize: Long,
+    focusColor: Int,
 ): String {
     if (!HTML_NODE_TRIGGER.containsMatchIn(html)) return plain
-    val rows = htmlPrintDocument(html).rows
+    val rows = htmlPrintDocument(html, fontSize, focusColor).rows
     val parts = rows.flatMap { it.runs }
     partsOut.addAll(parts)
     val hasGraphic = parts.any { it.kind == HtmlRunKind.IMAGE || it.kind == HtmlRunKind.SHAPE }
@@ -661,8 +983,20 @@ private fun htmlLength(c: BuiltinContext, s: String, drawablePx: Long = drawable
         // 每个文本段按自己的样式快照独立量宽（FN-04 core）；未接线时回落到上面的
         // measureText（旧回调 → 等宽近似），读数不变。
         measureStyled = { text, style -> measureText(c, text, style) },
+        // IMG-A4 I1：图元尺寸查表（无 width 的 <img> 按图元真实宽高比折算宽）。
+        // 宿主缺省 null = 图元缺失路径，量 AltText 的读数不变（ConsoleImagePart.cs:61-64）。
+        imageSizeOf = c.host.imageSizeOf,
     ).length()
 }
+
+/**
+ * 语句层（HTML_PRINTC / HTML_PRINTLC）的像素量宽入口：与 [htmlLength] **同一把尺**。
+ *
+ * 暴露成 `internal` 而不是复制一份近似：语句层补齐用的宽度必须与建内建量宽时的读数同源，
+ * 否则「量宽用 A、补齐用 B」就是两条尺（`proc/GameSession.kt:378-393` 登记过这类分叉的
+ * 后果：每个按钮只占应得宽度的一半上下）。
+ */
+internal fun htmlPixelWidth(c: BuiltinContext, s: String): Long = htmlLength(c, s).toLong()
 
 /**
  * `Config.DrawableWidth` 的现值（`Config.cs:461-466`：窗口宽减去 `shapePositionShift`）。
@@ -1011,7 +1345,10 @@ private fun displayLine2Html(lines: List<ConsolePrintedLine>, needPandN: Boolean
         // 原版每段都从节点重新拼（:446-464 对 ConsoleStyledString 逐个 Escape），
         // 所以宿主只给了 text、没给行体 HTML 时，回退到 Escape(text) 而不是空串
         // —— 否则 HTML_GETPRINTEDSTR 会吐出没有内容的 <nobr></nobr>。
-        sb.append(if (line.html.isEmpty()) htmlEscape(line.text) else line.html)
+        // [ConsolePrintedLine.htmlBuilt] 的行不算这一档：div 块被剔除后的空行体就是
+        // 原版语义（块节点在 DisplayLine2Html 里没有输出分支），回落 Escape(text) 会把
+        // GETDISPLAYLINE 的块重建文本错吐进 HTML_GETPRINTEDSTR。
+        sb.append(if (line.html.isEmpty() && !line.htmlBuilt) htmlEscape(line.text) else line.html)
     }
     if (needPandN) sb.append("</nobr></p>")
     return sb.toString()

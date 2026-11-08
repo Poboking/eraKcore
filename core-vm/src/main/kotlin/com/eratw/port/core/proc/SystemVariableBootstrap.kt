@@ -5,7 +5,11 @@ import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.vars.DimParseConfig
 import com.eratw.port.core.vars.DimParser
 import com.eratw.port.core.vars.DimSpec
+import com.eratw.port.core.vars.DimVarSizes
+import com.eratw.port.core.vars.VariableRegistry
 import com.eratw.port.core.vars.VariableStore
+import com.eratw.port.core.vars.withPureStaticDimFolders
+import java.util.Locale
 
 /**
  * 全局 `#DIM` / `#DIMS` 原文 → [VariableStore] 的装载器（ERH 常量 + 全局变量）。
@@ -98,12 +102,17 @@ object SystemVariableBootstrap {
      *   `#DIMS CONST Y = X` 的初值同样折成 `SingleStrTerm` 才通过
      *   （spec: `UserDefinedVariableData.cs:406-408`，非 `SingleTerm` 报 InitialValueOnlyConst）。
      *   本移植把这两步都落到 [DimParseConfig.strConstants] 上（消费点 `UserVariables.kt:843`）。
+     * @property specs 本轮**成功注册**的声明（已解析的 [DimSpec]，含数组尺寸）。
+     *   原版 ERH 边装边往 `IdentifierDictionary` 注册，后加载的 `#DIM X, VARSIZE("Y")`
+     *   因此能看到先声明的用户全局（`IdentifierDictionary.cs:429`）；编译期要复现这条
+     *   可见性，就得拿到已解析的 spec 再并进 `DimVarSizes.withUserDecls`。
      */
     class Result(
         val declared: Int,
         val failures: List<Failure>,
         val constants: Map<String, Long>,
         val strConstants: Map<String, String> = emptyMap(),
+        val specs: List<DimSpec> = emptyList(),
     )
 
     /**
@@ -156,14 +165,19 @@ object SystemVariableBootstrap {
         return sb.toString()
     }
 
-    /** `#DIM ...` / `#DIMS ...` → (keyword, body)；非 DIM 行返回 null。 */
+    /** `#DIM ...` / `#DIMS ...` / `#DIMF ...` → (keyword, body)；非 DIM 行返回 null。 */
     fun splitDeclaration(raw: String): Pair<String, String>? {
         val text = raw.trimStart('\uFEFF', ' ', '\t')
         if (!text.startsWith("#")) return null
         val sp = text.indexOfFirst { it == ' ' || it == '\t' }
         if (sp < 0) return null
-        val keyword = text.substring(0, sp).uppercase()
-        if (keyword != "#DIM" && keyword != "#DIMS") return null
+        // 关键字归一必须锁 Locale.ROOT：tr/az locale 下默认 uppercase 会把 'i' 变 'İ'
+        //（带组合点），`#dimf` 归一不出 `#DIMF` ⇒ 声明静默丢弃。与 erbcc 侧
+        // CorpusCompile.splitDeclaration 的 CMP-44 承诺同口径（2026-11-02 审查修正）。
+        val keyword = text.substring(0, sp).uppercase(Locale.ROOT)
+        // `#DIMF` 是 4.981 fork 的浮点声明，与 #DIM 共用其余关键字规则（DimParser 同一分支）；
+        // ERB 预扫描与运行期装配必须是同一份关键字集，否则「编译过、运行期未定义」。
+        if (keyword != "#DIM" && keyword != "#DIMS" && keyword != "#DIMF") return null
         return keyword to text.substring(sp + 1)
     }
 
@@ -293,6 +307,7 @@ object SystemVariableBootstrap {
         // 字符串初值段查 strConstants，spec: UserVariables.kt:419 / :843）。
         val pending = ArrayList<RawDeclaration>()
         declarations.forEach { pending.add(it) }
+        val specs = ArrayList<DimSpec>()
         var declared = 0
 
         var progress = true
@@ -305,7 +320,7 @@ object SystemVariableBootstrap {
                 val split = splitDeclaration(stripComment(d.raw))
                 if (split == null) {
                     it.remove()
-                    failures.add(Failure(d.file, d.line, d.raw, "不是 #DIM/#DIMS 声明"))
+                    failures.add(Failure(d.file, d.line, d.raw, "不是 #DIM/#DIMS/#DIMF 声明"))
                     continue
                 }
                 val spec = try {
@@ -343,6 +358,7 @@ object SystemVariableBootstrap {
                 }
                 it.remove()
                 declared++
+                specs.add(spec)
                 progress = true
                 rememberConstant(spec, constants, strConstants)
             }
@@ -350,7 +366,55 @@ object SystemVariableBootstrap {
         for (d in pending) {
             failures.add(Failure(d.file, d.line, d.raw, "依赖的常量无法解析（#DEFINE 宏表或前置 CONST 缺失）"))
         }
-        return Result(declared, failures, constants, strConstants)
+        return Result(declared, failures, constants, strConstants, specs)
+    }
+
+    /**
+     * VARSIZE 折叠快照的**用户全局并入**（不动点）：base 只含 `VariableSize.csv` 的系统表，
+     * 返回值 = base + 本批声明里**成功注册的用户全局**尺寸。
+     *
+     * ## 为什么需要这一层
+     *
+     * 原版 ERH 是**边装边注册**：每条 `#DIM` 处理完立刻进 `IdentifierDictionary`
+     * （`IdentifierDictionary.cs:429`），于是后声明的 `#DIM X, VARSIZE("Y")`（Y 亦是
+     * 用户全局、先声明）在装载期就折得出——VARSIZE 的折叠快照查的就是同一本登记册
+     * （spec: `FunctionMethodCreator.cs:3443`/`:3453`/`:3465`）。只喂系统表时这条链
+     * 折不出 ⇒ 声明被丢（level 2 告警）⇒ 运行到用点报「未定义的变量」。
+     *
+     * 编译侧（erbcc）已在 a59cd7ff 补上同语义的快照合并；本函数是**运行期重解析链**
+     * 的同款——`.erbc` 侧车只带 `#DIM` 原文（侧车 dim-config 无回调），运行期
+     * [install] 重新解析时同样要能看见先注册的用户全局。两处共用本实现，不许各抄一份。
+     *
+     * ## 机制
+     *
+     * 在一次性 `VariableStore` 上逐轮跑 [install]（与编译侧同构；原版的「失败重入队、
+     * 整轮无进展才告警」即 `ErhLoader.cs:315-337`）：每轮把上一轮成功注册的 spec 并进
+     * 快照再解析，条目数不再增长即收敛。[maxRounds] 是链深护栏——语料实测最长一跳
+     * （`Add_HateMarkForgiveness.ERH:2` → PALAM 系统变量，系统表直接命中），链深超限的
+     * 声明走 [install] 既有的失败口径（level 2 告警留痕，非静默）。
+     *
+     * REF 变量不入册（`withUserDecls` 跳过，spec: `FunctionMethodCreator.cs:3466-3469`
+     * `UniqueRestructure` 返回 false）；本函数只算快照，**不做**任何真实注册——调用方
+     * 的真实 [install] 仍要自己跑一遍（带并入后的快照）。
+     */
+    fun mergedVarSizes(
+        base: Map<String, LongArray>,
+        declarations: List<RawDeclaration>,
+        config: DimParseConfig,
+        keywordTables: Map<String, Map<String, Int>>,
+        consoleWidth: Int,
+        maxRounds: Int = 4,
+    ): Map<String, LongArray> {
+        if (declarations.isEmpty()) return base
+        var sizes = base
+        repeat(maxRounds) {
+            val cfg = config.withPureStaticDimFolders(sizes, keywordTables, consoleWidth)
+            val result = install(VariableStore(VariableRegistry()), declarations, cfg)
+            val merged = DimVarSizes.withUserDecls(base, result.specs)
+            if (merged.size == sizes.size) return merged
+            sizes = merged
+        }
+        return sizes
     }
 
     /** 覆盖表里认的两种标签形（大写英文形 + 大写化日文形）。 */

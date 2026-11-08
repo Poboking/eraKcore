@@ -230,6 +230,99 @@ class InputStatementsTest {
         assertEquals(77L, env.store.readInt("RESULT", longArrayOf(0)))
     }
 
+    // ---------------- 带鼠标 INPUT 的附加槽（玩家子选单案） ----------------
+
+    /**
+     * `QOL_USERCOM.ERB @COM_OPTION` 的读法：
+     * ```
+     * INPUT -1, 1
+     * INPUT_VALUES = RESULT
+     * MOUSE_BTN = RESULT:1
+     * IF MOUSE_BTN == 1
+     *     SETVAR @"COM_ALTER_{COM_ID}", INPUT_VALUES
+     * ```
+     * 原版 `MainWindow.cs:834/:847` 在带鼠标等待下点按钮先写 `RESULTS:1 = selectedString`
+     * 与 `RESULT:1 = 1`（左键），之后 `PressEnterKey` 才把按钮值交到 `RESULT:0`。
+     * 旧 sem 只写主槽 ⇒ `MOUSE_BTN` 恒为 0，敬茶/演奏的「+」子选单点了没反应。
+     */
+    @Test
+    fun `带鼠标 INPUT 的按钮点击把左键位写进 RESULT 1`() {
+        val env = SemTestEnv(
+            InputOutcome(
+                intValue = 2,
+                writesStr = false,
+                resultIntSlots = mapOf(1 to 1L),
+                resultStrSlots = mapOf(1 to "2"),
+            ),
+        )
+        env.run(instr(FunctionCode.INPUT, inputsArg(mouse = 1)))
+
+        assertTrue(env.input.requests.single().mouseInput)
+        assertEquals(2L, env.store.readInt("RESULT", longArrayOf(0)), "按钮值 → RESULT")
+        assertEquals(1L, env.store.readInt("RESULT", longArrayOf(1)), "左键位 → RESULT:1")
+        assertEquals("2", env.store.readStr("RESULTS", longArrayOf(1)), "按钮文本 → RESULTS:1")
+    }
+
+    /**
+     * 附加槽回写挂在 `waitInput` 单一汇聚点 ⇒ 扁平直读通道同口径，
+     * 不会因产物路径不同又出现「PC 侧能切、Android 侧切不动」这类分叉。
+     */
+    @Test
+    fun `带鼠标 INPUT 的附加槽在扁平通道同样回写`() {
+        val env = SemTestEnv(
+            InputOutcome(
+                intValue = 3,
+                writesStr = false,
+                resultIntSlots = mapOf(1 to 1L),
+                resultStrSlots = mapOf(1 to "3"),
+            ),
+        )
+        env.runFlat(instr(FunctionCode.INPUT, inputsArg(mouse = 1)))
+
+        assertEquals(3L, env.store.readInt("RESULT", longArrayOf(0)))
+        assertEquals(1L, env.store.readInt("RESULT", longArrayOf(1)))
+        assertEquals("3", env.store.readStr("RESULTS", longArrayOf(1)))
+    }
+
+    /** 键盘交付（附加槽为空）不得改写 `RESULT:1` 旧值：普通回车不能被误判成鼠标左键。 */
+    @Test
+    fun `键盘交付不带附加槽时不改写 RESULT 1 旧值`() {
+        val env = SemTestEnv(InputOutcome(intValue = 7, writesStr = false))
+        env.store.writeInt("RESULT", longArrayOf(1), 42L)
+        env.store.writeStr("RESULTS", longArrayOf(1), "旧值")
+
+        env.run(instr(FunctionCode.INPUT, inputsArg(mouse = 1)))
+
+        assertEquals(7L, env.store.readInt("RESULT", longArrayOf(0)))
+        assertEquals(42L, env.store.readInt("RESULT", longArrayOf(1)))
+        assertEquals("旧值", env.store.readStr("RESULTS", longArrayOf(1)))
+    }
+
+    /**
+     * 与语料逐字同形：`INPUT -1, 1` 的默认值 `-1` 与鼠标位共存；点中第 0 个选项
+     * （`VALID_OPT:0` → 文本 "0"）时 `INRANGE(RESULT, 0, OPTIONNUM)` 必须成立，
+     * 且 `MOUSE_BTN = RESULT:1` 为 1 ⇒ `SETVAR "COM_ALTER_…"` 才会执行。
+     */
+    @Test
+    fun `INPUT -1 1 的默认值与鼠标位共存 选项 0 仍写左键位`() {
+        val env = SemTestEnv(
+            InputOutcome(
+                intValue = 0,
+                writesStr = false,
+                resultIntSlots = mapOf(1 to 1L),
+                resultStrSlots = mapOf(1 to "0"),
+            ),
+        )
+        env.run(instr(FunctionCode.INPUT, inputsArg(def = -1, mouse = 1)))
+
+        val request = env.input.requests.single()
+        assertTrue(request.mouseInput, "第 2 参 = 1 ⇒ 带鼠标等待")
+        assertTrue(request.hasDef, "第 1 参 = -1 ⇒ 有默认值")
+        assertEquals(-1L, request.defInt)
+        assertEquals(0L, env.store.readInt("RESULT", longArrayOf(0)), "选项 0 → RESULT")
+        assertEquals(1L, env.store.readInt("RESULT", longArrayOf(1)), "左键位 → RESULT:1")
+    }
+
     // ---------------- TINPUT 家族 ----------------
 
     @Test

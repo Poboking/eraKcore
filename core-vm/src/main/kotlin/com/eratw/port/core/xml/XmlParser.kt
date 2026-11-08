@@ -35,8 +35,11 @@ object XmlParser {
      * 而非 XmlException；本移植必须在 [XmlParseException] 处设闸，否则十万层 `<a><a>...`
      * 会直接抛 StackOverflowError，绕开 XmlMethods 里的 CodeEE 转换
      * （`FunctionMethodCreator.cs:1699-1706` 只捕获 XmlException）。
+     *
+     * 可见性 internal：XML_ADDNODE / XML_SET(style=2) / XML_REPLACE 的插入路径要用同一个
+     * 上限做「整文档深度」闸（解析器只约束单次解析，插入能让总深度叠加超过它）。
      */
-    private const val MAX_ELEMENT_DEPTH = 512
+    internal const val MAX_ELEMENT_DEPTH = 512
 
     /**
      * 解析完整文档（等价 `XmlDocument.LoadXml`）。
@@ -57,12 +60,30 @@ object XmlParser {
     /**
      * 解析内容片段（等价给 `InnerXml` 赋值）：允许文本 + 多个元素混合，允许空。
      * 返回的节点尚未挂到任何父节点。
+     *
+     * 纯空白片段建 [XmlWhitespace]（`#whitespace`）节点、混合内容里的非空白文本建
+     * [XmlText]（`#text`）——dotnet 8.0.425 实测（XML-FIVE X4 翻案）：
+     * `e.InnerXml = "  "` 后唯一子节点 Name=`#whitespace`（NodeType=Whitespace），
+     * `e.InnerXml = " a "` 后是普通 `#text`。注意与 `InnerText` 赋值相反：
+     * `InnerText` 赋值（含纯空白值）**一律**建 `#text`（同轮探针实测），
+     * 见 fn/XmlMethods.kt `setXmlNode` style=1。
      */
     fun parseFragment(text: String): List<XmlNode> = Cursor(text, preserveWhitespace = false).parseContentFragment()
 
     private class Cursor(private val s: String, private val preserveWhitespace: Boolean) {
         private var i = 0
 
+        /**
+         * 解析完整文档（等价 `XmlDocument.LoadXml`）。
+         *
+         * 串首 `U+FEFF` 剥除是**已知有意分歧**（契约 C-XML-DIVERGENCE@2 方向乙，OD-1 2026-11-02）：
+         * dotnet 8.0.425 实测 `new XmlDocument().LoadXml("\uFEFF<root/>")` 直接抛 XmlException
+         * 「Data at the root level is invalid. Line 1, position 1.」（原版 FunctionMethodCreator.cs:181-184
+         * 把 XmlException 转 CodeEE）；本实现剥掉前导符继续解析。真实链路 `LOADTEXT` 走
+         * `File.ReadAllText`（FunctionMethodCreator.cs:8082）时 BOM 已在读文本层被 StreamReader 消费，
+         * 解析层见不到前导符 ⇒ **不可达**。按 ADR-005「不可达即不擅改」保留现状（判层结论另见
+         * `XmlBomLoadTest` 的 KDoc）。**不删这一行**。
+         */
         fun parseDocument(): XmlDocument {
             val doc = XmlDocument()
             if (i < s.length && s[i] == '\uFEFF') i++
@@ -75,6 +96,10 @@ object XmlParser {
             while (true) {
                 skipWhitespace()
                 if (i >= s.length) break
+                // 根前/根后的「散位」裸非法字符（探针 R1t/R1u：0x0C 领先、0x01 落根后，
+                // .NET 同样抛 invalid character）——各 token 读取器只覆盖自己的片段，
+                // 走不到读取器的散位在这里统一拦。
+                if (isInvalidXmlLiteralChar(s[i])) failInvalidChar(i)
                 when {
                     s.startsWith("<!--", i) -> doc.appendChild(parseComment())
                     s.startsWith("<?", i) -> doc.appendChild(parseProcessingInstruction())
@@ -110,7 +135,11 @@ object XmlParser {
                         // 丢弃判据只适用于 `LoadXml` 解析整篇文档，不适用于 InnerXml 赋值。
                         // isWhitespaceOnly 收紧的是「哪些字符算空白」（U+3000 / NBSP 在 XML 里不是空白），
                         // 本行连纯空格一起保留，已是其超集，两条口径在此不打架。
-                        if (t.isNotEmpty()) out.add(XmlText(t))
+                        // 节点类型按 XML-FIVE X4 的 dotnet 8.0.425 实测：纯空白片段建 #whitespace
+                        // （XmlWhitespace），混合内容里的非空白文本建 #text。
+                        if (t.isNotEmpty()) {
+                            out.add(if (isWhitespaceOnly(t)) XmlWhitespace(t) else XmlText(t))
+                        }
                     }
                 }
             }
@@ -184,6 +213,7 @@ object XmlParser {
             i += 4 // <!--
             val end = s.indexOf("-->", i)
             if (end < 0) fail("注释未闭合")
+            scanLiteralChars(i, end) // 探针 R1c：注释正文里的裸控制符 .NET 同抛
             val data = s.substring(i, end)
             i = end + 3
             return XmlComment(data)
@@ -193,6 +223,7 @@ object XmlParser {
             i += 9 // <![CDATA[
             val end = s.indexOf("]]>", i)
             if (end < 0) fail("CDATA 未闭合")
+            scanLiteralChars(i, end) // 探针 R1d
             val data = s.substring(i, end)
             i = end + 3
             return XmlCData(data)
@@ -203,6 +234,7 @@ object XmlParser {
             val target = readName()
             val end = s.indexOf("?>", i)
             if (end < 0) fail("处理指令未闭合")
+            scanLiteralChars(i, end) // 探针 R1e
             var data = s.substring(i, end)
             i = end + 2
             // .NET 把 target 与数据之间的**全部**空白吃掉、数据尾部空白保留：
@@ -216,7 +248,10 @@ object XmlParser {
         /** 读到下一个 `<` 为止；只做实体解码（.NET load 不做行尾归一）。 */
         private fun readText(): String {
             val start = i
-            while (i < s.length && s[i] != '<') i++
+            while (i < s.length && s[i] != '<') {
+                if (isInvalidXmlLiteralChar(s[i])) failInvalidChar(i) // 探针 R1a
+                i++
+            }
             return decode(s.substring(start, i))
         }
 
@@ -229,6 +264,7 @@ object XmlParser {
             val start = i
             while (i < s.length && s[i] != quote) {
                 if (s[i] == '<') fail("属性值里不能出现 <")
+                if (isInvalidXmlLiteralChar(s[i])) failInvalidChar(i) // 探针 R1b/R1s
                 i++
             }
             if (i >= s.length) fail("属性值未闭合")
@@ -238,6 +274,17 @@ object XmlParser {
         }
 
         private fun readName(): String {
+            if (i < s.length && isInvalidXmlLiteralChar(s[i])) {
+                // 名字位的裸非法字符 .NET 给的是「Name cannot begin with」变体（探针 R1f：
+                // `<\u0001/>` → Name cannot begin with the '' character, hexadecimal value 0x01.），
+                // 与内容位的「is an invalid character」是两条文案。
+                val ch = s[i]
+                failAt(
+                    i,
+                    "Name cannot begin with the '$ch' character, " +
+                        "hexadecimal value 0x${ch.code.toString(16).padStart(2, '0')}",
+                )
+            }
             if (i >= s.length || !isNameStart(s[i])) fail("缺少合法的名字")
             val start = i
             i++
@@ -258,6 +305,30 @@ object XmlParser {
 
         private fun fail(msg: String): Nothing =
             throw XmlParseException("$msg（位置 $i）")
+
+        private fun failAt(pos: Int, msg: String): Nothing =
+            throw XmlParseException("$msg（位置 $pos）")
+
+        /**
+         * 报源文本 [pos] 处的「裸」非法字符（RESIDUE-BX2 R1）。文案逐字对齐 dotnet 8.0.425
+         * 探针读数（`'<char>', hexadecimal value 0x01, is an invalid character. Line 1,
+         * position N.`——行/位置尾段由本实现自己的「（位置 n）」约定替代，0 起）。
+         */
+        private fun failInvalidChar(pos: Int): Nothing {
+            val ch = s[pos]
+            failAt(
+                pos,
+                "'$ch', hexadecimal value 0x${ch.code.toString(16).padStart(2, '0')}, " +
+                    "is an invalid character",
+            )
+        }
+
+        /** 扫 [from] 到 [to]（不含）之间的裸非法字符（注释正文 / CDATA / PI 数据共用）。 */
+        private fun scanLiteralChars(from: Int, to: Int) {
+            for (k in from until to) {
+                if (isInvalidXmlLiteralChar(s[k])) failInvalidChar(k)
+            }
+        }
     }
 }
 
@@ -265,11 +336,45 @@ private fun isWhitespace(ch: Char): Boolean =
     ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
 
 /**
+ * 源文本「裸」非法字符判据（RESIDUE-BX2 R1，dotnet 8.0.425 探针
+ * `<work-root>/residue-probe/probe-output.txt`，API 与原版同型
+ * `XmlDocument.LoadXml`，FunctionMethodCreator.cs:179/:3058）：
+ *
+ * - **拦**：`0x00`..`0x1F` 除 `\t`/`\n`/`\r`（探针 R1a 文本 / R1b 属性值 / R1c 注释 /
+ *   R1d CDATA / R1e PI 数据 / R1t 散位领先 / R1u 落根后 / R1w InnerXml 片段赋值——
+ *   全部抛 XmlException `'<char>', hexadecimal value 0x01, is an invalid character.`，
+ *   名字位走 R1f 的「Name cannot begin with」变体）；字面 `U+FFFE`/`U+FFFF` 同判
+ *   （探针 R1k/R1n 同文案 invalid character）。
+ * - **放行**：`\t`/`\n`/`\r`（探针 R1h）；`0x7F`/`0x85` 等 XML 1.0 合法段照常进 DOM
+ *   （探针 R1p/R1q）；**字符引用形态** `&#x1;`/`&#xFFFE;` 不受本判据影响——它拦的是
+ *   扫描到的**原始字符**，decode 解出的码位照旧（探针 R1g/R1x 基准，XML-FIVE X1 已钉）。
+ *   判据与转义面（XmlNode 的 appendEscapedText/appendEscapedAttribute 把控制符重编成
+ *   字符引用）配合：能进 DOM 的控制符只可能来自字符引用，回写即还原成引用形态。
+ * - **不拦（TODO(verify)，不硬造）**：孤立代理的字面形态 .NET 报文是「成对消费后的
+ *   下一字符 invalid」（探针 R1o：`<r>\uD800</r>` 报 `'<' 0x3C invalid character`），
+ *   属读取器成对消费的框架内部行为，本解析器逐字符扫描无此模型；语料/基准无此形态。
+ *
+ * 旧行为（XML-FIVE 收口时的登记）：移植解析层不拦裸控制符——本判据落地后与 .NET 同拦，
+ * 台账 `specs/verify-notes.md` 的 §27.4② 相邻分歧条目就此销账。
+ */
+internal fun isInvalidXmlLiteralChar(ch: Char): Boolean =
+    (ch < ' ' && ch != '\t' && ch != '\n' && ch != '\r') || ch == '\uFFFE' || ch == '\uFFFF'
+
+/**
  * 整段文本是否只由 XML 空白（space/tab/CR/LF）构成 —— `PreserveWhitespace=false`
  * 丢弃的判据。不能用 `isNotBlank()`：它按 [Char.isWhitespace] 判，会把全角空格 U+3000、
  * NBSP 这类 .NET XML 语境下**不是**空白的字符也当空白，整段吞掉文本节点。
  */
-private fun isWhitespaceOnly(text: String): Boolean = text.all { isWhitespace(it) }
+/**
+ * 整段文本是否只由 XML 空白（space/tab/CR/LF）构成 —— `PreserveWhitespace=false`
+ * 丢弃的判据。不能用 `isNotBlank()`：它按 [Char.isWhitespace] 判，会把全角空格 U+3000、
+ * NBSP 这类 .NET XML 语境下**不是**空白的字符也当空白，整段吞掉文本节点。
+ *
+ * internal：同一判据也是 [XmlWhitespace] 的建节点判据（片段纯空白建 #whitespace，见
+ * [XmlParser.parseFragment]）与 fn/XmlMethods `setXmlNode` 对 #whitespace 节点赋值的
+ * 守卫（.NET 对非空白内容抛 ArgumentException，XML-FIVE X4）。
+ */
+internal fun isWhitespaceOnly(text: String): Boolean = text.all { isWhitespace(it) }
 
 private fun isNameStart(ch: Char): Boolean =
     ch == '_' || ch == ':' || Character.isLetter(ch)
@@ -358,27 +463,34 @@ private fun decode(raw: String): String {
 /**
  * 数字字符引用的码点校验与写入。
  *
- * 原版 `XmlDocument.LoadXml` 抛 XmlException 的码位集（XmlException 由
- * `FunctionMethodCreator.cs:1699-1706` 转成 CodeEE）：
- * - 超范围（大于 0x10FFFF）与代理区 0xD800..0xDFFF（引用必须指向标量值，不能造孤立代理）
- *   —— dotnet 8 实测，本函数**上线即有**的闸；
- * - XML 1.0 Char 集之外的低位控制符（`#x0`..`#x1F` 里除 `#x9`/`#xA`/`#xD` 外，含 0 本身）
- *   —— 2026-10-24 ARCH1 P3b 收口补上：原 fn 侧迷你解析器 MiniXml 的 M4 实测结论
- *   （「码位不在 XML 1.0 Char 集（#x9/#xA/#xD/#x20 以上）→ 全部抛 XmlException，
- *   落 FunctionMethodCreator.cs:3061-3064 或 :2749-2752 的 catch」）随双轨合一迁入本处，
- *   `fn/MapDataTableMethodsTest` 的 `&#0;` 抛错用例即该口径的钉子。
+ * 与 .NET 的对拍结论（dotnet 8.0.425；探针走 Emuera 同 API `new XmlDocument().LoadXml(string)`，
+ * 见 FunctionMethodCreator.cs:179 / :189）分两层：
  *
- * 这里必须先校验再写：直接 `appendCodePoint` 对越界值抛 IllegalArgumentException、
- * 对孤立代理则静默写出坏字符，两者都不是 [XmlParseException]，调用方的 CodeEE 转换接不住。
+ * 1. **本实现上线即有的闸**：超范围（大于 0x10FFFF）与代理区 0xD800..0xDFFF。
+ *    dotnet `LoadXml` 对二者抛 **ArgumentException**（实测「The surrogate pair (0xD800, 0xD800)
+ *    is invalid.」/「Invalid high surrogate character (0xDC00).」），而 Emuera 只 catch
+ *    `XmlException`（FunctionMethodCreator.cs:181-184 / :3061-3064）⇒ **原版未捕获崩溃**；
+ *    本实现按 ADR-005「官方未捕获崩溃不复刻」转成可诊断的 [XmlParseException]（调用方落 CodeEE）。
+ *    这里必须先校验再写：直接 `appendCodePoint` 对越界值抛 IllegalArgumentException、
+ *    对孤立代理则静默写出坏字符，两者都不是 [XmlParseException]，调用方的 CodeEE 转换接不住。
  *
- * TODO(verify)：0xFFFE/0xFFFF 按 XML 1.0 也非 Char，但两套实现历史上都放行且无探针读数，
- * 维持放行（语料与 golden 均不可达）；拿到 dotnet 探针读数后再定收口方向。
+ * 2. **放行（XML-FIVE X1 翻案后与 .NET 全对齐）**：
+ *    - `&#xFFFE;` / `&#xFFFF;`（及 `&#xFDD0;` 等非字符）dotnet `LoadXml` **放行**，InnerText
+ *      即该码位；本实现同口径放行（旧 TODO(verify) 已闭环）。
+ *    - 低位控制符 `#x0`..`#x1F`（除 `#x9`/`#xA`/`#xD` 外，含 0 本身）dotnet `LoadXml`
+ *      同样**放行**（2026-11-06 复探实测 `&#x0;&#x1;&#x8;&#x1F;` 全过、InnerText 码位
+ *      0,1,8,31），本实现改为同口径放行（旧实现拒绝，方向与 .NET 相反，已翻案；
+ *      `fn/MapDataTableMethodsTest` / `fn/MapXmlUnifyTest` 的旧拒绝钉同步翻钉）。
+ *      注意只放行**字符引用**形态：源文本里的裸控制符 .NET 抛 XmlException
+ *      「'', hexadecimal value 0x01, is an invalid character.」（同轮探针实测），
+ *      移植侧已同口径拦截（RESIDUE-BX2 R1 落地，判据与布点见
+ *      [isInvalidXmlLiteralChar]），台账 §27.4② 的相邻分歧条目就此销账。
+ *    回写面（OuterXml/InnerXml）把除 `\t`/`\n`/`\r` 外的控制符重新编成大写十六进制字符
+ *    引用（`&#x1;`/`&#x1F;`，探针实测），见 XmlNode.appendEscapedText / appendEscapedAttribute。
  */
 private fun appendCharacterRef(sb: StringBuilder, digits: String, radix: Int, ent: String) {
     val cp = digits.toIntOrNull(radix) ?: throw XmlParseException("非法的字符引用 &$ent;")
-    if (cp < 0 || cp > 0x10FFFF || cp in 0xD800..0xDFFF ||
-        (cp < 0x20 && cp != 0x9 && cp != 0xA && cp != 0xD)
-    ) {
+    if (cp < 0 || cp > 0x10FFFF || cp in 0xD800..0xDFFF) {
         throw XmlParseException("非法的字符引用 &$ent;")
     }
     sb.appendCodePoint(cp)

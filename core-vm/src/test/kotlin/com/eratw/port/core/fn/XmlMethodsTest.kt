@@ -282,6 +282,132 @@ class XmlMethodsTest {
         assertEquals("<r><a></a></r>", xsv(ctx, "XML_TOSTR", 9L))
     }
 
+    /**
+     * XML-FIVE X4（dotnet 8.0.425 实测翻案）：`InnerXml` 赋值的**纯空白**片段建
+     * `#whitespace` 节点（style=4 可观测 Name），混合片段建普通 `#text`；
+     * `InnerText` 赋值（style=1，值含纯空白）**一律**建 `#text`——旧台账把产生路径
+     * 登记成 InnerText，复探证实方向写反，见 XmlWhitespace KDoc。
+     */
+    @Test
+    fun `InnerXml 纯空白片段建 whitespace 节点而 InnerText 建 text 节点`() {
+        val (ctx, store) = xmlEnv()
+        val buf = refS("XBUF")
+        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 1L, "<r/>"))
+        // InnerXml = "  "（style=2）：子节点 Name = #whitespace；OuterXml/InnerXml 原样写空白
+        assertEquals(1L, xiv(ctx, "XML_SET", 1L, "/r", "  ", 0L, 2L))
+        assertEquals(1L, xiv(ctx, "XML_GET", 1L, "/r/node()", buf, 4L))
+        assertEquals("#whitespace", strAt(store, "XBUF", 0))
+        assertEquals("<r>  </r>", xsv(ctx, "XML_TOSTR", 1L))
+        assertEquals(1L, xiv(ctx, "XML_GET", 1L, "/r", buf, 2L))
+        assertEquals("  ", strAt(store, "XBUF", 0))
+        // 同一节点对 text() 可见（dotnet 实测 /r/text() 命中 1）、style=0 取 Value 即空白串
+        assertEquals(1L, xiv(ctx, "XML_GET", 1L, "/r/text()", buf, 4L))
+        assertEquals("#whitespace", strAt(store, "XBUF", 0))
+        assertEquals(1L, xiv(ctx, "XML_GET", 1L, "/r/text()", buf, 0L))
+        assertEquals("  ", strAt(store, "XBUF", 0))
+        // InnerText = "  "（style=1）：恒建普通 #text（dotnet 实测，与 InnerXml 相反）
+        assertEquals(1L, xiv(ctx, "XML_SET", 1L, "/r", "  ", 0L, 1L))
+        assertEquals(1L, xiv(ctx, "XML_GET", 1L, "/r/node()", buf, 4L))
+        assertEquals("#text", strAt(store, "XBUF", 0))
+        assertEquals("<r>  </r>", xsv(ctx, "XML_TOSTR", 1L))
+        // 混合内容片段（非空白文本）是 #text
+        assertEquals(1L, xiv(ctx, "XML_SET", 1L, "/r", " a ", 0L, 2L))
+        assertEquals(1L, xiv(ctx, "XML_GET", 1L, "/r/node()", buf, 4L))
+        assertEquals("#text", strAt(store, "XBUF", 0))
+    }
+
+    /** XML-FIVE X4 相邻面：给 #whitespace 节点赋非空白值按 .NET ArgumentException 折化 CodeEE。 */
+    @Test
+    fun `whitespace 节点赋非空白值折化 CodeEE`() {
+        val (ctx, store) = xmlEnv()
+        val buf = refS("XBUF")
+        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 2L, "<r/>"))
+        assertEquals(1L, xiv(ctx, "XML_SET", 2L, "/r", "  ", 0L, 2L))
+        val err = assertFailsWith<CodeEE> { xiv(ctx, "XML_SET", 2L, "/r/node()", "x", 0L, 1L) }
+        assertTrue(
+            err.message!!.contains("The string for whitespace contains an invalid character"),
+            "应带原版 ArgumentException 指纹，实际：${err.message}",
+        )
+        // 空白值照常可赋（dotnet 只拦非空白），节点仍是 #whitespace
+        assertEquals(1L, xiv(ctx, "XML_SET", 2L, "/r/node()", "\t", 0L, 1L))
+        assertEquals(1L, xiv(ctx, "XML_GET", 2L, "/r/node()", buf, 4L))
+        assertEquals("#whitespace", strAt(store, "XBUF", 0))
+    }
+
+    /**
+     * RESIDUE-BX2 R2（销账不改码）：给 `#whitespace` 节点赋**空串**的 .NET 读数已探
+     * （dotnet 8.0.425 探针 `<work-root>/residue-probe/probe-output.txt` R2b/R2c/R2e/R2f）：
+     * Value/InnerText setter 都放行——节点保持 XmlWhitespace（Name = #whitespace、
+     * text() 照选、元素 OuterXml 写出空文本段 `<r></r>`，非 `<r />`）；
+     * `InnerXml=""`（打在元素上）把含空白在内的全部子节点整段清空。
+     * 与移植现状逐项一致（isWhitespaceOnly("") = 真、空串原样写入）⇒ 只销账不改码。
+     */
+    @Test
+    fun `whitespace 节点赋空串放行且节点类型不变`() {
+        val (ctx, store) = xmlEnv()
+        val buf = refS("XBUF")
+        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 3L, "<r/>"))
+        assertEquals(1L, xiv(ctx, "XML_SET", 3L, "/r", "  ", 0L, 2L))
+        // style=0（.NET Value setter）赋空串：放行、类型不变、OuterXml 空文本段
+        assertEquals(1L, xiv(ctx, "XML_SET", 3L, "/r/node()", "", 0L, 0L))
+        assertEquals(1L, xiv(ctx, "XML_GET", 3L, "/r/node()", buf, 4L))
+        assertEquals("#whitespace", strAt(store, "XBUF", 0))
+        assertEquals("<r></r>", xsv(ctx, "XML_TOSTR", 3L))
+        // style=1（.NET InnerText setter）赋空串：同读数（探针 R2c）
+        assertEquals(1L, xiv(ctx, "XML_SET", 3L, "/r", "  ", 0L, 2L))
+        assertEquals(1L, xiv(ctx, "XML_SET", 3L, "/r/node()", "", 0L, 1L))
+        assertEquals(1L, xiv(ctx, "XML_GET", 3L, "/r/node()", buf, 4L))
+        assertEquals("#whitespace", strAt(store, "XBUF", 0))
+        // InnerXml = ""（打元素）：子节点整段清空（探针 R2e）
+        assertEquals(1L, xiv(ctx, "XML_SET", 3L, "/r", "", 0L, 2L))
+        assertEquals(0L, xiv(ctx, "XML_GET", 3L, "/r/node()", buf, 4L))
+        assertEquals("<r></r>", xsv(ctx, "XML_TOSTR", 3L))
+    }
+
+    /**
+     * XML-FIVE X2：谓词通配 `[*]` =「有子元素」、`[@*]` =「有属性」（dotnet 8.0.425 实测
+     * count>0 语义；旧实现按「名为 * 的名字测试」恒 0）。
+     */
+    @Test
+    fun `谓词通配有子元素与有属性语义`() {
+        val (ctx, store) = xmlEnv()
+        val buf = refS("XBUF")
+        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 3L, "<root><a x='1'><b/></a><a/></root>"))
+        assertEquals(1L, xiv(ctx, "XML_GET", 3L, "/root/a[*]", buf, 4L))
+        assertEquals("a", strAt(store, "XBUF", 0))
+        assertEquals(1L, xiv(ctx, "XML_GET", 3L, "/root/a[@*]", buf, 4L))
+        assertEquals("a", strAt(store, "XBUF", 0))
+        // 注释/纯文本/空元素不构成「有子元素」（dotnet 实测 0）
+        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 4L, "<root><a><!--c--></a><a>t</a><a/></root>"))
+        assertEquals(0L, xiv(ctx, "XML_GET", 4L, "/root/a[*]", buf, 4L))
+    }
+
+    /** XML-FIVE X5：属性步与属性谓词过滤 xmlns 声明（namespace 节点不属属性步）。 */
+    @Test
+    fun `属性通配过滤 xmlns 声明`() {
+        val (ctx, store) = xmlEnv()
+        val buf = refS("XBUF")
+        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 5L, "<r xmlns:p='urn:x' a='1' b='2'/>"))
+        assertEquals(2L, xiv(ctx, "XML_GET", 5L, "/r/@*", buf, 4L))
+        assertEquals("a", strAt(store, "XBUF", 0))
+        assertEquals("b", strAt(store, "XBUF", 1))
+        // 显式 @xmlns 与属性谓词同口径恒 0（dotnet 8.0.425 复探实测）
+        assertEquals(0L, xiv(ctx, "XML_GET", 5L, "/r/@xmlns", buf))
+        assertEquals(0L, xiv(ctx, "XML_GET", 5L, "/r[@xmlns]", buf))
+        // 带前缀的 @xmlns:p 走「缺 namespace manager」报错（与 X5 正交）
+        val bad = assertFailsWith<CodeEE> { xiv(ctx, "XML_GET", 5L, "/r/@xmlns:p", buf) }
+        assertTrue(
+            bad.message!!.contains("Namespace Manager or XsltContext needed"),
+            "带前缀属性步应报缺 namespace manager，实际：${bad.message}",
+        )
+        // xmlns 序列化不受影响：OuterXml 仍带声明（解析器存普通属性的面）
+        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 6L, "<r xmlns='urn:d' a='1'/>"))
+        assertTrue(xsv(ctx, "XML_TOSTR", 6L).contains("xmlns=\"urn:d\""), "声明仍要序列化")
+        // 默认 xmlns 经根通配步（无前缀名步受默认命名空间约束）+ 属性通配 = 1（dotnet 同）
+        assertEquals(1L, xiv(ctx, "XML_GET", 6L, "/*/@*", buf, 4L))
+        assertEquals("a", strAt(store, "XBUF", 0))
+    }
+
     @Test
     fun `XML 写回覆盖角色字符串变量`() {
         val (ctx, store) = xmlEnv()
@@ -315,6 +441,45 @@ class XmlMethodsTest {
         assertEquals(-1L, xiv(ctx, "XML_REMOVENODE", 4L, "/r"))
         assertEquals(-1L, xiv(ctx, "XML_REPLACE", 4L, "/r", "<a />"))
         assertEquals("", xsv(ctx, "XML_TOSTR", 4L))
+    }
+
+    /**
+     * 空文本建**空文档**，格式错仍抛 CodeEE。
+     *
+     * 2026-10-31 真机 8 份报告的现场是 `RM_リソース情報初期化`
+     * （`リソース管理/ResourceManager.ERB:50`，报告里的 `行49` 是 0 起行号）：
+     * `XML_DOCUMENT RM_XML_TEMP, LOADTEXT(RESULTS:I)`。只要 `ENUMFILES` 列出的
+     * 某个资源 XML 读成空串（解包被中断留下 0 字节文件是最常见的一条），原版
+     * `LoadXml("")` 就抛「缺少根元素」⇒ 整个标题初始化中止，玩家停在 0%，
+     * 点重试每次都死在同一行。移植侧把空/全空白文本建成空文档：后续
+     * `XML_GET_BYNAME` 命中 0 条，脚本自己跳过这一个文件，其余资源照常装载。
+     *
+     * **边界刻意留着**：非空但格式错的文本仍按原版抛 CodeEE —— 那条路才是脚本
+     * 真的写坏了，静默吞掉等于把语法错误变成「莫名其妙少了几个立绘」。
+     */
+    @Test
+    fun `XML_DOCUMENT 空文本建空文档而格式错仍抛 CodeEE`() {
+        val (ctx, _) = xmlEnv()
+        // 空串 → 建成功（1），文档在池里但无根元素
+        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 11L, ""))
+        assertEquals(1L, xiv(ctx, "XML_EXIST", 11L))
+        // 空文档序列化成空串（XmlDocument 无声明无子节点），不是抛错
+        assertEquals("", xsv(ctx, "XML_TOSTR", 11L))
+        // 脚本后续的两次查询都命中 0 条：`/sprites/*` 计数 0 ⇒ FOR J 不进，
+        // 逐项取 OuterXml 那条也不会被调到
+        assertEquals(0L, xiv(ctx, "XML_GET", 11L, "/sprites/*", refS("XBUF")))
+        assertEquals(0L, xiv(ctx, "XML_GET", 11L, "/sprites/*[1]", refS("XBUF"), 3L))
+        // 只剩换行/空白（LOADTEXT 剥掉 \r 后可能留下的形态）同口径
+        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 12L, " \n\t\r\n "))
+        assertEquals(0L, xiv(ctx, "XML_GET_BYNAME", "12", "/sprites/*", refS("XBUF")))
+        // 非空但格式错：原版 LoadXml 抛 XmlException → CodeEE（XmlGetError 文案）
+        val bad = assertFailsWith<CodeEE> { xiv(ctx, "XML_DOCUMENT", 13L, "<broken") }
+        assertTrue(
+            bad.message!!.startsWith("XML_GET函数:") && bad.message!!.contains("解析错误"),
+            "格式错必须仍按原版抛（文案前缀 XML_GET函数:），实际：${bad.message}",
+        )
+        // 抛错不留半成品：13 号文档不在池里
+        assertEquals(0L, xiv(ctx, "XML_EXIST", 13L))
     }
 
     @Test

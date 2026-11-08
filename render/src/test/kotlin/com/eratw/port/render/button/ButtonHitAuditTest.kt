@@ -6,6 +6,7 @@ import com.eratw.port.render.RenderLine
 import com.eratw.port.render.RunKind
 import com.eratw.port.render.TextRun
 import com.eratw.port.render.adapter.ConsoleAdapter
+import com.eratw.port.render.displaylist.InlineGraphic
 import com.eratw.port.render.grid.LineFolder
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -21,7 +22,7 @@ import kotlin.test.assertTrue
  * |---|---|---|---|
  * | 1 | `EmueraConsole.cs:2358-2361` 逐行、**倒序**遍历 `Buttons`，`PointX > x \|\| PointX + Width < x` 跳过 | [ButtonLayer.hit] 的 `col in colStart until colEnd` | 闭区间 → 半开区间（ADR-003，见第 2 条）；倒序在互不重叠时无差别 |
  * | 2 | 同上：`x == PointX + Width` 仍判命中（只有 `<` 才跳过） | 右端开区间，`col == colEnd` 不命中 | **有意差异**：整数格没有「右端像素」；相邻按钮共格时本仓归右钮，原版也归右钮（倒序先查右钮），故仅末钮右沿多一格差异 |
- * | 3 | `EmueraConsole.cs:2368` 段内还要比 `Top/Bottom`（行内纵向范围） | 本层按整行判定，无纵向子范围 | 一致（文本段 `Top/Bottom`，`AConsoleColoredPart` 恒为整行；立绘段 `ConsoleDivPart` 本波不支持） |
+ * | 3 | `EmueraConsole.cs:2368` 段内还要比 `Top/Bottom`（行内纵向范围） | **IMG-A4 翻案（2026-11-06）**：图形段入表时同记行内纵向门，[ButtonLayer.hitInline] 按**图元节点**的 `[Top, Bottom]` 闭区间判（立绘 `ConsoleImagePart.cs:31-33,81,93`、矩形件 `ConsoleRectangleShapePart.cs:19-21,34-35`、Space/文本缺省带 `AConsoleDisplayNode.cs:29-31`）；无纵向信息的 [ButtonLayer.hit] 维持整行口径（调用方切换前行为逐位不变）。旧注「文本段 `AConsoleColoredPart` 恒为整行」有误：缺省带是 `[0, FontSize]`，语料 `LINE HEIGHT == FONT SIZE == 18`（`emuera.config:22-23`）下才等价整行 —— 见用例「立绘图段的行内纵向矩形」 |
  * | 4 | `EmueraConsole.cs:2377-2381` 非按钮段照样命中（只为测 tooltip），`IsButton` 才产出候选 | 只有 `RunKind.BUTTON && buttonValue != null` 入表 | 一致（`value == null` 的非按钮段不产候选，`EmueraConsole.cs:2439` 要求 `IsButton`） |
  * | 5 | `ConsoleButtonString.cs:300-304` `Width = 末段右沿 - 首段左沿` | 一条 run 的 `Grid.cells` 就是一个区间；跨行时每行各一条 | 一致（`ConsoleButtonString.cs:187-255` + `PrintStringBuffer.cs:224-235`） |
  * | 6 | `ConsoleButtonString.cs:157-163` `LockPointX` 只被 HTML `pos` 用 | 本层不建模绝对定位 | 一致（HTML `pos` 在 mini-HTML 子集外，`MiniHtml` 命中即抛 UNSUPPORTED_TAG） |
@@ -154,5 +155,105 @@ class ButtonHitAuditTest {
         assertEquals(0, layer.hit(0, 0, ButtonAcceptance.STR)?.colStart)
         assertNull(layer.hit(0, 0, ButtonAcceptance.INT))
         assertEquals(1, layer.all()[0].colEnd)
+    }
+
+    // ===== IMG-A4 I2：行内纵向命中（EmueraConsole.cs:2368 的 Top/Bottom 半边） =====
+
+    /** 图段按钮 run（text 恒空串，graphic 带像素盒折算的格数）。 */
+    private fun imgButton(
+        widthCells: Int,
+        yOffsetPx: Int,
+        heightPx: Int,
+        v: Long,
+        id: Int = 7,
+    ) = TextRun(
+        "",
+        fore = 0xFFFFFF,
+        back = null,
+        styleMask = 0,
+        fontName = "msgothic",
+        kind = RunKind.IMAGE,
+        buttonValue = v,
+        buttonId = id,
+        graphic = InlineGraphic.Image("standee", widthPx = widthCells * 9, heightPx = heightPx, yOffsetPx = yOffsetPx, widthCells = widthCells),
+    )
+
+    /** 第 3 条（IMG-A4 翻案）：半行高立绘 `y∈[9,18]` —— 盒内闭区间命中、盒外不命中、旧口径 `hit` 仍整行。 */
+    @Test
+    fun `立绘图段的行内纵向矩形`() {
+        val row = DisplayRow(runs = listOf(imgButton(widthCells = 3, yOffsetPx = 9, heightPx = 9, v = 1L)), cells = 3, isLogicalLine = true, isLineEnd = true)
+        val layer = ButtonLayer()
+        layer.attach(listOf(row))
+        val t = layer.all().single()
+        assertEquals(0, t.colStart)
+        assertEquals(3, t.colEnd)
+        // 闭区间两端（:2368 的 < > 跳过判 ⇒ y ∈ [Top, Bottom] 都算命中；:2420 逃逸支同形）
+        assertEquals(1L, layer.hitInline(0, 1, 9f, 18)?.value)
+        assertEquals(1L, layer.hitInline(0, 1, 18f, 18)?.value)
+        // 盒外（本行其余像素）不命中 —— 「按整行」的翻案点
+        assertNull(layer.hitInline(0, 1, 0f, 18))
+        assertNull(layer.hitInline(0, 1, 8.9f, 18))
+        // 无纵向信息的旧口径（hit）仍整行可点：调用方（CanvasConsoleView）切换前行为逐位不变
+        assertEquals(1L, layer.hit(0, 1)?.value)
+    }
+
+    /** 第 3 条：矩形件纵盒下沿 = `Math.Max(FontSize, y+h)`（`ConsoleRectangleShapePart.cs:35`）⇒ 盖住整行字。 */
+    @Test
+    fun `矩形件纵盒至少盖一行字`() {
+        val rect = TextRun(
+            "",
+            fore = 0xFFFFFF,
+            back = null,
+            styleMask = 0,
+            fontName = "msgothic",
+            kind = RunKind.SHAPE,
+            buttonValue = "s",
+            buttonId = 3,
+            graphic = InlineGraphic.Rect(xOffsetPx = 0, yOffsetPx = 0, widthPx = 36, heightPx = 2, colorArgb = 0xFF0000, widthCells = 4),
+        )
+        val row = DisplayRow(runs = listOf(rect), cells = 4, isLogicalLine = true, isLineEnd = true)
+        val layer = ButtonLayer()
+        layer.attach(listOf(row))
+        // bottom = max(18, 0+2) = 18 ⇒ 行内任何 y 都命中
+        assertEquals("s", layer.hitInline(0, 0, 0f, 18)?.value)
+        assertEquals("s", layer.hitInline(0, 0, 17.9f, 18)?.value)
+        // 负 ypos 的上沿照抄 `Math.Min(0, rect.Y)`（:34）
+        val shifted = DisplayRow(
+            runs = listOf(
+                TextRun(
+                    "", fore = 0xFFFFFF, back = null, styleMask = 0, fontName = "msgothic",
+                    kind = RunKind.SHAPE, buttonValue = "t", buttonId = 4,
+                    graphic = InlineGraphic.Rect(xOffsetPx = 0, yOffsetPx = -5, widthPx = 36, heightPx = 30, colorArgb = 0xFF0000, widthCells = 4),
+                ),
+            ),
+            cells = 4,
+            isLogicalLine = true,
+            isLineEnd = true,
+        )
+        val layer2 = ButtonLayer()
+        layer2.attach(listOf(shifted))
+        assertNull(layer2.hitInline(0, 0, 25.1f, 18)) // bottom = max(18, 25) = 25 ⇒ 25.1 出盒
+        assertEquals("t", layer2.hitInline(0, 0, 25f, 18)?.value)
+    }
+
+    /** 第 3 条：混排按钮 —— 文本列无门（整行带），图段列按节点盒加严；同源按钮并成一条命中区。 */
+    @Test
+    fun `混排按钮文本列整行可点图段列按纵盒判`() {
+        val textPart = TextRun(
+            "OK", fore = 0xFFFFFF, back = null, styleMask = 0, fontName = "msgothic",
+            kind = RunKind.BUTTON, buttonValue = 5L, buttonId = 9,
+        )
+        val imgPart = imgButton(widthCells = 2, yOffsetPx = 0, heightPx = 9, v = 5L, id = 9)
+        val row = DisplayRow(runs = listOf(textPart, imgPart), cells = 4, isLogicalLine = true, isLineEnd = true)
+        val layer = ButtonLayer()
+        layer.attach(listOf(row))
+        val t = layer.all().single()
+        assertEquals(0, t.colStart)
+        assertEquals(4, t.colEnd) // 同源（buttonId=9）文本段(2格) + 图段(2格)并成一条（ConsoleButtonString.cs:292-303）
+        // 文本列（0..1）：无门 —— 原版文本节点缺省带 [0, FontSize]，语料口径下 = 整行
+        assertEquals(5L, layer.hitInline(0, 0, 17f, 18)?.value)
+        // 图段列（2..3）：y 出了 [0, 9] 不命中
+        assertEquals(5L, layer.hitInline(0, 2, 5f, 18)?.value)
+        assertNull(layer.hitInline(0, 2, 12f, 18))
     }
 }

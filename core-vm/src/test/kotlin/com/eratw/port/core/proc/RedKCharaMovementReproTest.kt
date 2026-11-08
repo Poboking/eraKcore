@@ -14,6 +14,7 @@ import kotlin.test.Test
 import kotlin.test.assertTrue
 import kotlin.test.fail
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.Tag
 
 /**
  * 红 K（GET_MAPID-SPIN）回归：`CHARA_MOVEMENT` **不是死循环**，是合法重负载被 5,000,000 闸误杀。
@@ -28,13 +29,24 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
  * `FOR 1..CHARANUM` 扫三遍（语料 `DLC/GENSOKYO_MAP_FIX/幻想乡地图重修.ERB:50-92`），
  * 属合法 O(N) 扫描，与 `CHARANUM` 成正比。
  *
- * 因此闸口径必须是 [GameSession.DEFAULT_MAX_STEPS_PER_RUN]（20,000,000），
- * 与红 J 抬闸后的生产缺省同值；5,000,000 的装置缺省（`PlayChainTest` / `BootPlayChain`）
- * 才是误报来源（已同步为生产缺省）。
+ * 因此单次调用的闸口径必须是 [GameSession.DEFAULT_MAX_STEPS_PER_RUN]（20,000,000），
+ * 与红 J 抬闸后的装置缺省同值；5,000,000 的装置缺省（`PlayChainTest` / `BootPlayChain`）
+ * 才是误报来源（已同步为装置缺省）。
+ *
+ * 2026-10-30 补充（玩家报「开地图重修插件后启动失败」）：生产闸判的不是**单次函数**，
+ * 而是**起床链整条** —— `EVENTTRAIN` 的 `WHILE` 环从当前 `TIME` 每 +30 分钟调一次
+ * `CHARA_MOVEMENT`（第 47 日 `TIME=1345` 档桌面实测：一次派发连调 **24 次**、
+ * 123,496,792 条语句 ≈ **2.90 亿条指令**）。玩家机的报告直接证明**单个段落**（未到让出点、
+ * 墙钟闸就是在这段上抛的）就能跑到 133,496,832 步仍未结束 —— 即一整条链必然远超 60 秒。
+ * 旧生产闸（60 秒墙钟）在 2.22M 指令/秒 的玩家机上只够 1.33 亿条 ⇒ 必误杀；
+ * 现生产闸 = [GameSession.PRODUCTION_MAX_STEPS_PER_RUN]（10 亿步 = 整条链的 3.4 倍），
+ * 墙钟生产恒关 [GameSession.PRODUCTION_MAX_RUN_MILLIS]（0）。
  *
  * 语料/产物由环境变量给出（`ERATW_GAMEDIR` / `ERATW_ERBC_DIR`），缺失即跳过。
  * 手工测量可用 `ERATW_REDK_CAP` 覆盖闸值。
  */
+// realArtifacts 家标记（realarttag 路 2026-11-06）：产物门控钉（ERATW_GAMEDIR + ERATW_ERBC_DIR + save03 门），供 gateRealArtifacts 圈定；判定逻辑一字不动。
+@Tag("realArtifacts")
 class RedKCharaMovementReproTest {
 
     @Test
@@ -91,6 +103,15 @@ class RedKCharaMovementReproTest {
         println(msg)
         Files.writeString(Path.of("build", "redk-steps.txt"), msg)
         assertTrue(instr in 1 until cap, "实测指令数必须落在步数闸内：$instr !in 1..<$cap")
+        // 生产判据（2026-10-30）：玩家报「开地图重修后启动失败」时，撞闸的不是单次函数，
+        // 而是整条起床链 —— `EVENTTRAIN` 一次派发连调 24 次本函数（桌面实测，第 47 日
+        // TIME=1345 档，共 123,496,792 条语句 ≈ 2.90 亿条指令）。生产步数闸必须覆盖整条链。
+        val worstDayStart = instr * 24L
+        assertTrue(
+            GameSession.PRODUCTION_MAX_STEPS_PER_RUN >= worstDayStart,
+            "生产步数闸必须覆盖起床链整段：实测 $worstDayStart 指令 vs 闸 " +
+                "${GameSession.PRODUCTION_MAX_STEPS_PER_RUN}",
+        )
     }
 
     /** 反射读 `ProcessRuntime.vm.executedSteps`（本次 run 实际执行的指令数；`callFunction` 只回函数返回值）。 */

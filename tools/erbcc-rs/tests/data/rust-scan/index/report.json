@@ -1,0 +1,21 @@
+{
+  "errorGroups": [
+    {"route": "assign", "msg": "\"\u0000\"は代入演算子として認識できません", "count": 5, "examples": [{"file": "a.ERB", "line": 0}, {"file": "c.ERB", "line": 0}, {"file": "d.ERB", "line": 0}, {"file": "notindexed.ERB", "line": 0}, {"file": "sub/b.ERH", "line": 0}]}
+  ],
+  "warningGroups": [
+  ],
+  "topErrorFiles": [
+    {"file": "a.ERB", "errors": 1, "warnings": 0},
+    {"file": "c.ERB", "errors": 1, "warnings": 0},
+    {"file": "d.ERB", "errors": 1, "warnings": 0},
+    {"file": "notindexed.ERB", "errors": 1, "warnings": 0},
+    {"file": "sub/b.ERH", "errors": 1, "warnings": 0}
+  ],
+  "files": [
+    {"file": "a.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 1, "logicalLines": 1, "tokens": 2, "stmtLines": 0, "errors": 1, "warnings": 0, "diagnostics": [{"line": 0, "level": "ERROR", "msg": "assign|\"\u0000\"は代入演算子として認識できません"}]},
+    {"file": "c.ERB", "encoding": "Shift-JIS", "binary": false, "physicalLines": 1, "logicalLines": 1, "tokens": 1, "stmtLines": 0, "errors": 1, "warnings": 0, "diagnostics": [{"line": 0, "level": "ERROR", "msg": "assign|\"\u0000\"は代入演算子として認識できません"}]},
+    {"file": "d.ERB", "encoding": "Shift-JIS", "binary": false, "physicalLines": 1, "logicalLines": 1, "tokens": 1, "stmtLines": 0, "decodeReplacement": true, "errors": 1, "warnings": 0, "diagnostics": [{"line": 0, "level": "ERROR", "msg": "assign|\"\u0000\"は代入演算子として認識できません"}]},
+    {"file": "notindexed.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 1, "logicalLines": 1, "tokens": 2, "stmtLines": 0, "errors": 1, "warnings": 0, "diagnostics": [{"line": 0, "level": "ERROR", "msg": "assign|\"\u0000\"は代入演算子として認識できません"}]},
+    {"file": "sub/b.ERH", "encoding": "UTF-8", "binary": false, "physicalLines": 1, "logicalLines": 1, "tokens": 2, "stmtLines": 0, "decodeReplacement": true, "errors": 1, "warnings": 0, "diagnostics": [{"line": 0, "level": "ERROR", "msg": "assign|\"\u0000\"は代入演算子として認識できません"}]}
+  ]
+}

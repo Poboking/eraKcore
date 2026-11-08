@@ -71,7 +71,7 @@ class ShopWaitInputFlowTest {
         override fun afterInputComReset() {}
         override fun afterSourceCheckReset() {}
         override fun trainName(code: Int): String? = null
-        override fun trainNameCount(): Int? = null
+        override fun trainNameCount(): Int = 0
         override fun pendingBegin(): BeginType? = pending
         override fun takePendingBegin(): BeginType? = pending.also { pending = null }
         override fun clearPendingBegin() {
@@ -115,6 +115,9 @@ class ShopWaitInputFlowTest {
         var shopInput: Long? = null
         var shopInputCalls = 0
         val written = ArrayList<String>()
+        val deletedCounts = ArrayList<Int>()
+        val temporaryLines = ArrayList<String>()
+        var generationMarks = 0
 
         override fun awaitShopInput(): Long? {
             shopInputCalls++
@@ -123,6 +126,18 @@ class ShopWaitInputFlowTest {
 
         override fun writeLine(text: String) {
             written += text
+        }
+
+        override fun deleteLine(count: Int) {
+            deletedCounts += count
+        }
+
+        override fun printTemporaryLine(text: String) {
+            temporaryLines += text
+        }
+
+        override fun markGenerationUpdated() {
+            generationMarks++
         }
     }
 
@@ -249,7 +264,14 @@ class ShopWaitInputFlowTest {
         // :2632 endCallShowShop() → :2605-2606 = 回 Shop_WaitInput（不重跑 SHOW_SHOP）。
         assertEquals(SystemStateCode.Shop_WaitInput, flow.state, "Process.cs:2632 / :2603-2607")
         SystemStateGraph.requireTransition(SystemStateCode.Shop_WaitInput, flow.state)
-        assertEquals(listOf("售罄"), host.written, "Lang.Error.OutOfStock（Lang.cs:3154 / zhs:743）")
+        assertEquals(listOf(1), host.deletedCounts, "Process.cs:2629 deleteLine(1)（删键入回显行，OBS2-L1 换道）")
+        assertEquals(
+            listOf("售罄"),
+            host.temporaryLines,
+            "Process.cs:2630 PrintTemporaryLine（Lang.cs:3154 / zhs:743）走临时行通道",
+        )
+        assertTrue(host.written.isEmpty(), "换道后提示不再经 writeLine 落普通行")
+        assertEquals(0, host.generationMarks, "Process.cs:2609-2640 无 updatedGeneration 置位（对照 :2500），照抄不补")
         assertTrue(model.buyCalls.isEmpty(), "售罄不碰 BuyItem（:2615 在 ItemSales 真支里）")
         assertTrue(calls.calls.isEmpty(), "不派 EVENTBUY")
         assertEquals("Process.cs:2629-2632", step.evidence)
@@ -266,7 +288,14 @@ class ShopWaitInputFlowTest {
         assertEquals(StepOutcome.CONTINUE, step.outcome)
         assertEquals(SystemStateCode.Shop_WaitInput, flow.state, "Process.cs:2632 / :2603-2607")
         SystemStateGraph.requireTransition(SystemStateCode.Shop_WaitInput, flow.state)
-        assertEquals(listOf("MONEY不足"), host.written, "Lang.Error.NotEnoughMoney（Lang.cs:3150 / zhs:742）")
+        assertEquals(listOf(1), host.deletedCounts, "Process.cs:2624 deleteLine(1)（删键入回显行，OBS2-L1 换道）")
+        assertEquals(
+            listOf("MONEY不足"),
+            host.temporaryLines,
+            "Process.cs:2625 PrintTemporaryLine（Lang.cs:3150 / zhs:742）走临时行通道",
+        )
+        assertTrue(host.written.isEmpty(), "换道后提示不再经 writeLine 落普通行")
+        assertEquals(0, host.generationMarks, "同 :2629 支：原版商店支不置位（ADR-005）")
         assertEquals(listOf(1), model.salesCalls, "Process.cs:2613 在售")
         assertEquals(listOf(1), model.buyCalls, "Process.cs:2615 成交失败")
         assertTrue(model.results.isEmpty(), "失败路径不写 RESULT")

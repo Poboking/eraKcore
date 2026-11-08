@@ -7,6 +7,8 @@ import com.eratw.port.core.fn.EmDataPools
 import com.eratw.port.core.fn.SaveFileKind
 import com.eratw.port.core.host.SaveLoadHandoff
 import com.eratw.port.core.sem.SystemOps
+import com.eratw.port.core.update.UpdateCheckDecision
+import com.eratw.port.core.update.UpdateCheckHost
 import com.eratw.port.core.vars.VariableStore
 
 /**
@@ -54,6 +56,16 @@ import com.eratw.port.core.vars.VariableStore
  * `core/proc/GameSession.kt:402`），实现见 [SaveFolderMigration]；`UseSaveFolder` 关时
  * 本类**一个字节都不碰**（`Config.cs:478-481` 的 else 分支不建目录）。
  * 结局同时挂进 [SaveFolderMigrationLog]（`store.aux`），宿主装配后可读。
+ *
+ * ## UPDATECHECK（本波接真）
+ *
+ * [updateCheck] 是 `UPDATECHECK` 语句的生产实现：判序与六个 RESULT 读数全部下沉在
+ * [UpdateCheckDecision]（逐行证据见那里的表），本类只做编排 —— 读 `GameBaseData` 的
+ * `url` / `versionName`（`store.registry.gameBase`，装载侧 `GameBaseLoader` 填），
+ * 网络/取流/询问/开链接四件事交给注入的 [UpdateCheckHost]。
+ * **没注入宿主时仍抛 [CodeEE]**（[SystemOps] 的「未实现」口径），注入后不会：
+ * 本语料的 `CSV/GameBase.csv` 没有 `バージョン情報URL` 行 ⇒ URL 恒空 ⇒ 前三道闸落 RESULT=3，
+ * 与原版同解（判据与单测见 `core/update/UpdateCheckStatementTest`）。
  */
 class FileSystemOps(
     private val store: VariableStore,
@@ -68,7 +80,58 @@ class FileSystemOps(
      */
     private val saveMigrationPrompt: (title: String, message: String) -> Boolean =
         SaveFolderMigration.AUTO_ACCEPT,
+    /**
+     * `UPDATECHECK` 的宿主能力面（网络 / 取流 / 询问 / 开链接），见 [UpdateCheckHost]。
+     *
+     * 为什么是 `var` 而不是只有构造参数：本类的**构造点在 `GameSession` 第 8 步**
+     * （`core/proc/GameSession.kt:721`），而 `GameSession` 不在本路的所有权面上
+     * （CONTRACT-UPDATE §2 的 U-F 行）—— 于是生产装配走「会话建好，宿主立刻补上」：
+     * `GameHost` 在 `assembleSession` 里把实现赋给 `runtime.execContext.systemOps`
+     * 上这个属性。写入方是装配线程（真机 = VM 线程，且早于任何脚本语句），
+     * 读入方是同一个 VM 线程，与 `ExecContext.graphics` / `timer` 的「`var` + 单线程写」
+     * 同一条纪律；语句层每次现读，所以换实现与构造期传入逐次执行等价。
+     *
+     * null（缺省）= 未接线 ⇒ `UPDATECHECK` 抛 [CodeEE]，与 [SystemOps.updateCheck] 的旧口径一致；
+     * 装置（纯 JVM 单测）传假体，真机传 `platform/update` 的取流件 + `GameHost` 的询问件。
+     */
+    var updateCheckHost: UpdateCheckHost? = null,
 ) : SystemOps {
+
+    /**
+     * 堆贴顶时向宿主求援：回收可释放的图形缓冲，返回**实际释放的字节数**（0 = 没腾出东西）。
+     *
+     * ## 为什么需要这条缝
+     *
+     * 2026-11-02 玩家反馈「游玩时间太久了，可能导致存档失败，重启游戏后又正常了」
+     * （eratw 4.980 / 0.2.35 / **没开**「即时存档」插件）。三条现象指向的机制是
+     * **堆随时间累积**，不是存档本身：
+     * - `aa5a956c` 的设备实证（HONOR ALI-AN00 / 0.2.35）：启动 BeginFlow 建 657 张 G_ID、
+     *   **167 MiB 像素驻留**，95 秒长页一路顶到 512 MiB 堆 OOM —— 越玩越满；
+     * - 存档要**一次性**分配「角色/变量对象图 + 完整 payload（实测 560 KB）+ 压缩副本」
+     *   （[SaveCapture.normal] → `SaveCodec.write` → [SaveFormat.write] 的四份并存），
+     *   堆在 90%+ 时这一笔分不出来；
+     * - `OutOfMemoryError` 是 `Error`，原版口径的 `catch (Throwable) { false }` 会把它和
+     *   普通 IO 失败混成同一个 `false` ⇒ 屏上只剩
+     *   `SAVEDATA命令在存档时发生了意料之外的错误`；
+     * - 重启清堆 ⇒ 立刻恢复，与「存储满 / 权限 / 目录口径」那类问题（上一轮修的）不同。
+     *
+     * ## 契约
+     *
+     * - `urgent = false`（**存档前预防档**）：每次 [saveData] 开头调用一次。实现方**自己判水位**
+     *   （建议 ≥90% 才动手），水位不高就返回 0 —— 正常游玩零影响，不能每存一次档都收画面；
+     * - `urgent = true`（**OOM 后求援档**）：只在已经抛过 [OutOfMemoryError] 之后调用，
+     *   实现方应**无条件**尽量腾空间，不再看水位与冷却；
+     * - 返回值 = 实际释放的字节数；**求援档返回 0 ⇒ 不重试**（再试只会再 OOM），
+     *   按原版口径返回 `false`；返回 > 0 ⇒ 重试**一次**（走同一段 `capture → encode → write`）；
+     * - 实现方允许有副作用（回收可能让脚本手里留着的中间图变空白）——
+     *   预防档靠水位把这个代价压到「本来就要出事」的时刻，求援档则接受它；
+     * - 抛异常一律当 0 处理（本类自己 catch），不许让求援把存档失败升级成崩溃。
+     *
+     * null（缺省）= 未接线（纯单测 / erbcc 自检 / 装置传了别的 `systemOps`）⇒ 行为与
+     * 本条补丁之前逐字相同：一次失败、留痕、返回 false。生产由 `GameHost` 在会话装配后
+     * 补上（与 [updateCheckHost] 同一条「`var` + 装配线程单写」纪律）。
+     */
+    var reclaimMemory: ((urgent: Boolean) -> Long)? = null
 
     /**
      * 构造期旧档迁移的结局（SAVE-01）。口径与出口逐条见 [SaveFolderMigration]：
@@ -99,14 +162,182 @@ class FileSystemOps(
     // SAVEDATA / LOADDATA / DELDATA
     // ------------------------------------------------------------------
 
-    /** [SystemOps.saveData]：false = 原版 `SaveTo` 的失败返回（语句层打印错误行）。 */
-    override fun saveData(no: Int, text: String): Boolean = try {
+    /**
+     * [SystemOps.saveData]：false = 原版 `SaveTo` 的失败返回（语句层打印错误行）。
+     *
+     * **OOM 单独摘出来**（2026-11-02 玩家「玩久了存档失败、重启就好」）：`OutOfMemoryError`
+     * 是 `Error`，若只留 `catch (Throwable)` 就和普通 IO 失败糊成同一个 `false`，屏上只剩
+     * 一句「意料之外的错误」。这里先接住它 → 向宿主求援回收 → 重试一次（见 [reclaimMemory]）；
+     * 求援腾不出空间才按失败收口。非 OOM 的异常路径与改动前**逐字相同**。
+     */
+    override fun saveData(no: Int, text: String): Boolean {
+        val path = config.normalPath(no)
+        // 预防档：堆已经很高就先腾一次，避免下面直接撞 OOM。
+        // 水位由实现方判（钩子返回 0 = 没动手），所以正常存档不受影响。
+        try {
+            reclaimMemory?.invoke(false)
+        } catch (_: Throwable) {
+            // 预防档失败不影响存档本身：下面照常走，真失败还有求援档兜。
+        }
+        // 阶段标记只为留痕（见 SaveDiagnostics 的类文档）：原版把这一段整个吞成 false，
+        // 玩家报「不能覆盖旧存档」时无法区分「抓变量池失败 / 序列化失败 / 落盘失败」。
+        var stage = "capture"
+        try {
+            return captureAndWrite(no, text, path) { stage = it }
+        } catch (e: OutOfMemoryError) {
+            // 首试 stage 一并带过去：encode/write 段的 OOM 留痕若恒标 capture(oom)，
+            // 会把排障引向「抓变量池」而真凶在序列化/落盘（2026-11-02 审查修正）。
+            return retryAfterOom(no, text, path, e, stage)
+        } catch (e: Throwable) {
+            // 原版 catch (Exception) { return false; }（VariableEvaluator.cs:2666-2669）
+            SaveDiagnostics.report("SAVEDATA", path, stage, e, saveDirContext())
+            return false
+        }
+    }
+
+    /**
+     * 抓变量池 → 序列化 → 落盘，三段逐个报给 [mark]（留痕用）。
+     *
+     * 抽成单独一段是为了让 OOM 重试**走同一份实现**：重试若另写一遍，两条路迟早分叉。
+     */
+    private fun captureAndWrite(no: Int, text: String, path: String, mark: (String) -> Unit): Boolean {
+        mark("capture")
         val data = SaveCapture.normal(store, text, compressed = compressed(), emData = emSets.save)
-        val bytes = SaveCodec.write(data, store.registry, config)
-        io.write(config.normalPath(no), bytes)
-    } catch (_: Throwable) {
-        // 原版 catch (Exception) { return false; }（VariableEvaluator.cs:2666-2669）
+        mark("encode")
+        // 流式落盘（OOM-B，2026-11-08）：payload 物化后，16 字节头 + GZip 直接写进目标文件
+        // （生产 = 临时文件），不再生成「gzip 副本 + 容器 BAOS + 终拷贝」三份。
+        // 首个字节真正开写才切 write 段（见 [StageMarkingOutputStream]）：encodePayload 就
+        // 贴顶的 OOM 仍记在 encode，落盘侧贴顶才记 write。
+        return io.write(path) { out ->
+            SaveCodec.writeTo(data, store.registry, config, StageMarkingOutputStream(out) { mark("write") })
+        }
+    }
+
+    /**
+     * 首个字节真正写进 [out] 时把 stage 切到 write（OOM-B 流式口）。
+     *
+     * 流式写把「encodePayload 物化」与「落盘」挤进了同一次 [SaveFileIo.write] 调用；
+     * [com.eratw.port.core.data.save.SaveFormat.writeTo] 的字节在 payload 编完之后才开写，
+     * 所以「第一次 write」≈ encode 段结束。丢了这层标记，encode/write 两段会糊成一段，
+     * 排障分不清是序列化还是落盘贴顶（`retryAfterOom` 的首差 stage 依赖它）。
+     */
+    private class StageMarkingOutputStream(
+        private val out: java.io.OutputStream,
+        private val onFirstWrite: () -> Unit,
+    ) : java.io.OutputStream() {
+        private var marked = false
+
+        private fun beforeWrite() {
+            if (marked) return
+            marked = true
+            onFirstWrite()
+        }
+
+        override fun write(b: Int) {
+            beforeWrite()
+            out.write(b)
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            beforeWrite()
+            out.write(b, off, len)
+        }
+
+        override fun flush() = out.flush()
+    }
+
+    /**
+     * 全局档 / 角色档的落盘：把 [SaveFileIo.write] 现在会**上抛**的 `OutOfMemoryError` 折回
+     * 「写失败」，这两条链的屏上文案与判据因此与改动前逐字相同。
+     *
+     * 为什么普通档 [captureAndWrite] 不这样：`SAVEDATA` 外面套着 [retryAfterOom] 的求援重试
+     * （提交 0452e8dd），那条链只认得从 `io.write` **抛出**的 OOM；写入阶段的 OOM 若在这里
+     * 静默成 false，玩家腾不出内存就只能看着好档被截断（`SaveFileIo` 的退路先截断再写）。
+     */
+    private fun writeTreatOomAsFailure(path: String, bytes: ByteArray): Boolean = try {
+        io.write(path, bytes)
+    } catch (_: OutOfMemoryError) {
         false
+    }
+
+    /**
+     * 堆贴顶后的补救：向宿主求援回收可释放的图形缓冲，腾出空间就**重试一次**存档。
+     *
+     * 判据与取舍：
+     * - 只跑在 [OutOfMemoryError] 之后 ⇒ 正常游玩零影响，回收的副作用（脚本手里的中间图
+     *   可能变空白）只在「本来就要存不上」的时刻兑现；
+     * - 回收量 0（未接线 / 无可回收项）⇒ **不重试**：再试一次只会再 OOM，白受一次罪；
+     * - 重试再失败 ⇒ 留痕后按原版口径返回 false，不再循环（避免 OOM 死循环）。
+     *
+     * 留痕次序是「先回收、后写日志」：OOM 现场拼字符串/取栈本身也要内存，
+     * 等腾出空间再写才不会把「存档失败」升级成「留痕也失败」。
+     */
+    private fun retryAfterOom(no: Int, text: String, path: String, first: OutOfMemoryError, firstStage: String): Boolean {
+        val reclaimed = try {
+            reclaimMemory?.invoke(true) ?: 0L
+        } catch (_: Throwable) {
+            0L
+        }
+        SaveDiagnostics.note(
+            "SAVEDATA",
+            path,
+            "堆贴顶(OutOfMemoryError) 已回收=${reclaimed / 1024}KiB" +
+                if (reclaimed > 0L) "，重试一次" else "，不重试",
+        )
+        if (reclaimed <= 0L) {
+            SaveDiagnostics.report("SAVEDATA", path, "$firstStage(oom)", first, saveDirContext())
+            return false
+        }
+        var stage = "capture(retry)"
+        return try {
+            captureAndWrite(no, text, path) { stage = it }
+        } catch (e: OutOfMemoryError) {
+            // 重试又贴顶：不再循环，按失败收口（再来一次也只是再 OOM）。
+            SaveDiagnostics.report("SAVEDATA", path, "retry(oom)", e, saveDirContext())
+            false
+        } catch (e: Throwable) {
+            SaveDiagnostics.report("SAVEDATA", path, stage, e, saveDirContext())
+            false
+        }
+    }
+
+    /**
+     * 存档目录的现场快照（诊断用，只在 [saveData] 失败时取）。
+     *
+     * 为什么要把目录清单也打出来：玩家报的「不能覆盖旧存档」在桌面（JVM）上复现不出来
+     * （同一份语料 + 同一份存档，覆盖 / 新建 / 删档三条链全绿，见
+     * `PluginSaveSlotFlowTest`），分叉只可能在 Android 侧的落盘。现场最需要的三件事是
+     * 「`SavDir` 到底解析到哪个目录 / 该目录在不在 / 里面已经有谁」，这三条拿到就能把
+     * 「目录口径不一致」与「写失败」区分开，而不必让玩家再复现一次。
+     *
+     * 只报**相对**信息（目录名 + 文件名 + 体积），不报绝对路径：错误报告与 logcat 都可能
+     * 被玩家贴到公开场合，`/data/user/0/<包名>/...` 没有诊断价值。
+     */
+    private fun saveDirContext(): String = try {
+        describeSaveDir()
+    } catch (_: Throwable) {
+        // 本函数跑在**失败的 catch 块里**，其中就包括 OOM：列目录与字符串拼接都要分配内存，
+        // 在这里再抛一次会把「存档失败」升级成「进程崩溃」，比没有现场更糟。
+        "现场不可用"
+    }
+
+    private fun describeSaveDir(): String {
+        val rooted = io as? RootedSaveFileIo ?: return "io=${io.javaClass.simpleName}（无目录面）"
+        val dir = if (config.useSaveFolder) rooted.rootedPath.resolve(SaveFolderMigration.SAV_FOLDER)
+        else rooted.rootedPath
+        val label = if (config.useSaveFolder) "sav/" else "<root>"
+        val entries = runCatching {
+            if (!java.nio.file.Files.isDirectory(dir)) emptyList()
+            else java.nio.file.Files.list(dir).use { s ->
+                s.map { p ->
+                    val size = runCatching { java.nio.file.Files.size(p) }.getOrNull()
+                    "${p.fileName}(${size ?: "?"})"
+                }.sorted().toList()
+            }
+        }.getOrElse { listOf("<列目录失败 ${it.javaClass.simpleName}>") }
+        return "dir=$label 存在=${java.nio.file.Files.isDirectory(dir)} " +
+            "binary=${config.systemSaveInBinary} zip=${config.zipSaveData} " +
+            "条目=${entries.ifEmpty { listOf("(空)") }}"
     }
 
     /**
@@ -131,12 +362,12 @@ class FileSystemOps(
         store.resetValues()
         store.resetLocalValues()
         val data = try {
-            SaveCodec.read(bytes, store.registry, SaveFileKind.NORMAL, ::isKnownSaveKey)
+            SaveCodec.read(bytes, store.registry, SaveFileKind.NORMAL, ::isKnownSaveKey, config)
         } catch (_: Exception) {
             throw CodeEE(MES_LOAD_CORRUPTED)
         }
         try {
-            data.applyTo(store, restoreCharacters = true, setLastLoad = true)
+            data.applyTo(store, restoreCharacters = true, setLastLoad = true, floatSink = store::writeFloat)
             // LoadVariableBinary 的第二段（EM 条目，:4095-4124）；接受集 = Save* ∪ Global*。
             EmDataPools.restore(store, data.emData, emSets.loadAccept)
         } catch (_: Throwable) {
@@ -171,7 +402,7 @@ class FileSystemOps(
         } catch (_: Throwable) {
             throw CodeEE(MES_SAVE_GLOBAL)
         }
-        if (!io.write(config.globalPath(), bytes)) throw CodeEE(MES_SAVE_GLOBAL)
+        if (!writeTreatOomAsFailure(config.globalPath(), bytes)) throw CodeEE(MES_SAVE_GLOBAL)
     }
 
     /** [SystemOps.loadGlobal]：true = RESULT 1。spec: VariableEvaluator.cs:2513-2589 */
@@ -186,13 +417,18 @@ class FileSystemOps(
         )
         if (probe.state != EraDataState.OK) return false
         val data = try {
-            SaveCodec.read(bytes, store.registry, SaveFileKind.GLOBAL, ::isKnownSaveKey)
+            SaveCodec.read(bytes, store.registry, SaveFileKind.GLOBAL, ::isKnownSaveKey, config)
         } catch (_: Throwable) {
             return false
         }
         if (data.fileType != SaveFileKind.GLOBAL) return false
         return try {
-            data.applyTo(store, restoreCharacters = false, setLastLoad = false)
+            data.applyTo(
+                store,
+                restoreCharacters = false,
+                setLastLoad = false,
+                floatSink = store::writeFloat,
+            )
             // LoadFromStreamBinary 的第二段（EM 条目，:2547 → :4095-4124）
             EmDataPools.restore(store, data.emData, emSets.loadAccept)
             true
@@ -231,7 +467,7 @@ class FileSystemOps(
         // 原版 SaveChara 只有 try/finally、**不 catch**（VariableEvaluator.cs:2252-2283）：
         // 写盘失败会以 SystemException 冒泡，绝不能被当成成功。本层 [SaveFileIo.write]
         // 把失败压成 false，故在这里还原成可诊断错误（带目标路径）。
-        if (!io.write(path, bytes)) throw CodeEE(MES_SAVE_CHARA.replace("{0}", path))
+        if (!writeTreatOomAsFailure(path, bytes)) throw CodeEE(MES_SAVE_CHARA.replace("{0}", path))
     }
 
     /**
@@ -266,6 +502,80 @@ class FileSystemOps(
         if (CharaFileIO.load(bytes, store, scriptVersionDefined())) {
             store.writeInt(RESULT_VAR, longArrayOf(0L), 1L) // :2316
         }
+    }
+
+    // ------------------------------------------------------------------
+    // UPDATECHECK（决策表在 core/update/UpdateCheckDecision.kt，本类只编排）
+    // ------------------------------------------------------------------
+
+    /**
+     * [SystemOps.updateCheck]。spec: `FunctionIdentifier.cs:2757-2839`（逐行判序见
+     * [UpdateCheckDecision] 的表格）。
+     *
+     * 编排 = 原版的方法体形状，一次不落：
+     * 1. `:2767-2783` 三道纯闸（配置禁令 → 网络 → URL 判空）由 [UpdateCheckDecision.precheck] 判，
+     *    **未放行时一个请求都不发**（原版 `WebClient` 在 `:2778` 只是 new 对象，`OpenRead` 在 `:2786`）；
+     *    禁令为真时连网络探针都不按（原版 `:2769` 先 `return`，`:2772` 在它之后）；
+     * 2. `:2786-2791` 取流读前两行 = [UpdateCheckHost.fetchVersionInfo]；
+     * 3. `:2792-2825` 内容判定 = [UpdateCheckDecision.afterFetch]；要问玩家才调
+     *    [UpdateCheckHost.askOpenLink]（原版 `MessageBox.Show`，`:2802`）；
+     * 4. 最终读数由一次性表 [UpdateCheckDecision.decide] 给出（与第 1/3 步同解 ——
+     *    三步都用**同一份**宿主探针读数，不重访探针）；
+     * 5. `RESULT = 2` 之后才 [UpdateCheckHost.openDownloadLink]（原版 `Process.Start`，`:2805-2809`），
+     *    打开失败按原版的 catch 把 2 改写成 3（`:2827-2832` 在写 2 之后仍能把 RESULT 覆盖）。
+     *
+     * 宿主探针抛异常一律收敛成「拿不到」，不外抛：取流抛 ⇒ `remote = null` ⇒ 3；
+     * 询问抛 ⇒ `accepted = null` ⇒ 3。与原版「任何异常 ⇒ RESULT=3」同解
+     * （`:2827-2832`、`:2834-2837`），也保证 VM 线程不会因为宿主实现炸掉整条语句链。
+     * 唯一的例外是前两道探针：原版它们排在 try 外（`try` 从 `:2784` 才开始），抛出时不进
+     * RESULT=3 那条 catch 而是整条语句报错。本编排因此**不**把 [UpdateCheckHost.forbidUpdateCheck]
+     * 与 [UpdateCheckHost.isNetworkAvailable] 包进 runCatching —— 真机上那两位的实现自带兜底
+     * （配置读不到按「禁止」=4、网卡枚举失败按「没网」=5），异常不该由 core 代它决定。
+     *
+     * @throws CodeEE 未注入 [updateCheckHost]（`SystemOps` 的「未实现」口径，仅装置/未接线场景）
+     */
+    override fun updateCheck(): Long {
+        val host = updateCheckHost ?: throw CodeEE(MES_UPDATECHECK_NO_HOST)
+        val gameBase = store.registry.gameBase
+        val url = gameBase.url
+        val forbidden = host.forbidUpdateCheck()
+        // 禁令命中时**不去按网络探针**：原版 `:2769` 的 `return` 排在 `:2772` 的
+        // `GetIsNetworkAvailable()` 之前。这里的 false 在决策表里永远不会被消费
+        // （[UpdateCheckDecision.precheck] 的第一条就是禁令 ⇒ 直接落 4），
+        // 顺序由 `UpdateCheckStatementTest.precheckAndAfterFetchArePrefixesOfTheTable` 钉住。
+        val networkAvailable = if (forbidden) false else host.isNetworkAvailable()
+        // 第 2 步：precheck 没放行就 return，取流一次都不会发生（原版 :2779-2783 排在 OpenRead 之前）。
+        val remote: UpdateCheckDecision.RemoteInfo? =
+            when (val pre = UpdateCheckDecision.precheck(forbidden, networkAvailable, url)) {
+                is UpdateCheckDecision.Precheck.Settled -> return pre.result
+                is UpdateCheckDecision.Precheck.Fetch ->
+                    runCatching { host.fetchVersionInfo(pre.updateCheckUrl) }.getOrNull()
+            }
+        val outcome = UpdateCheckDecision.afterFetch(remote, gameBase.versionName)
+        val accepted: Boolean? = when (outcome) {
+            is UpdateCheckDecision.FetchOutcome.Settled -> null // 这一步不需要玩家表态
+            is UpdateCheckDecision.FetchOutcome.Ask -> runCatching {
+                host.askOpenLink(
+                    UpdateCheckDecision.ASK_TITLE,
+                    UpdateCheckDecision.askMessage(outcome.newVersionName, outcome.downloadUrl),
+                )
+            }.getOrNull()
+        }
+        val result = UpdateCheckDecision.decide(
+            forbidUpdateCheck = forbidden,
+            networkAvailable = networkAvailable,
+            updateCheckUrl = url,
+            remote = remote,
+            localVersionName = gameBase.versionName,
+            userAccepted = accepted,
+        )
+        if (result == UpdateCheckDecision.RESULT_OPENED && outcome is UpdateCheckDecision.FetchOutcome.Ask) {
+            // 打开失败 ⇒ 3（原版 :2804 先写 2、:2805-2809 的 Process.Start 抛出后被 :2827-2832 的
+            // catch 覆盖成 3 —— RESULT 是活字段，写过的值不作数）。
+            return runCatching { host.openDownloadLink(outcome.downloadUrl) }
+                .fold(onSuccess = { UpdateCheckDecision.RESULT_OPENED }, onFailure = { UpdateCheckDecision.RESULT_ERROR })
+        }
+        return result
     }
 
     // ------------------------------------------------------------------
@@ -308,6 +618,16 @@ class FileSystemOps(
 
         /** `Lang.Error.DelReadOnlyFile`（lang/emuera.zhs.xml:227，`{0}` = 路径）。 */
         const val MES_DEL_READONLY: String = "无法删除指定的只读文件\"{0}\""
+
+        /**
+         * `UPDATECHECK` 在**宿主未接线**时的报错文案（移植侧自定义，不是原版 Lang 条目）。
+         *
+         * 原版没有这条：它的取流/弹框/开链接都写在语句方法体里（`FunctionIdentifier.cs:2786-2809`），
+         * 异常一律被两个 catch 收敛成 RESULT=3（`:2827-2837`）。这条只在「装配方根本没给
+         * [UpdateCheckHost]」时出现 —— 装配缺陷不该被伪装成语义读数，所以显式报错而不是
+         * 静默落 3（接线之后本串在生产路径不可达；口径见 [SystemOps.updateCheck]）。
+         */
+        const val MES_UPDATECHECK_NO_HOST: String = "UPDATECHECK 需要宿主提供网络能力（SystemOps）"
 
         /**
          * 便捷工厂：`<gameRoot>` 落盘。

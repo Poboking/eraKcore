@@ -1,0 +1,14 @@
+# ONEINPUT：提交文本在交付前被截断到首字符（:1440-1443）。投 5 ⇒ RESULT=5。
+# 这条同时钉住 oneInput 截断位（不是先按整串解析再截断）。
+case: oneinput
+target: REPLAY_ONEINPUT
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:915-957
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1440-1443
+--- inputs
+submit 5
+--- expect-console
+START-ONEINPUT
+ONEINPUT=5
+END-ONEINPUT
+--- expect-vars
+RESULT:0 = 5

@@ -54,7 +54,9 @@ data class FontCoverage(
  * 于是同码位不同样式必然是不同位图，真机实现应整体覆盖本类。
  *
  * 每次调用都会往 [calls] 追加一条 `字体名|样式位|码元|字号` 流水（按调用顺序、不含时间与随机），
- * 单测靠它断言回退链的跳数与顺序，而不是靠实现自己回读。
+ * 单测靠它断言回退链的跳数与顺序，而不是靠实现自己回读。流水只保留最近
+ * [CALL_LOG_LIMIT] 条（它是诊断日志，不能随会话无限增长），总次数看 [callCount]，
+ * 后者逐次精确、不受封顶影响。
  *
  * @property cellMetrics 默认字号的像素 ↔ 半角格换算器（其余字号向 [metrics] 取）
  * @property fonts 字体覆盖表（字体名 → [FontCoverage]）
@@ -69,14 +71,16 @@ class StaticGlyphRaster(
 
     val fonts: Map<String, FontCoverage> = fonts.associateBy { it.name }
 
-    private val callLog: MutableList<String> = ArrayList()
+    private val callLog: ArrayDeque<String> = ArrayDeque()
+    private var callTotal: Long = 0L
 
+    /** 最近的调用流水（按调用顺序），最多 [CALL_LOG_LIMIT] 条；更早的已丢弃。 */
     val calls: List<String>
         get() = callLog.toList()
 
-    /** 调用次数（回退链断言用）。 */
+    /** 调用次数（回退链断言用）；逐次精确，不因 [calls] 封顶而丢失。 */
     val callCount: Int
-        get() = callLog.size
+        get() = if (callTotal > Int.MAX_VALUE.toLong()) Int.MAX_VALUE else callTotal.toInt()
 
     /**
      * 查表光栅化。字体未登记、码位缺字、或接了表但表里没有这一行 → null
@@ -84,6 +88,10 @@ class StaticGlyphRaster(
      */
     override fun rasterize(fontName: String, styleMask: Int, codePoint: Int, sizePx: Int): RasterizedGlyph? {
         callLog += "$fontName|$styleMask|$codePoint|$sizePx"
+        while (callLog.size > CALL_LOG_LIMIT) {
+            callLog.removeFirst()
+        }
+        callTotal++
         val coverage = fonts[fontName] ?: return null
         if (!coverage.covers(codePoint)) {
             return null
@@ -155,4 +163,12 @@ class StaticGlyphRaster(
     /** 假位图的像素值：alpha 恒 `FF`，样式位与码元各占一段，保证"不同桶不同内容"。 */
     private fun pixelOf(styleMask: Int, codePoint: Int): Int =
         (0xFF shl 24) or ((styleMask and 0xFF) shl 16) or (codePoint and 0xFFFF)
+
+    private companion object {
+        /**
+         * 调用流水保留条数上限。流水只服务于单测与诊断，不能随整场会话的每次光栅化增长；
+         * [callCount] 仍是精确计数。
+         */
+        const val CALL_LOG_LIMIT = 1024
+    }
 }

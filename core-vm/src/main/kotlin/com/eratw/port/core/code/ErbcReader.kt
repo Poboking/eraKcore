@@ -7,6 +7,7 @@ import com.eratw.port.core.code.ErbcFormat.StmtTag
 import com.eratw.port.core.code.ErbcFormat.WireEnum
 import com.eratw.port.core.expr.Binary
 import com.eratw.port.core.expr.Expr
+import com.eratw.port.core.expr.FloatLiteral
 import com.eratw.port.core.expr.FormConversion
 import com.eratw.port.core.expr.FormPart
 import com.eratw.port.core.expr.FormStringTerm
@@ -130,11 +131,19 @@ import com.eratw.port.core.stmt.WhileStmt
  */
 object ErbcReader {
 
-    /** 只读文件头（不触碰各段正文）：ERBC-B 的分片/mmap 决策入口。 */
-    fun probe(bytes: ByteArray): ErbcHeader = Decoder(bytes).header
+    /** 只读文件头（不触碰各段正文）：ERBC-B 的分片/mmap 决策入口。基线不参与文件头解析。 */
+    fun probe(bytes: ByteArray): ErbcHeader = Decoder(bytes, ProgramBase.NONE).header
 
-    /** 解出可执行 [Program]。 */
-    fun decode(bytes: ByteArray): Program = Decoder(bytes).decodeProgram()
+    /**
+     * 解出可执行 [Program]。
+     *
+     * @param base 本段在**绝对下标空间**里的起点（补丁装载期从补丁头的七个 `base-*` 字段取出，
+     *   见 [ProgramBase]）。缺省 [ProgramBase.NONE] = 全量产物口径，与不带基线的装载逐位等价。
+     *   带基线时：池按基线重灌、[Program] 六个基线原样传入，产物里仍然只有**本段**条目 ——
+     *   基线不进容器。
+     */
+    fun decode(bytes: ByteArray, base: ProgramBase = ProgramBase.NONE): Program =
+        Decoder(bytes, base).decodeProgram()
 
     /**
      * `else` 分支的操作码判定：**既是分类，也是操作码范围的单一咽喉**。
@@ -157,7 +166,8 @@ object ErbcReader {
             throw ErbcDecodeException(
                 0,
                 "操作码 $op 越出 0..${ErbcFormat.OPCODE_MAX}" +
-                    "（VM 内部 0..28 / isa 语句 29..197 / 编译器扩展 198..201 / 栈码 202..243）：字节码损坏",
+                    "（VM 内部 0..28 / isa 语句 29..197 / 编译器扩展 198..201 / 栈码 202..243 /" +
+                    " 浮点返回 244 / 运行期字符串调用 245）：字节码损坏",
             )
         }
         return op in ErbcFormat.MARKER_OPCODE_MIN..ErbcFormat.MARKER_OPCODE_MAX
@@ -173,17 +183,23 @@ object ErbcReader {
      * 会一路装进 VM，直到那条指令执行时才以裸 `IndexOutOfBoundsException` 冒出来
      * （无函数/行号，与「装载期一次扫完，运行期不再判」的口径相反）。
      *
-     * **单一真源**：`ErbcReader.Decoder.validate` 与 `loader.ErbcStream` 的校验趟是逐字
-     * 副本（见 `ErbcStream.kt` 类 KDoc），两处都调本函数 —— 否则「同一份产物、两条装载路」
-     * 会出现一档放行一档报错的判定漂移（与 [requireJumpTargets] 同一个理由）。
+     * **分类面单一真源** = [OpcodeRelocation]（specs/erbc-format.md §5.6b）：本函数不再
+     * 自己列「哪些栈码的 a 是哪个池」，只按表取 [PoolRef] 并执行装载路的处置策略
+     * （[ErbcDecodeException] + 本文案）。表里若出现常量/字符串之外的池类别，下面的
+     * 穷举 when 会当场 `error` —— 那是有意的：新类别必须先过人工裁定，不许静默跳过。
+     *
+     * **两条装载路共用**：`ErbcReader.Decoder.validate` 与 `loader.ErbcStream` 的校验趟是
+     * 逐字副本（见 `ErbcStream.kt` 类 KDoc），两处都调本函数 —— 否则「同一份产物、两条
+     * 装载路」会出现一档放行一档报错的判定漂移（与 [requireJumpTargets] 同一个理由）。
      *
      * 热路径零分配：只有 `_STK_*`（装载期判 `isStackOp` 先过一道区间比较）才会进这里，
      * 480 万条指令的扫描趟多出的就是这一次区间比较；函数体本身不分配。
      *
-     * **分工**：这里只查**池下标**（`a`）。`_STK_*_VAR_*` 的 `b`（维数）不在装载期查 ——
-     * 它不是池引用，运行期 [Vm] 的 `popIndices` 用同一个 `0..3` 合法域兜底
-     * （CodeBuilder 裸拼装的程序不经过装载校验，运行期守卫是唯一一道）。
-     * `_STK_POP_SLOT_*` 的槽由 `setInt/setStr` 的既有槽守卫兜底，同理不在装载期查。
+     * **分工**：这里只查**池下标**（`a`）。`_STK_*_VAR_*` 的 `b`（维数）与
+     * `_STK_PLUS_VAR_I` 的 `c`（±1 增量）在表里都是 [PoolRef.NONE]，不查 ——
+     * 运行期 [Vm] 的 `popIndices` 用同一个 `0..3` 合法域兜底（CodeBuilder 裸拼装的程序
+     * 不经过装载校验，运行期守卫是唯一一道）。`_STK_POP_SLOT_*` 的槽由 `setInt/setStr`
+     * 的既有槽守卫兜底，同理不在装载期查。
      */
     internal fun requireStackOpPool(
         op: Int,
@@ -192,30 +208,19 @@ object ErbcReader {
         stringCount: Int,
         pc: Int,
     ) {
-        when (op) {
-            Opcode._STK_PUSH_IMM -> {
-                if (a < 0 || a >= constantCount) {
-                    throw ErbcDecodeException(
-                        0,
-                        "pc=$pc 的 ${Opcode.nameOf(op)} 引用常量池下标 $a，越界（共 $constantCount 条）",
-                    )
-                }
-            }
-
-            Opcode._STK_PUSH_STR,
-            Opcode._STK_PUSH_VAR_I,
-            Opcode._STK_PUSH_VAR_S,
-            Opcode._STK_PLUS_VAR_I,
-            Opcode._STK_STORE_VAR_I,
-            Opcode._STK_STORE_VAR_S,
-            -> {
-                if (a < 0 || a >= stringCount) {
-                    throw ErbcDecodeException(
-                        0,
-                        "pc=$pc 的 ${Opcode.nameOf(op)} 引用字符串池下标 $a，越界（共 $stringCount 条）",
-                    )
-                }
-            }
+        val ref = OpcodeRelocation.of(op).a
+        val count = when (ref) {
+            PoolRef.NONE -> return
+            PoolRef.CONSTANT -> constantCount
+            PoolRef.STRING -> stringCount
+            PoolRef.EXPR, PoolRef.EXPR_NULLABLE, PoolRef.STATEMENT, PoolRef.FUNCTION ->
+                error("栈码 ${Opcode.nameOf(op)} 的 a 槽登记为 ${ref.poolName}：装载路尚未接这一类别")
+        }
+        if (a < 0 || a >= count) {
+            throw ErbcDecodeException(
+                0,
+                "pc=$pc 的 ${Opcode.nameOf(op)} 引用${ref.poolName}下标 $a，越界（共 $count 条）",
+            )
         }
     }
 
@@ -260,6 +265,10 @@ object ErbcReader {
                         requireJumpTarget(f.name, start, end, pc, op, pc.toLong() + 1 + program.a(pc))
                     Opcode._JUMP_IF_FALSE, Opcode._JUMP_IF_TRUE ->
                         requireJumpTarget(f.name, start, end, pc, op, pc.toLong() + 1 + program.b(pc))
+                    // 条件位融合超指令（246，MODERN-T1）：跳转偏移在 c、相对下一条指令，
+                    // 与 `_JUMP_IF_FALSE` 同一档（不覆盖就会漏掉跨函数跳的保护）。
+                    Opcode._EVAL_INT_JZ ->
+                        requireJumpTarget(f.name, start, end, pc, op, pc.toLong() + 1 + program.c(pc))
                     // 栈码的条件跳（T2-21）与 `_JUMP_IF_*` 同一档：偏移在 a、相对下一条指令。
                     // 不覆盖就会漏掉 CMP-55 要防的那件事 —— 栈码跳进**别的函数体**，
                     // 调用栈的返回点留在另一个函数里，帧模型坏掉（且只在畸形产物上偶发）。
@@ -324,7 +333,11 @@ object ErbcReader {
         }
     }
 
-    private class Decoder(private val bytes: ByteArray) {
+    private class Decoder(
+        private val bytes: ByteArray,
+        /** 本段基线（[ProgramBase.NONE] = 全量产物；池与 [Program] 都按它重灌/构造）。 */
+        private val base: ProgramBase,
+    ) {
         val header: ErbcHeader = parseHeader()
 
         fun decodeProgram(): Program {
@@ -465,33 +478,55 @@ object ErbcReader {
             }
 
             // ---- 段 7：调用点实参表（v2；缺段 ⇒ 空表 = 声明「不带」）----------------
+            // 站点 pc 是**绝对** pc（写侧按 CodeBuilder.declareCallArgs 的原值落盘），
+            // 故合法区间是本段窗口 [instructionBase, instructionBase + 本段条数)。
             val callArgs = if (header.hasSection(ErbcFormat.SECTION_CALL_ARGS)) {
-                readCallArgs(cursorAt(ErbcFormat.SECTION_CALL_ARGS), instructionCount)
+                readCallArgs(
+                    cursorAt(ErbcFormat.SECTION_CALL_ARGS),
+                    base.instructionBase,
+                    base.instructionBase + instructionCount,
+                )
             } else {
                 emptyMap()
             }
 
             // ---- 池重灌 + 下标保真校验 ----------------------------------------
-            val pool = ConstantPool()
+            // 池基线只影响「绝对下标」的起点：`add*` 返回 `base + 本池序号`，`*Count` 报绝对口径。
+            // 故漂移校验要比的是**本池序号**（`*Count - base`），比绝对口径会把基线段算成本段条目。
+            val pool = ConstantPool(
+                longBase = base.longBase,
+                stringBase = base.stringBase,
+                exprBase = base.exprBase,
+                statementBase = base.statementBase,
+            )
             for (s in strings) pool.addString(s)
             for (l in longs) pool.addLong(l)
             for (e in exprRoots) pool.addExpr(e)
             for (s in stmts) pool.addStatement(s)
-            if (pool.stringCount != strings.size) {
-                throw ErbcDecodeException(0, "字符串池重灌后下标漂移（${strings.size} → ${pool.stringCount}）")
-            }
-            if (pool.longCount != longs.size) {
-                throw ErbcDecodeException(0, "常量池重灌后下标漂移（${longs.size} → ${pool.longCount}）")
-            }
-            if (pool.exprCount != exprRoots.size) {
+            if (pool.stringCount - base.stringBase != strings.size) {
                 throw ErbcDecodeException(
                     0,
-                    "表达式池重灌后下标漂移（${exprRoots.size} → ${pool.exprCount}）：文件里有结构相等的重复表达式，" +
-                        "v1 的池下标契约要求它们本就同一条目",
+                    "字符串池重灌后下标漂移（${strings.size} → ${pool.stringCount - base.stringBase}）",
                 )
             }
-            if (pool.statementCount != stmts.size) {
-                throw ErbcDecodeException(0, "语句池重灌后下标漂移（${stmts.size} → ${pool.statementCount}）")
+            if (pool.longCount - base.longBase != longs.size) {
+                throw ErbcDecodeException(
+                    0,
+                    "常量池重灌后下标漂移（${longs.size} → ${pool.longCount - base.longBase}）",
+                )
+            }
+            if (pool.exprCount - base.exprBase != exprRoots.size) {
+                throw ErbcDecodeException(
+                    0,
+                    "表达式池重灌后下标漂移（${exprRoots.size} → ${pool.exprCount - base.exprBase}）：" +
+                        "文件里有结构相等的重复表达式，v1 的池下标契约要求它们本就同一条目",
+                )
+            }
+            if (pool.statementCount - base.statementBase != stmts.size) {
+                throw ErbcDecodeException(
+                    0,
+                    "语句池重灌后下标漂移（${stmts.size} → ${pool.statementCount - base.statementBase}）",
+                )
             }
 
             val program = Program(
@@ -507,6 +542,12 @@ object ErbcReader {
                 } else {
                     CallArgSource.ERBC_V1
                 },
+                codeBase = base.codeBase,
+                statementBase = base.statementBase,
+                stringBase = base.stringBase,
+                longBase = base.longBase,
+                exprBase = base.exprBase,
+                functionBase = base.functionBase,
             )
             validate(program, flags)
             return program
@@ -606,13 +647,20 @@ object ErbcReader {
             flags: Int,
         ) {
             if (program.functions.isEmpty()) throw ErbcDecodeException(0, "函数表为空")
+            // entryFunction 是**表内序号**（容器段 4 写的就是序号，CodeBuilder.build 已按
+            // functionBase 折回），带基线时同样是相对 `functions` 的，故这里仍按 indices 判。
             if (program.entryFunction !in program.functions.indices) {
-                throw ErbcDecodeException(0, "入口函数下标越界: ${program.entryFunction}（共 ${program.functions.size} 个）")
+                throw ErbcDecodeException(
+                    0,
+                    "入口函数下标越界: ${program.entryFunction}（共 ${program.functions.size} 个）",
+                )
             }
+            // 本段窗口：pc 是**绝对**口径，`0 until count` 会把 base 段也扫进来（越界读）。
+            val pcFrom = program.instructionBase
             val count = program.instructionCount
             val hasExpr = (flags and ErbcFormat.FLAG_HAS_EXPRESSIONS) != 0
             val hasStmt = (flags and ErbcFormat.FLAG_HAS_STATEMENTS) != 0
-            for (pc in 0 until count) {
+            for (pc in pcFrom until count) {
                 val op = program.op(pc)
                 val a = program.a(pc)
                 val b = program.b(pc)
@@ -620,7 +668,7 @@ object ErbcReader {
                     Opcode._SET_INT -> requirePool(op, b, program.constantCount, pc, "常量池")
                     Opcode._SET_STR -> requirePool(op, b, program.stringCount, pc, "字符串池")
                     Opcode._PRINT_LITERAL -> requirePool(op, a, program.stringCount, pc, "字符串池")
-                    Opcode._EVAL_INT, Opcode._EVAL_STR -> {
+                    Opcode._EVAL_INT, Opcode._EVAL_STR, Opcode._EVAL_INT_JZ -> {
                         if (!hasExpr) {
                             throw ErbcDecodeException(
                                 0,
@@ -630,9 +678,39 @@ object ErbcReader {
                         requirePool(op, a, program.exprCount, pc, "表达式池")
                     }
 
+                    // 浮点返回追加段（244）：a 是**表达式池下标**，NONE_REF = 无返回值
+                    // （分类见 [OpcodeRelocation] 的 EXPR_NULLABLE）。M2-1 前这里整条漏判：
+                    // `isStackOp(244)` 为假、marker 区间只到 197 ⇒ 零基线模块带 `_RETF`
+                    // 链接后 a 不平移，运行期就地求值 **base 段**的表达式（返回别人的值，
+                    // 装载期零报错）。哨兵不判界也不平移，与 `_RETS` 的 NONE 槽同口径。
+                    Opcode._RETF -> {
+                        if (a != ErbcFormat.NONE_REF) {
+                            if (!hasExpr) {
+                                throw ErbcDecodeException(
+                                    0,
+                                    "本文件声明不含表达式池，但 pc=$pc 的 ${Opcode.nameOf(op)} 需要表达式下标 $a",
+                                )
+                            }
+                            requirePool(op, a, program.exprCount, pc, "表达式池")
+                        }
+                    }
+
                     Opcode._CALL -> {
-                        if (a !in program.functions.indices) {
-                            throw ErbcDecodeException(0, "pc=$pc 的 _CALL 引用函数下标 $a，越界（共 ${program.functions.size} 个）")
+                        // `_CALL` 的 a 是**绝对**函数下标（CodeBuilder.functionIndex 的返回值），
+                        // 而 functions 只持有本段条目 ⇒ 折回判界分两支：
+                        // - a < functionBase：base 区段的绝对下标（补丁调用 base 公共函数，R7 主流场景，
+                        //   本段产物里没有那条记录可查）⇒ 放行，函数解析落 overlay 拼接后的 base 区段；
+                        // - a ≥ functionBase：折回 a - functionBase 查本段 functions，越界才拒。
+                        // 文案与 `ErbcStream` 的逐字副本保持一致（等价性对拍要求同一句），故这里只
+                        // 换判据不换措辞：`functions.size` 是本段条数，无基线时与绝对条数相同、判定与
+                        // 改造前的 `a !in functions.indices` 逐位相同。
+                        if (a < 0 ||
+                            (a >= program.functionBase && a - program.functionBase !in program.functions.indices)
+                        ) {
+                            throw ErbcDecodeException(
+                                0,
+                                "pc=$pc 的 _CALL 引用函数下标 $a，越界（共 ${program.functions.size} 个）",
+                            )
                         }
                     }
 
@@ -652,7 +730,9 @@ object ErbcReader {
                 }
             }
             for (f in program.functions) {
-                if (f.entryPc !in 0 until count) {
+                if (f.entryPc !in pcFrom until count) {
+                    // 文案与 `ErbcStream` 的逐字副本一致（等价性对拍）；`count` 是绝对指令数，
+                    // entryPc 也是绝对 pc，带基线时两者同处一个空间，读起来仍自洽。
                     throw ErbcDecodeException(0, "函数 ${f.name} 的 entryPc=${f.entryPc} 越界（指令数 $count）")
                 }
                 if (f.arity < 0 || f.slotCount < 0) {
@@ -670,7 +750,7 @@ object ErbcReader {
                 }
                 for (i in 0 until f.labelNames.size) {
                     val pc = f.labelPcs[i]
-                    if (pc !in 0 until count) {
+                    if (pc !in pcFrom until count) {
                         throw ErbcDecodeException(0, "函数 ${f.name} 的标签 \$${f.labelNames[i]} 的 pc=$pc 越界（指令数 $count）")
                     }
                 }
@@ -708,10 +788,17 @@ object ErbcReader {
  * 站点 pc 与实参位置都要求**严格升序**：写侧已规范化（`ErbcWriter.writeCallArgs` 排序），
  * 读侧把「顺序不合法」当成畸形而不是替它排序 —— 排序会掩盖「同一 pc 写了两份表」这种
  * 语义级损坏。`totalArgCount` 是冗余校验：与逐站求和不等即文件被截断/篡改。
+ *
+ * 站点 pc 是**绝对** pc（补丁产物里从 [pcFrom] 起），故合法区间是 `[pcFrom, pcUntil)`
+ * 而不是 `[0, 本段条数)`；无基线时两者逐位相同。
+ *
+ * @param pcFrom 合法 pc 下界（本段第一条指令的绝对 pc；全量产物 = 0）
+ * @param pcUntil 合法 pc 上界（本段绝对 pc 区间右端，不含）
  */
 private fun readCallArgs(
     cur: ErbcCursor,
-    instructionCount: Int,
+    pcFrom: Int,
+    pcUntil: Int,
 ): Map<Int, List<CallArg>> {
     val siteCount = cur.count("调用点条数", 8)
     val totalArgCount = cur.count("实参总数")
@@ -722,8 +809,9 @@ private fun readCallArgs(
     for (i in 0 until siteCount) {
         val at = cur.pos
         val pc = cur.u32()
-        if (pc < 0 || pc >= instructionCount) {
-            throw ErbcDecodeException(at, "第 $i 个调用点 pc=$pc 越界（指令数 $instructionCount）")
+        if (pc < pcFrom || pc >= pcUntil) {
+            // 文案与 `ErbcStream` 的逐字副本一致；`pcUntil - pcFrom` 就是本段条数，无基线时等于旧值。
+            throw ErbcDecodeException(at, "第 $i 个调用点 pc=$pc 越界（指令数 ${pcUntil - pcFrom}）")
         }
         if (pc <= prevPc) {
             throw ErbcDecodeException(at, "调用点 pc 未严格升序：$pc 紧跟 $prevPc（同一 pc 只能有一份实参表）")
@@ -884,6 +972,7 @@ private class RecordSource(
         val e: Expr = when (tag) {
             ExprTag.INT_LITERAL -> IntLiteral(cur.i64(), cur.i32(), cur.i32())
             ExprTag.STR_LITERAL -> StrLiteral(str(cur.u32()), cur.i32(), cur.i32())
+            ExprTag.FLOAT_LITERAL -> FloatLiteral(cur.f64(), cur.i32(), cur.i32())
             ExprTag.NULL_TERM -> NullTerm(cur.bool(), cur.i32(), cur.i32())
             ExprTag.VAR_REF -> {
                 val name = str(cur.u32())
@@ -991,6 +1080,7 @@ private class RecordSource(
     private fun operandType(wire: Int): OperandType = when (wire) {
         WireEnum.OPERAND_INT -> OperandType.INT
         WireEnum.OPERAND_STR -> OperandType.STR
+        WireEnum.OPERAND_FLOAT -> OperandType.FLOAT
         else -> throw ErbcDecodeException(0, "未知 OperandType 线值: $wire")
     }
 

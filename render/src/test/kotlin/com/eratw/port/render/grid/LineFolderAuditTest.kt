@@ -45,10 +45,12 @@ import kotlin.test.assertTrue
  * 本机 `dotnet 9.0.200` + `Encoding.GetEncoding(932)`（需 `CodePagesEncodingProvider`）实测：
  * `U+0000..U+001F` / `U+007F` / `U+0080` / `U+00A5` 各 **1 字节**（`¥` best-fit 到 `0x5C`）。
  * 该读数在 2026-10-21 由 M6-RENDER-AUDIT 的缺口清单转成本表的一部分：`CellWidth.isFullWidth`
- * 现在把这四档（共 35 个码点）算作半角 1 格，与 `:3255` 的字节数口径一致
+ * 现在把这四档（补上 `U+203E` 后共 36 个码点，W8 刀五）算作半角 1 格，与 `:3255` 的字节数口径一致
  * （逐点账在 `grid/GridWidthSingleSourceTest` 的 D 类表）。
- * 表外字（`U+203E`、`U+2016`、`U+2212`、`U+301C`）实得 1 字节是**替换回退 `?`**，与
- * [`com.eratw.port.core.host.CellWidth`] 的「表外字按全角」是同一条已登记 TODO，不属于本族新分歧。
+ * 表外字（`U+2016`、`U+2212`、`U+301C`）实得 1 字节是**替换回退 `?`**，与
+ * [`com.eratw.port.core.host.CellWidth`] 的「表外字按全角」是同一条已登记 TODO，不属于本族新分歧
+ * （`U+203E` 不属这一族：本机 `windows-31J` 实测它是 JIS X 0201 的真实单字节 `0x7E` 映射，
+ * 与 `U+00A5` ↔ `0x5C` 同档）。
  */
 class LineFolderAuditTest {
 

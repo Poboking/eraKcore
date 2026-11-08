@@ -11,9 +11,12 @@ import com.eratw.port.core.expr.VarRef
 import com.eratw.port.core.lexer.CharStream
 import com.eratw.port.core.lexer.ErbLexer
 import com.eratw.port.core.lexer.FormStrEndWith
+import com.eratw.port.core.lexer.longFromScaledDouble
 import com.eratw.port.core.lexer.LexError
+import com.eratw.port.core.lexer.LangKey
 import com.eratw.port.core.expr.langCodecOf
 import com.eratw.port.core.expr.LangCodec
+import com.eratw.port.core.stmt.BuiltinSymbols
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
@@ -25,17 +28,47 @@ import java.math.RoundingMode
 internal fun iv(v: Value): Long = (v as? Value.IntV)?.v ?: throw CodeEE("函数参数类型错误：需要数值")
 internal fun sv(v: Value): String = (v as? Value.StrV)?.v ?: throw CodeEE("函数参数类型错误：需要字符串")
 
+/**
+ * 数值实参 → double：整型与浮点都收（fork `ToDouble`，spec: FunctionMethodCreator.cs:13424-13432
+ * —— `GetEraType() != Integer` 走 `GetFloatValue`，否则 `GetIntValue`）。
+ * 字符串实参按原版 `ArgIsNotNum` 方向失败，文案沿用 [iv]。
+ */
+internal fun dv(v: Value): Double = when (v) {
+    is Value.FloatV -> v.v
+    is Value.IntV -> v.v.toDouble()
+    else -> throw CodeEE("函数参数类型错误：需要数值")
+}
+
 /** 可省略参数位（null 对应原版参数列表的空位）。 */
 internal fun optInt(args: List<Value?>, i: Int, def: Long): Long =
     if (i < args.size && args[i] != null) iv(args[i]!!) else def
 
 /**
- * `OmitStart` 之前的必填字符串实参。空位在原版装载期报 `ArgCanNotBeNull`
- * （spec: FunctionMethod.cs:198-205；zhs 文案 `emuera-zhs.xml:887`
- * = `{0}函数: 第{1}个参数不能省略`），不是运行期 NPE。
+ * 必填实参取值（空位安全）。空位（null）抛 CodeEE，文案与原版 `ArgCanNotBeNull` 同形：
+ * spec: FunctionMethod.cs:198-205（旧路 argumentTypeArray 任意位 / :320-323 全量；
+ * Ex 路按 `j < OmitStart` 或 DisallowVoid 判）+ zhs 文案 `emuera-zhs.xml:887`
+ * = `{0}函数: 第{1}个参数不能省略`。
+ *
+ * 空位**编译期可达**：erbcc 与运行期共用 core-vm 的 ExprParser（erbcc SymbolUses.kt:252），
+ * `FUNC(,1)` 解析为 `[null, expr]`（Parser.kt reduceArguments；C# 链 = ExpressionParser.cs:605-610
+ * 逗号即出栈 → :620-627 end() → :143-148 TermStack.ReduceAll 空栈返 null）。
+ *
+ * **不适用**于 Ex 路可省位（`j >= OmitStart` 且非 DisallowVoid，FunctionMethod.cs:28,45
+ * —— `VariadicInt = 258` 不含 DisallowVoid 位）：那类空位原版**静默放行**（:205 continue）
+ * 后在实现层解引用崩溃（如 FunctionMethodCreator.cs:4122 MaxMethod、:7965 SaveTextMethod），
+ * 由调用方自判 null 或保留 NPE 同形复刻（见 sameAsFirstInt 的 KDoc）。
+ *
+ * 命名注意：HtmlMethods.kt 另有一对**私有** argInt/argStr（缺参/类型判定文案不同形），
+ * 本族不得与其重名。
  */
-internal fun requiredStrArg(args: List<Value?>, i: Int, fn: String): String =
-    if (i < args.size && args[i] != null) sv(args[i]!!) else throw CodeEE("${fn}函数: 第${i + 1}个参数不能省略")
+internal fun requiredValueArg(args: List<Value?>, i: Int, fn: String): Value =
+    args[i] ?: throw CodeEE("${fn}函数: 第${i + 1}个参数不能省略")
+
+/** [requiredValueArg] 的整数取值（等价 `iv(requiredValueArg(...))`）。 */
+internal fun requiredIntArg(args: List<Value?>, i: Int, fn: String): Long = iv(requiredValueArg(args, i, fn))
+
+/** [requiredValueArg] 的字符串取值（等价 `sv(requiredValueArg(...))`）。 */
+internal fun requiredStrArg(args: List<Value?>, i: Int, fn: String): String = sv(requiredValueArg(args, i, fn))
 
 internal fun codeEE(fn: String, msg: String): CodeEE = CodeEE("函数 $fn：$msg")
 
@@ -1284,54 +1317,73 @@ internal fun registerPure(r: BuiltinRegistry) {
     fun str(name: String, min: Int, max: Int, fn: (BuiltinContext, List<Value?>) -> String) {
         r.register(BuiltinMethod(name, S, min, max) { c, a -> Value.StrV(fn(c, a)) })
     }
+    /** 返回浮点型的内建函数（4.981 浮点扩展，见 TOFLOAT 注释）；需要码页与当前文化，与 [intC] 同形。 */
+    fun floatC(name: String, min: Int, max: Int, fn: (BuiltinContext, List<Value?>) -> Double) {
+        r.register(BuiltinMethod(name, OperandType.FLOAT, min, max) { c, a -> Value.FloatV(fn(c, a)) })
+    }
 
     // ---- 数学 ----
 
     // spec: FunctionMethodCreator.cs:4075-4138 MaxMethod —— 参数 1 个起，可变个数
-    int("MIN", 1, -1) { a -> a.minOf { iv(it!!) } }
-    int("MAX", 1, -1) { a -> a.maxOf { iv(it!!) } }
-    // spec: FunctionMethodCreator.cs:4139-4158 AbsMethod
+    // ArgTypes{Int, VariadicInt}, OmitStart = 1（:4082-4092）：首位空位原版报 ArgCanNotBeNull
+    // （FunctionMethod.cs:198-205，j < OmitStart）；variadic 位空位静默放行后解引用崩溃
+    // （:4122），Kotlin 以 minOf 内的 it!! NPE 同形复刻（ADR-005），故首位单独 argInt。
+    int("MIN", 1, -1) { a ->
+        requiredIntArg(a, 0, "MIN")
+        a.minOf { iv(it!!) }
+    }
+    int("MAX", 1, -1) { a ->
+        requiredIntArg(a, 0, "MAX")
+        a.maxOf { iv(it!!) }
+    }
+    // spec: FunctionMethodCreator.cs:4139-4158 AbsMethod（旧路 argumentTypeArray Type[1]{long}，:4144）
     int("ABS", 1, 1) { a ->
-        val v = iv(a[0]!!)
+        val v = requiredIntArg(a, 0, "ABS")
         if (v == Long.MIN_VALUE) throw codeEE("ABS", "不能对 -9223372036854775808 应用 ABS")
         Math.abs(v)
     }
-    // spec: FunctionMethodCreator.cs:4159-4192 PowerMethod
-    int("POWER", 2, 2) { a ->
-        val b = iv(a[0]!!); val e = iv(a[1]!!)
-        val d = Math.pow(b.toDouble(), e.toDouble())
+    // spec: FunctionMethodCreator.cs:5418-5478 PowerMethod —— 声明面 ReturnType=Integer 但
+    // CanReturnFloat=true、两参 ArgType.Any（:5418-5436）；实参统一按 ToDouble 取值（:13424-13432），
+    // 返回浮点还是整型由 HasFloatArg(:13434-13444) 分流：GetIntValue(:5438-5454) 额外查 Int64 越界，
+    // GetFloatValue(:5456-5468) 只查 NaN/Inf。解析期类型晋升见 BuiltinSymbols.canReturnFloat。
+    r.register(BuiltinMethod("POWER", I, 2, 2) { _, a ->
+        val d = Math.pow(dv(requiredValueArg(a, 0, "POWER")), dv(requiredValueArg(a, 1, "POWER")))
         if (d.isNaN()) throw codeEE("POWER", "结果为 NaN")
         if (d.isInfinite()) throw codeEE("POWER", "结果为无穷大")
-        if (d >= 9.223372036854776E18 || d <= -9.223372036854776E18)
-            throw codeEE("POWER", "结果 $d 超出 Int64 范围")
-        d.toLong()
-    }
+        if (a[0] is Value.FloatV || a[1] is Value.FloatV) {
+            Value.FloatV(d)
+        } else {
+            if (d >= 9.223372036854776E18 || d <= -9.223372036854776E18)
+                throw codeEE("POWER", "结果 $d 超出 Int64 范围")
+            Value.IntV(d.toLong())
+        }
+    })
     // spec: FunctionMethodCreator.cs:4193-4212 SqrtMethod
     int("SQRT", 1, 1) { a ->
-        val v = iv(a[0]!!)
+        val v = requiredIntArg(a, 0, "SQRT")
         if (v < 0) throw codeEE("SQRT", "第 1 个参数 $v 为负数")
         Math.sqrt(v.toDouble()).toLong()
     }
     // spec: FunctionMethodCreator.cs:4213-4232 CbrtMethod
     int("CBRT", 1, 1) { a ->
-        val v = iv(a[0]!!)
+        val v = requiredIntArg(a, 0, "CBRT")
         if (v < 0) throw codeEE("CBRT", "第 1 个参数 $v 为负数")
         Math.pow(v.toDouble(), 1.0 / 3.0).toLong()
     }
     // spec: FunctionMethodCreator.cs:4233-4277 LogMethod（LOG=自然对数，LOG10=以 10 为底）
     int("LOG", 1, 1) { a ->
-        val v = iv(a[0]!!)
+        val v = requiredIntArg(a, 0, "LOG")
         if (v <= 0) throw codeEE("LOG", "第 1 个参数 $v 不大于 0")
         Math.log(v.toDouble()).toLong()
     }
     int("LOG10", 1, 1) { a ->
-        val v = iv(a[0]!!)
+        val v = requiredIntArg(a, 0, "LOG10")
         if (v <= 0) throw codeEE("LOG10", "第 1 个参数 $v 不大于 0")
         Math.log10(v.toDouble()).toLong()
     }
     // spec: FunctionMethodCreator.cs:4278-4305 ExpMethod
     int("EXPONENT", 1, 1) { a ->
-        val d = Math.exp(iv(a[0]!!).toDouble())
+        val d = Math.exp(requiredIntArg(a, 0, "EXPONENT").toDouble())
         if (d.isNaN()) throw codeEE("EXPONENT", "结果为 NaN")
         if (d.isInfinite()) throw codeEE("EXPONENT", "结果为无穷大")
         if (d >= 9.223372036854776E18 || d <= -9.223372036854776E18)
@@ -1340,17 +1392,32 @@ internal fun registerPure(r: BuiltinRegistry) {
     }
     // spec: FunctionMethodCreator.cs:4306-4320 SignMethod
     int("SIGN", 1, 1) { a ->
-        val v = iv(a[0]!!)
+        val v = requiredIntArg(a, 0, "SIGN")
         if (v > 0) 1L else if (v < 0) -1L else 0L
     }
+
+    // ---- 4.981 上游新增（reference/emuera-cs 零命中，无 C# 权威）----
+
+    // UNCHECKED_ADD / UNCHECKED_MUL：2 参整型，按 C# `unchecked` 口径回绕。
+    // 语料唯一用法 `COMMON.ERB:3039-3040` 的 `@NOISE`（xorshift 噪声）依赖回绕；
+    // Kotlin 的 Long `+`/`*` 本身就是二进制补码回绕（与 C# unchecked 等价），故直接算。
+    int("UNCHECKED_ADD", 2, 2) { a -> requiredIntArg(a, 0, "UNCHECKED_ADD") + requiredIntArg(a, 1, "UNCHECKED_ADD") }
+    int("UNCHECKED_MUL", 2, 2) { a -> requiredIntArg(a, 0, "UNCHECKED_MUL") * requiredIntArg(a, 1, "UNCHECKED_MUL") }
+
+    // GETPLATFORM：0 参，返回运行平台编号。上游新增（自改说明未列；语料唯一消费点
+    // `ERB/TITLE.ERB:86-91`：`GETPLATFORM() == 0` → `TINPUTNF 20000,...` 自动 DEMO，
+    // 否则 `INPUT`）。
+    // 本移植是 Android ⇒ 取 **1**（非 PC 分支）。TODO(verify)：编号表无手册证据，
+    // 若上游 4.981 的 0/1 语义相反（0=Android），此处需翻转。
+    int("GETPLATFORM", 0, 0) { _ -> 1L }
     // spec: FunctionMethodCreator.cs:4321-4351 GetLimitMethod
     int("LIMIT", 3, 3) { a ->
-        val v = iv(a[0]!!); val lo = iv(a[1]!!); val hi = iv(a[2]!!)
+        val v = requiredIntArg(a, 0, "LIMIT"); val lo = requiredIntArg(a, 1, "LIMIT"); val hi = requiredIntArg(a, 2, "LIMIT")
         if (v < lo) lo else if (v > hi) hi else v
     }
     // spec: FunctionMethodCreator.cs:4766-4791 GetbitMethod
     int("GETBIT", 2, 2) { a ->
-        val v = iv(a[0]!!); val bit = iv(a[1]!!)
+        val v = requiredIntArg(a, 0, "GETBIT"); val bit = requiredIntArg(a, 1, "GETBIT")
         if (bit < 0 || bit > 63) throw codeEE("GETBIT", "第 2 个参数 $bit 越界（0-63）")
         (v shr bit.toInt()) and 1L
     }
@@ -1395,7 +1462,7 @@ internal fun registerPure(r: BuiltinRegistry) {
     )
     // spec: FunctionMethodCreator.cs:4984-5010 InRangeMethod
     int("INRANGE", 3, 3) { a ->
-        val v = iv(a[0]!!); val lo = iv(a[1]!!); val hi = iv(a[2]!!)
+        val v = requiredIntArg(a, 0, "INRANGE"); val lo = requiredIntArg(a, 1, "INRANGE"); val hi = requiredIntArg(a, 2, "INRANGE")
         if (v in lo..hi) 1L else 0L
     }
     // spec: FunctionMethodCreator.cs:3747-3769 BarStringMethod + ExpressionMediator.cs:130-157
@@ -1403,7 +1470,7 @@ internal fun registerPure(r: BuiltinRegistry) {
     // 文案不带函数名前缀（zhs emuera-zhs.xml:234-236；与 sem/StatementExecutor.kt createBar 同一条）。
     // :146-156 —— fill 夹在 [0,length]；填充字符取 Config.BarChar1 / BarChar2（ExpressionMediator.cs:155-156）
     str("BARSTR", 3, 3) { c, a ->
-        val value = iv(a[0]!!); val max = iv(a[1]!!); val length = iv(a[2]!!)
+        val value = requiredIntArg(a, 0, "BARSTR"); val max = requiredIntArg(a, 1, "BARSTR"); val length = requiredIntArg(a, 2, "BARSTR")
         if (max <= 0) throw CodeEE("BAR的最大值不为正值")
         if (length <= 0) throw CodeEE("BAR的长度不为正值")
         if (length >= 100) throw CodeEE("BAR过长")
@@ -1417,13 +1484,16 @@ internal fun registerPure(r: BuiltinRegistry) {
     // 名单唯一权威是 ColorNames（GDI+ KnownColor 表，收口前本文件自带一份 46+14 名副本）。
     // 未知名返回 -1（spec: FunctionMethodCreator.cs:3832），transparent 抛错（:3828），口径不变。
     int("COLOR_FROMNAME", 1, 1) { a ->
-        val name = sv(a[0]!!)
-        if (ColorNames.isTransparent(name)) throw codeEE("COLOR_FROMNAME", "transparent 不能转换为颜色值")
+        val name = requiredStrArg(a, 0, "COLOR_FROMNAME")
+        // 官方逐字（Error.TransparentUnsupported，Lang.cs:1982 / zhs 表 :450；errtext6 波把声明期
+        // 折叠支换成官方串，运行期这一支在同波的「需组长接线」里，本笔接线，屏上不再分叉）。
+        // 原版抛点 FunctionMethodCreator.cs:3828-3830 不做 Format、也不带函数名前缀 ⇒ 与声明期同形。
+        if (ColorNames.isTransparent(name)) throw CodeEE(LangKey.TransparentUnsupported.renderZhs())
         ColorNames.rgbOrUnknown(name)
     }
     // spec: FunctionMethodCreator.cs:3838-3872 ColorFromRGBMethod
     int("COLOR_FROMRGB", 3, 3) { a ->
-        val r = iv(a[0]!!); val g = iv(a[1]!!); val b = iv(a[2]!!)
+        val r = requiredIntArg(a, 0, "COLOR_FROMRGB"); val g = requiredIntArg(a, 1, "COLOR_FROMRGB"); val b = requiredIntArg(a, 2, "COLOR_FROMRGB")
         for ((i, v) in listOf(r, g, b).withIndex()) {
             if (v < 0 || v > 255) throw codeEE("COLOR_FROMRGB", "第 ${i + 1} 个参数 $v 越界（0-255）")
         }
@@ -1434,19 +1504,19 @@ internal fun registerPure(r: BuiltinRegistry) {
 
     // spec: FunctionMethodCreator.cs:5260-5274 StrlenMethod
     // 唯一实现与码页来源见 core/expr/FormStringTerm.kt 的 LangCodec（Config.cs:412-430）。
-    intC("STRLENS", 1, 1) { c, a -> langCodecOf(c).strlen(sv(a[0]!!)).toLong() }
+    intC("STRLENS", 1, 1) { c, a -> langCodecOf(c).strlen(requiredStrArg(a, 0, "STRLENS")).toLong() }
     // spec: FunctionMethodCreator.cs:5275-5289 StrlenuMethod —— 与 STRLENS 口径不同（UTF-16 长度）
-    int("STRLENSU", 1, 1) { a -> sv(a[0]!!).length.toLong() }
+    int("STRLENSU", 1, 1) { a -> requiredStrArg(a, 0, "STRLENSU").length.toLong() }
     // spec: FunctionMethodCreator.cs:5290-5327 SubstringMethod
     str("SUBSTRING", 1, 3) { c, a ->
-        val s = sv(a[0]!!)
+        val s = requiredStrArg(a, 0, "SUBSTRING")
         val start = optInt(a, 1, 0).toInt()
         val len = optInt(a, 2, -1).toInt()
         langCodecOf(c).subString(s, start, len)
     }
     // spec: FunctionMethodCreator.cs:5328-5385 SubstringuMethod —— 边界怪行为原样复刻
     str("SUBSTRINGU", 1, 3) { _, a ->
-        val s = sv(a[0]!!)
+        val s = requiredStrArg(a, 0, "SUBSTRINGU")
         var start = optInt(a, 1, 0).toInt()
         var len = optInt(a, 2, -1).toInt()
         if (start >= s.length || len == 0) return@str ""
@@ -1492,8 +1562,8 @@ internal fun registerPure(r: BuiltinRegistry) {
     // 正则方言走 dotNetRegex：`new Regex(pattern, RegexOptions.Compiled)`（RegexFactory.cs:19），
     // 于是 `\d` / `\w` / `\s` 是 Unicode 属性而不是 JDK 默认的 ASCII 集。
     int("STRCOUNT", 2, 2) { a ->
-        val s = sv(a[0]!!)
-        val pattern = sv(a[1]!!)
+        val s = requiredStrArg(a, 0, "STRCOUNT")
+        val pattern = requiredStrArg(a, 1, "STRCOUNT")
         val regex = try {
             dotNetRegex(pattern)
         } catch (e: Exception) {
@@ -1506,13 +1576,20 @@ internal fun registerPure(r: BuiltinRegistry) {
     }
     // spec: FunctionMethodCreator.cs:5461-5499 ToStrMethod
     str("TOSTR", 1, 2) { _, a ->
-        val v = iv(a[0]!!)
+        val v = requiredIntArg(a, 0, "TOSTR")
         if (a.size < 2 || a[1] == null) return@str v.toString()
         formatDotNet(v, sv(a[1]!!), "TOSTR")
     }
     // spec: FunctionMethodCreator.cs:5500-5557 ToIntMethod —— 失败路径一律返回 0
+    // 4.981 起实参可以是浮点表达式（COMMON.ERB:605 `TOINT(回復量 * 0.7)`、
+    // DLC/魔法DLC/使用魔法.ERB:1256 `TOINT(LOCALF)`）；1.824 的 ToIntMethod 只登记
+    // typeof(string)（FunctionMethodCreator.cs:5505），浮点形态无 C# 参照，
+    // 这里按 C# `(long)double` 的向零截断口径落地（越界见 longFromScaledDouble），TODO(verify)。
     intC("TOINT", 1, 1) { c, a ->
-        val s = sv(a[0]!!)
+        val arg = requiredValueArg(a, 0, "TOINT")
+        if (arg is Value.FloatV) return@intC longFromScaledDouble(arg.v)
+        if (arg is Value.IntV) return@intC arg.v
+        val s = sv(arg)
         if (s.isEmpty()) return@intC 0L
         if (s.length < langCodecOf(c).strlen(s)) return@intC 0L  // 含全角字符 → 0
         val st = CharStream(s)
@@ -1534,6 +1611,24 @@ internal fun registerPure(r: BuiltinRegistry) {
         }
         result
     }
+    // spec: fork-src Creator.Method.cs:6145-6165 ToFloatMethod（注册 Creator.cs:145）——
+    // `ReturnType = EraType.Float`、`argumentTypeArray = [String]`（:6150）、`CanRestructure = true`。
+    // 求值体（:6154-6164）：空串 → 0.0；`str.Length < GetStrlenLang(str)`（含多字节字符）→ 0.0；
+    // 其余交给 `double.TryParse(str, out result)`（:6161，**不带** InvariantCulture）⇒ 解析失败 0.0，
+    // 不抛错。当前文化取 Locale.getDefault()，与存档浮点读写同口径（`SaveTextFormat` 的 locale 默认值）；
+    // 数字形态（分组符/小数点/特值/空白）逐条实测口径见 FloatConversion.kt 的 KDoc。
+    // 1.824 的 FunctionMethodCreator 无此函数（reference/emuera-cs 0 命中）；4.981 语料 0 处调用
+    // （DLC 的浮点用例走 `TOINT(LOCALF)`，不经过这里）。
+    // 偏离（登记，需 expr/loader 路接线）：原版在**装载期**按 argumentTypeArray 静态拒绝非字符串
+    // 实参（FunctionMethod.cs:304-308 ⇒ ArgIsNotStr）；移植侧内建分派只看运行期值，这里保留数值
+    // 实参的恒等 / 转 double 兜底。忠实语料里该形态装载即失败，运行期不可达。
+    floatC("TOFLOAT", 1, 1) { c, a ->
+        when (val v = requiredValueArg(a, 0, "TOFLOAT")) {
+            is Value.FloatV -> v.v
+            is Value.IntV -> v.v.toDouble()
+            is Value.StrV -> toFloatOfString(v.v, langCodecOf(c))
+        }
+    }
     // spec: FunctionMethodCreator.cs:5558-5595 StrChangeStyleMethod
     // :5587 `ToUpper(CultureInfo.InvariantCulture)` / :5588 `ToLower()`（CurrentCulture；ja/zh
     // 机器与 invariant 等价，tr/az 差异登记不修）走 .NET ICU **全映射**，可以扩长：
@@ -1543,19 +1638,19 @@ internal fun registerPure(r: BuiltinRegistry) {
     // 旧逐码元 Character.toUpperCase/toLowerCase 对 ß/ﬁ/İ 与原版分叉。语料 TOUPPER 18 处 /
     // TOLOWER 134 处，ASCII 键面读数不变。）
     str("TOUPPER", 1, 1) { _, a ->
-        val s = sv(a[0]!!)
+        val s = requiredStrArg(a, 0, "TOUPPER")
         if (s.isEmpty()) "" else s.uppercase()
     }
     str("TOLOWER", 1, 1) { _, a ->
-        val s = sv(a[0]!!)
+        val s = requiredStrArg(a, 0, "TOLOWER")
         if (s.isEmpty()) "" else s.lowercase()
     }
     str("TOHALF", 1, 1) { c, a ->
-        val s = sv(a[0]!!)
+        val s = requiredStrArg(a, 0, "TOHALF")
         if (s.isEmpty()) "" else toHalf(s, langCodecOf(c))
     }
     str("TOFULL", 1, 1) { c, a ->
-        val s = sv(a[0]!!)
+        val s = requiredStrArg(a, 0, "TOFULL")
         if (s.isEmpty()) "" else toFull(s, langCodecOf(c))
     }
     // spec: FunctionMethodCreator.cs:5611-5690 ReplaceMethod
@@ -1576,7 +1671,7 @@ internal fun registerPure(r: BuiltinRegistry) {
     // :5704-5706 越界 = Lang.Error.ArgIsOutOfRange（zhs emuera-zhs.xml:917 =
     // `{0}函数: 第{1}个参数({2})在从{3}到{4}的范围外`）。
     str("UNICODE", 1, 1) { c, a ->
-        val code = iv(a[0]!!)
+        val code = requiredIntArg(a, 0, "UNICODE")
         if (code < 0 || code > 65535) throw CodeEE("UNICODE函数: 第1个参数($code)在从0到65535的范围外")
         if ((code < 31L && code != 10L && code != 13L) || (code in 127L..159L)) {
             // spec: :5707-5716 —— 原版把 InvalidUnicode（zhs emuera-zhs.xml:926，{1} 为大写
@@ -1599,7 +1694,7 @@ internal fun registerPure(r: BuiltinRegistry) {
     // U+FFFD 出 4 字节（读数 65533 成立），故不能直接 codePointAt（它对孤立代理原样返回
     // 0xD800 一类）。
     int("UNICODEBYTE", 1, 1) { a ->
-        val s = sv(a[0]!!)
+        val s = requiredStrArg(a, 0, "UNICODEBYTE")
         if (s.isEmpty()) return@int 0L
         val c0 = s[0]
         when {
@@ -1613,8 +1708,8 @@ internal fun registerPure(r: BuiltinRegistry) {
     // :5761 `Convert.ToString(long, int)`：10 进制按有符号；2 / 8 / 16 进制把值当**无符号 64 位**
     // 补码（-1,16 ⇒ 16 个 f；MinValue,16 ⇒ 8000000000000000）。
     str("CONVERT", 2, 2) { _, a ->
-        val v = iv(a[0]!!)
-        val radix = iv(a[1]!!)
+        val v = requiredIntArg(a, 0, "CONVERT")
+        val radix = requiredIntArg(a, 1, "CONVERT")
         if (radix !in longArrayOf(2, 8, 10, 16))
             // spec: FunctionMethodCreator.cs:5755-5758 —— Lang.Error.ArgShouldBeSpecificValue
             // （zhs emuera-zhs.xml:927，{2} = "2, 8, 10, 16"）
@@ -1629,7 +1724,7 @@ internal fun registerPure(r: BuiltinRegistry) {
     // spec: FunctionMethodCreator.cs:5765-5813 IsNumericMethod
     // spec: FunctionMethodCreator.cs:5765-5813 IsNumericMethod —— NumericCheck 后还要求到串尾（或小数尾）
     intC("ISNUMERIC", 1, 1) { c, a ->
-        val s = sv(a[0]!!)
+        val s = requiredStrArg(a, 0, "ISNUMERIC")
         if (s.length < langCodecOf(c).strlen(s)) return@intC 0L
         val st = CharStream(s)
         if (!st.current.isDigit() && st.current != '+' && st.current != '-') return@intC 0L
@@ -1647,11 +1742,11 @@ internal fun registerPure(r: BuiltinRegistry) {
     }
     // spec: FunctionMethodCreator.cs:5814-5828 EscapeMethod —— Regex.Escape
     str("ESCAPE", 1, 1) { _, a ->
-        vStrEscape(sv(a[0]!!))
+        vStrEscape(requiredStrArg(a, 0, "ESCAPE"))
     }
     // spec: FunctionMethodCreator.cs:5829-5868 EncodeToUniMethod
     int("ENCODETOUNI", 1, 2) { a ->
-        val s = sv(a[0]!!)
+        val s = requiredStrArg(a, 0, "ENCODETOUNI")
         if (s.isEmpty()) return@int -1L
         val idx = optInt(a, 1, 0)
         if (idx < 0) throw codeEE("ENCODETOUNI", "第 2 个参数 $idx 为负数")
@@ -1660,13 +1755,13 @@ internal fun registerPure(r: BuiltinRegistry) {
     }
     // spec: FunctionMethodCreator.cs:5869-5893 CharAtMethod —— 越界返回空串
     str("CHARATU", 2, 2) { _, a ->
-        val s = sv(a[0]!!)
-        val idx = iv(a[1]!!)
+        val s = requiredStrArg(a, 0, "CHARATU")
+        val idx = requiredIntArg(a, 1, "CHARATU")
         if (idx < 0 || idx >= s.length) "" else s[idx.toInt()].toString()
     }
     // spec: FunctionMethodCreator.cs:5914-5967 StrFormMethod —— 运行期解析 {}/%/三连记号形式串
     str("STRFORM", 1, 1) { c, a ->
-        val format = sv(a[0]!!)
+        val format = requiredStrArg(a, 0, "STRFORM")
         try {
             // :5929 —— 结束符是 FormStrEndWith.EoL（值里的 '"' 是普通字符），trim: false
             // 词法配置走 VM 条目表：{}/%% 子表达式经 Analyse 吃 SystemAllowFullSpace
@@ -1692,7 +1787,7 @@ internal fun registerPure(r: BuiltinRegistry) {
     }
     // spec: FunctionMethodCreator.cs:3873-3921 MoneyStrMethod
     str("MONEYSTR", 1, 2) { c, a ->
-        val v = iv(a[0]!!)
+        val v = requiredIntArg(a, 0, "MONEYSTR")
         val label = c.host.moneyLabel
         val first = c.host.moneyLabelFirst
         if (a.size < 2 || a[1] == null) {
@@ -1733,6 +1828,9 @@ internal fun storeResolver(c: BuiltinContext): IdentifierResolver = object : Ide
 
     override fun resolveFunction(name: String): OperandType? =
         Builtins.registry.returnType(name)
+
+    /** `POWER` 一类实参浮点晋升（spec: FunctionMethodTerm.cs:44-56）：与语句层同口径。 */
+    override fun canReturnFloat(name: String): Boolean = BuiltinSymbols.canReturnFloat(name)
 }
 
 /** spec: LexicalAnalyzer.cs:167-221 NumericCheck（含前导符号检查；不要求消费到串尾） */

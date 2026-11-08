@@ -17,10 +17,12 @@ import kotlin.test.assertTrue
  * com.erbcc.bridge.buildFuncDims）→ Program → ProcessRuntime + VirtualMachine 真执行
  * → 生产 sink（[com.eratw.port.core.host.LineBufferConsoleSink]，经 [ProductionConsoleSink] 门面读回文本行）→ [GoldenNormalizer]（runbook §5/§6）→ 与基准 diff。
  *
- * 基准策略（PC 基准由组长另线采集，落地前）：
- *  - diff 目标常量 = [GoldenNormalizer.PC_BASELINE]，存在即优先；
+ * 基准策略：
+ *  - diff 目标常量 = [GoldenNormalizer.PC_BASELINE]，存在即优先；其 610 行是 4.981 读数，
+ *    4.980 根下三行语料派生行经 [PcGoldenColumn] 按根换成 4.980 列定值，其余逐行严格；
  *  - 缺失时用自跑回归快照 [GoldenNormalizer.SELF_BASELINE]（首次自动生成；
- *    `ERATW_E2E_UPDATE=1` 显式重刷——实现推进后由本 agent/组长重刷，不做静默自更新）。
+ *    `ERATW_E2E_UPDATE=1` 显式重刷——实现推进后由本 agent/组长重刷，不做静默自更新）；
+ *    PC 基准在场时此分支**不写盘**（fixtures 只读对拍）。
  *
  * 口径纪律：**红就是红**。分节弹性执行如实记录 通过/失败(首个失败语句@文件:行 +
  * CodeEE 函数:行:pc)/阻塞(编译失败/未接线)，不删脚本、不删语句、不放宽归一化。
@@ -199,6 +201,13 @@ class E2EGoldenTest {
 
     @Test
     fun `全量执行与基准对拍`() {
+        // 按根两列（corpusroot 波路线①，不再是按根跳过）：pc-golden-root.txt 是 fixture（只读），
+        // 其 427/428/544 三行钉的是 4.981 运行期读数（Ｃ感觉 / [性别] / ENUMVARENDSWITH=92，
+        // 归因见 GoldenPipeline.gameCsvDir KDoc）。4.980 根下这三行按 [PcGoldenColumn] 换成
+        // 4.980 列定值（换前核对基准仍是 4.981 原文），**其余 607 行照旧逐字严格对拍**；§5 标准闸
+        // 的 ERATW_GAMEDIR 就是 4.980，故 610 行硬对拍在本闸下真跑。任何第四行漂移、基准被重钉
+        // 而两列表没跟上，仍然照常判红。无游戏根的裸跑（CI）按基准原文逐行严格。
+        // 公开仓适配：语料缺失时本用例按缺省跳过（不在公开仓分发语料）。
         GoldenPipeline.requireGameCsvDir()
         val m = model
         val console = GoldenPipeline.newConsole()
@@ -214,16 +223,24 @@ class E2EGoldenTest {
         val actual = GoldenNormalizer.normalize(console.capturedText())
         File(reportDir, "full-run.norm.txt").writeText(actual.joinToString("\n") + "\n", Charsets.UTF_8)
 
-        val update = System.getenv("ERATW_E2E_UPDATE") == "1"
-        val selfWasNew = !selfBaseline.exists()
+        // 自跑快照分支只在 **PC 基准缺失** 时才可能写盘：PC 基准存在时它是历史死代码，
+        // 本条路径不得新写/覆盖 fixtures 下的任何文件（本跑是只读对拍）。重刷仍要显式
+        // ERATW_E2E_UPDATE=1，不做静默自更新。
+        val selfEnabled = !pcBaseline.exists()
+        val update = selfEnabled && System.getenv("ERATW_E2E_UPDATE") == "1"
+        val selfWasNew = selfEnabled && !selfBaseline.exists()
         if (update || selfWasNew) {
             Files.createDirectories(baselineDir)
             GoldenNormalizer.writeBaseline(selfBaseline, actual)
         }
-        // diff 目标：PC 基准存在即权威；否则自跑回归快照
+        // diff 目标：PC 基准存在即权威（按根两列取）；否则自跑回归快照
         val target = if (pcBaseline.exists()) pcBaseline else selfBaseline
         val skipDiff = selfWasNew && !update && target == selfBaseline
-        val expected = GoldenNormalizer.readBaseline(target)
+        val expected = if (target == pcBaseline) {
+            PcGoldenColumn.forCurrentRoot(GoldenNormalizer.readBaseline(target))
+        } else {
+            GoldenNormalizer.readBaseline(target)
+        }
         val d = if (skipDiff) GoldenNormalizer.DiffResult(true, -1, "首次生成自跑快照，无对比对象") else GoldenNormalizer.diff(expected, actual)
 
         // CMP-63：硬闸前置条件 = 执行到 `=== END ===` 且 runError == null。不再按
@@ -254,7 +271,10 @@ class E2EGoldenTest {
                 } ?: "不在能力缺口白名单（按执行层回归处理）"),
             )
         }
-        sb.appendLine("- diff 目标: ${target.name}（基准 ${expected.size} 行 / 实际 ${actual.size} 行${if (update) "，ERATW_E2E_UPDATE=1 已重刷自快照" else ""}）")
+        sb.appendLine(
+            "- diff 目标: ${target.name}（${PcGoldenColumn.describeCurrentRoot()}；基准 ${expected.size} 行 / " +
+                "实际 ${actual.size} 行${if (update) "，ERATW_E2E_UPDATE=1 已重刷自快照" else ""}）",
+        )
         sb.append(d.preview).append('\n')
         appendReport(sb.toString())
         assertTrue(
@@ -262,7 +282,11 @@ class E2EGoldenTest {
             "硬闸未启用：全量执行未到 ${GoldenNormalizer.END_MARKER} 或 runError != null" +
                 "（实际=${runError ?: "无异常但缺终点"}）—— CMP-63 起不再按文案推迟，直接判红",
         )
-        assertTrue(d.identical, "输出与基准(${target.name})不一致，首差行 ${d.firstMismatch}:\n${d.preview}")
+        assertTrue(
+            d.identical,
+            "输出与基准(${target.name})不一致（${PcGoldenColumn.describeCurrentRoot()}），" +
+                "首差行 ${d.firstMismatch}:\n${d.preview}",
+        )
     }
 
     @Test

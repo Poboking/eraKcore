@@ -1,0 +1,2 @@
+cases\no-digest-line: 1 条新鲜度问题
+  COMPILER_STALE: 产物由旧编译器产出（清单没有 compiler-digest 行，是旧格式/旧编译器产物），必须重编：当前源码树 8185fdd6f2db2c2611f634a745c710a9dedd7d9c8eb58be417d6f5549347d382 共 204 个源文件 → ./gradlew :tools:erbcc:compileCorpus

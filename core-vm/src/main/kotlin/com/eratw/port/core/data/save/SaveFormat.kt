@@ -10,7 +10,7 @@ import java.util.zip.GZIPInputStream
 /**
  * Emuera 二进制存档编解码（`EraBinaryDataReader1808` / `EraBinaryDataWriter` 的 Kotlin 复刻）。
  *
- * ## 实测结构（`sav-backup/sav-20261018-110513/save00.sav`，60151 字节）
+ * ## 实测结构（`<sample-backup>/sav-20261018-110513/save00.sav`，60151 字节）
  *
  * | 偏移 | 内容 | 实测值 | 证据 |
  * |---|---|---|---|
@@ -40,6 +40,12 @@ import java.util.zip.GZIPInputStream
  * 2. 字符串数组的 null 与 "" 写出来完全相同（EraBinaryDataWriter.cs:352），读回一律为 null。
  * 3. 全局块里的 `RANDDATA`（625 元素）**确实**出现在 saveXX.sav 里（实测偏移 564xxx）；
  *    spec §2.2 说它只进 global.sav —— 见 save-format.md 的「实测勘误」。
+ * 4. **浮点段与整数段不同构**（4.981 的 0x04–0x07，EraBinaryDataWriter.cs:132-170）：
+ *    标量是裸的 8 字节小端 IEEE-754，数组是「Int32 长度/维度 + 全密集 8 字节 double」——
+ *    既没有 `0xF0/0xE0` 那一族 0 游程标记，**也没有结尾的 `0xFF`**，全零元素照常逐个落盘。
+ *    拿整数那套游程编码去写浮点，PC 侧读回来整段错位；反过来按游程解浮点会把数据的
+ *    某个字节当标签吃掉。判定依据：写侧 `writer.Write(arr[i])` 逐元素直发（:144-145 /
+ *    :154-156 / :166-169），读侧 `ReadDouble()` 定宽取 8 字节（EraBinaryDataReader.cs:283-285）。
  *
  * ## 逐字节幂等
  *
@@ -67,6 +73,15 @@ object SaveFormat {
     private const val TAG_MAP = 32
     private const val TAG_XML = 33
     private const val TAG_DT = 34
+
+    /** 浮点四型标签（fork 新增，EraBinaryDataReader.cs:21-34 的 `Float/FloatArray/FloatArray2D/FloatArray3D`）。 */
+    private const val TAG_FLOAT = 0x04
+    private const val TAG_FLOAT_ARRAY = 0x05
+    private const val TAG_FLOAT_ARRAY2D = 0x06
+    private const val TAG_FLOAT_ARRAY3D = 0x07
+
+    /** `double` 每元素 8 字节（与 [ELEMENT_BYTES] 同宽，但编码规则完全不同，见类 KDoc 的坑 4）。 */
+    private const val DOUBLE_BYTES = 8
 
     /** GZip 头（实测 .NET 8：MTIME=0、XFL=0、OS=0x0A）。 */
     private val GZIP_HEADER = byteArrayOf(0x1f, 0x8b.toByte(), 0x08, 0x00, 0, 0, 0, 0, 0, 0x0a)
@@ -171,10 +186,46 @@ object SaveFormat {
     }
 
     /**
-     * 只解析文件头（CHKDATA / CHKCHARADATA 用）。二进制与文本格式都支持。
+     * 容器**壳**判定：长度 ≥ 16、魔数命中、容器版本恰为 1808、校验表条数未越界
+     * （`EraBinaryDataReader.cs:790-806` 的解压前判定）。**不解压正文**，因此开销是常数级。
+     *
+     * 与 [isBinaryContainer] 的分工：
+     * - 本函数 = 原版 `CreateReader` 在 `gZipStream.CopyTo` 之前的判据，供读档分派
+     *   （[com.eratw.port.core.save.SaveCodec.read]）选「二进制还是文本」；
+     * - [isBinaryContainer] = 壳 + 解压全文都过，供 `LOADCHARA` 那类「坏壳要静默当不存在」
+     *   的路径使用（`VariableEvaluator.cs:2300`）。
+     *
+     * 读档路径**不能**再用 [isBinaryContainer] 做分派：那等于每次读档先解压一遍判容器、
+     * 再解压一遍解析正文，正文大时是纯粹的重复开销。
+     */
+    fun isContainerShell(bytes: ByteArray): Boolean {
+        if (bytes.size < 16) return false
+        val magic = readU64(bytes, 0)
+        if (magic != MAGIC_PLAIN && magic != MAGIC_GZIP) return false
+        if (readU32(bytes, 8).toInt() != VERSION) return false
+        return try {
+            containerBodyOffset(bytes)
+            true
+        } catch (_: SaveFormatException) {
+            false
+        }
+    }
+
+    /**
+     * 完整头探测：**整份解压**后读头，与原版 `CreateReader` 的
+     * `gZipStream.CopyTo`（`EraBinaryDataReader.cs:807-815`）同口径 ——
+     * GZip 尾部损坏 / 截断都会判 null。
+     *
+     * 读档前置校验（`SaveDataProbe.checkBytes` 的缺省路径）与测试用它：原版 `LOADDATA`
+     * 先 `CheckData` 再 `LoadFrom`，坏档在**复位变量池之前**就被拦住（`Process.cs:1853-1856`），
+     * 这里不能放宽，否则坏档会把玩家当前局的变量清成默认值。
+     *
+     * **存档列表不要用它**：语料的存档列表按格子逐条调 `CHKDATA`，用本函数等于每次整份解压
+     * （2026-10-31 玩家「多创几个档后加载变慢」）；列表走 [peekHeader]。
      *
      * @return null = 不是 Emuera 存档（魔数不符且文本头也解析不出 / 魔数命中但头被截断 /
-     *   版本非 1808）—— 与原版 `CreateReader` 返回 null 同口径（`EraBinaryDataReader.cs:796-824`）。
+     *   版本非 1808 / GZip 正文损坏）—— 与原版 `CreateReader` 返回 null 同口径
+     *   （`EraBinaryDataReader.cs:796-828`）。
      *   注意「魔数命中但版本非 1808」这一支在原版里会**再按文本读一次**
      *   （`VariableEvaluator.cs:2176-2178`）：那种文件的前两行不可能解析成数字，
      *   文本分支随即抛 FileEE 并落成 `ETC_ERROR`，与本层给 null 后由
@@ -192,19 +243,104 @@ object SaveFormat {
         if (version != VERSION) return null
         return try {
             val head = readContainer(bytes)
-            val c = Cursor(head.payload)
-            val typeCode = c.u8()
-            val fileType = SaveFileKind.values().getOrNull(typeCode) ?: return null
-            val uniqueCode = c.i64()
-            val scriptVersion = c.i64()
-            val text = c.readString()
-            SaveHeader(
-                binary = true, gzip = head.gzip, version = version, fileType = fileType,
-                uniqueCode = uniqueCode, scriptVersion = scriptVersion, text = text,
-            )
+            parseBinaryHeader(head.payload, 0, gzip = head.gzip, version = version)
         } catch (_: SaveFormatException) {
             null
         }
+    }
+
+    /**
+     * 头字段**快探测**：只解压到头字段够用为止，不校验 GZip 正文与尾部。
+     * 专供存档列表渲染（`CHKDATA` / `CHKCHARADATA`），**不用于读档前置校验**。
+     *
+     * ## 性能（2026-10-31 玩家「多创几个档后加载变慢」）
+     *
+     * 语料的存档列表每页渲染 40 格，且每次 `WHILE` 重绘都重调一遍 `CHKDATA`
+     * （`隨時操作存檔.ERB`）。PC 原版 `CreateReader` 用 `gZipStream.CopyTo` 把整份正文
+     * 解进内存（`EraBinaryDataReader.cs:807-815`），只为了读前面 200 来字节的头；
+     * 移植侧此前照搬，于是**已填的档越多、列表越慢**（40 格 × 每份数百 KB~数 MB 解压），
+     * 真机上还会叠 GC。本函数解到头字段齐了就停，正文一个字都不碰。
+     *
+     * 与 [peek] 的差异只在「头完好、GZip 正文尾部损坏 / 截断」的档：本函数仍报出可读的头
+     * （列表里看得到描述），真正 `LOADDATA` 时仍由 [peek] 的完整校验在复位变量池**之前**
+     * 拒绝（`存档数据已损坏`）。有效存档的读数与状态码逐项不变。
+     */
+    fun peekHeader(bytes: ByteArray): SaveHeader? {
+        val magic = if (bytes.size >= 8) readU64(bytes, 0) else -1L
+        if (magic != MAGIC_PLAIN && magic != MAGIC_GZIP) {
+            return peekText(bytes)
+        }
+        if (bytes.size < 16) return null
+        val version = readU32(bytes, 8).toInt()
+        if (version != VERSION) return null
+        val gzip = magic == MAGIC_GZIP
+        return try {
+            val bodyOff = containerBodyOffset(bytes)
+            if (!gzip) {
+                // 未压缩容器不复制正文：游标从正文起点直接读头。
+                parseBinaryHeader(bytes, bodyOff, gzip = false, version = version)
+            } else {
+                val (head, overCap) = peekGzipHeader(bytes, bodyOff, version)
+                if (!overCap) {
+                    head
+                } else {
+                    // 头前缀被描述文本撑满（超长 SAVEDATA_TEXT）：退回全量解压，口径与旧实现一致。
+                    val full = readContainer(bytes)
+                    parseBinaryHeader(full.payload, 0, gzip = true, version = version)
+                }
+            }
+        } catch (_: SaveFormatException) {
+            null
+        }
+    }
+
+    /** 头前缀的字节上限：正常存档的描述文本只有数百字节；超出即回落全量解压。 */
+    private const val PEEK_PREFIX_BYTES = 16 * 1024
+
+    /** 从二进制正文的 [start] 处读类别 / 存档码 / 脚本版本 / 描述文本；类别非法给 null。 */
+    private fun parseBinaryHeader(payload: ByteArray, start: Int, gzip: Boolean, version: Int): SaveHeader? {
+        val c = Cursor(payload, start)
+        val typeCode = c.u8()
+        val fileType = SaveFileKind.values().getOrNull(typeCode) ?: return null
+        val uniqueCode = c.i64()
+        val scriptVersion = c.i64()
+        val text = c.readString()
+        return SaveHeader(
+            binary = true, gzip = gzip, version = version, fileType = fileType,
+            uniqueCode = uniqueCode, scriptVersion = scriptVersion, text = text,
+        )
+    }
+
+    /**
+     * 只解压 GZip 正文到**头字段够用为止**，返回 `(头, 是否撞上限)`。
+     *
+     * - `(头, false)`：头已完整解析（正常档；不会继续读正文，也就不校验流尾 CRC/ISIZE）；
+     * - `(null, false)`：流提前结束 / 类别非法，头判定为 null；
+     * - `(null, true)`：解满 [PEEK_PREFIX_BYTES] 仍没解析出完整头（超长描述文本），
+     *   调用方回落 [readContainer] 的全量解压。
+     *
+     * 每读一小段就试解析，而不是固定读满前缀再解析：小档的头通常在第一次 `read` 之后
+     * 就齐了，这样也不会为了读头把整个小档解完（那等于又回到旧开销），
+     * 更不会碰 GZip 尾部的 CRC 校验。
+     */
+    private fun peekGzipHeader(bytes: ByteArray, off: Int, version: Int): Pair<SaveHeader?, Boolean> = try {
+        GZIPInputStream(ByteArrayInputStream(bytes, off, bytes.size - off)).use { ins ->
+            val out = ByteArrayOutputStream(512)
+            val buf = ByteArray(512)
+            while (out.size() < PEEK_PREFIX_BYTES) {
+                try {
+                    return@use parseBinaryHeader(out.toByteArray(), 0, gzip = true, version = version) to false
+                } catch (_: SaveFormatException) {
+                    // 头字段还没读全（空缓冲 / 描述文本被切在段尾），继续解下一段。
+                }
+                val n = ins.read(buf)
+                if (n < 0) return@use null to false
+                out.write(buf, 0, n)
+            }
+            null to true
+        }
+    } catch (e: Exception) {
+        throw SaveFormatException("GZip 头解压失败：${e.message}")
     }
 
     /**
@@ -257,17 +393,37 @@ object SaveFormat {
      * `EraBinaryDataReader.cs:820-824`）都读不回来的文件 —— 已按原版收口。
      */
     fun write(data: SaveData): ByteArray {
+        val out = ByteArrayOutputStream()
+        writeTo(data, out)
+        return out.toByteArray()
+    }
+
+    /**
+     * 流式序列化（OOM-B 波，2026-11-08）：字节直接写进 [out]，不再物化
+     * 「gzip 副本 + 容器 BAOS + 终拷贝」三份中间数组 —— 旧 [write] 的峰值四份并存
+     * （payload / gzip / 容器 / toByteArray）在堆贴顶时就是压垮存档的最后一根草
+     * （`FileSystemOps.saveData` 的求援重试链 KDoc 有账）。
+     *
+     * **payload 仍物化**：逐字节幂等短路（类 KDoc）要拿它与 `sourcePayload` 全量比对，
+     * 这一份是判据本身、省不掉；省的是它之后的三份拷贝。
+     *
+     * 字节口径与 [write] 逐字相同：同一个 16 字节头 + 同壳 GZip（[GZIP_HEADER] +
+     * raw deflate + CRC32 + ISIZE，头字段 MTIME=0/XFL=0/OS=0x0A 与 .NET 8 同壳）；
+     * 幂等命中时写 `sourceFile` 原字节。`deflate 数据与 .NET 不保证逐字节相同`的既有
+     * 口径不变（见 [gzipTo]）—— 本函数与 [write] 用同一个 `Deflater` 同参数，产物逐字节一致。
+     */
+    fun writeTo(data: SaveData, out: java.io.OutputStream) {
         val payload = encodePayload(data)
         val src = data.sourceFile
         val srcPayload = data.sourcePayload
-        if (src != null && srcPayload != null && payload.contentEquals(srcPayload)) return src.copyOf()
-
-        val out = ByteArrayOutputStream(payload.size / 3 + 32)
+        if (src != null && srcPayload != null && payload.contentEquals(srcPayload)) {
+            out.write(src)
+            return
+        }
         writeU64(out, if (data.compressed) MAGIC_GZIP else MAGIC_PLAIN)
         writeU32(out, VERSION.toLong())
         writeU32(out, 0L)
-        if (data.compressed) out.write(gzip(payload)) else out.write(payload)
-        return out.toByteArray()
+        if (data.compressed) gzipTo(payload, out) else out.write(payload)
     }
 
     /** 只编码 payload（不含 16 字节头 / GZip 外壳）。测试用，也是幂等判据的比较对象。 */
@@ -326,6 +482,8 @@ object SaveFormat {
      * 的 `while (LoadVariableBinary(...))` 同时驱动变量段与 EM 段），它的 switch 只有
      * Map/Xml/DT/EOF/Int/Str/六种数组共十二个分支（:4093-4206），253 与 254 都落到
      * `default:` 抛 `FileEE(AbnormalData)`（VariableData.cs:4207-4208）。
+     * 4.981 的 fork 在同一个 switch 里又加了四个浮点分支（fork-src VariableData.cs:1486-1554），
+     * `default:` 紧随其后（:1555-1556）⇒ 浮点标签合法、253/254 依旧非法，本层口径不变。
      * 两个标签只在角色块里合法（`CharacterData.LoadFromStreamBinary` 的
      * `case Separator:` CharacterData.cs:591、`case EOC: case EOF: return;` :672-674），
      * 写侧也只在那里出现：`WriteSeparator()` 全仓唯一调用点是 CharacterData.cs:548，
@@ -536,6 +694,22 @@ object SaveFormat {
                 }
                 SaveEntry.IntArray3(key, d0, d1, d2, a)
             }
+            // ---- 浮点四型：定宽密集，无游程、无 `0xFF` 终止符（EraBinaryDataWriter.cs:132-170）----
+            TAG_FLOAT -> SaveEntry.FloatValue(key, readDouble())
+            TAG_FLOAT_ARRAY -> {
+                val n = claim(key, "Float1D", readLength().toLong(), DOUBLE_BYTES)
+                SaveEntry.FloatArray1(key, DoubleArray(n) { readDouble() })
+            }
+            TAG_FLOAT_ARRAY2D -> {
+                val d0 = readLength(); val d1 = readLength()
+                val a = DoubleArray(dimProduct(key, "Float2D", DOUBLE_BYTES, d0, d1)) { readDouble() }
+                SaveEntry.FloatArray2(key, d0, d1, a)
+            }
+            TAG_FLOAT_ARRAY3D -> {
+                val d0 = readLength(); val d1 = readLength(); val d2 = readLength()
+                val a = DoubleArray(dimProduct(key, "Float3D", DOUBLE_BYTES, d0, d1, d2)) { readDouble() }
+                SaveEntry.FloatArray3(key, d0, d1, d2, a)
+            }
             16 -> SaveEntry.StrValue(key, readString())
             17 -> {
                 val n = claim(key, "Str1D", readLength().toLong(), REF_BYTES)
@@ -662,6 +836,17 @@ object SaveFormat {
                 readLength(); readLength(); readLength(); skipArray(key, str = false)
             }
 
+            TAG_FLOAT -> readDouble()
+            TAG_FLOAT_ARRAY -> skipDoubles(key, readLength())
+            TAG_FLOAT_ARRAY2D -> {
+                val d0 = readLength(); val d1 = readLength(); skipDoubles(key, d0, d1)
+            }
+
+            TAG_FLOAT_ARRAY3D -> {
+                val d0 = readLength(); val d1 = readLength(); val d2 = readLength()
+                skipDoubles(key, d0, d1, d2)
+            }
+
             16 -> readString()
             17 -> {
                 readLength(); skipArray(key, str = true)
@@ -728,10 +913,7 @@ object SaveFormat {
         }
         val version = readU32(bytes, 8).toInt()
         if (version != VERSION) throw SaveFormatException("不支持的存档版本 $version（只认 1808）")
-        val tableCount = readU32(bytes, 12)
-        if (tableCount > 1_000_000L) throw SaveFormatException("校验表条数异常：$tableCount")
-        val bodyOff = 16 + tableCount.toInt() * 4
-        if (bodyOff > bytes.size) throw SaveFormatException("校验表越界")
+        val bodyOff = containerBodyOffset(bytes)
         val payload = if (magic == MAGIC_GZIP) {
             gunzip(bytes, bodyOff)
         } else {
@@ -741,13 +923,27 @@ object SaveFormat {
     }
 
     /**
+     * 容器头之后的正文起点 = 16 + 校验表条数 × 4（`EraBinaryDataReader.cs:801-806`
+     * 读条数后逐格读走，`data` 数组再无消费点）。[readContainer] 与 [peekHeader] 共用，
+     * 保证两边的越界口径一致。
+     */
+    private fun containerBodyOffset(bytes: ByteArray): Int {
+        val tableCount = readU32(bytes, 12)
+        if (tableCount > 1_000_000L) throw SaveFormatException("校验表条数异常：$tableCount")
+        val bodyOff = 16 + tableCount.toInt() * 4
+        if (bodyOff > bytes.size) throw SaveFormatException("校验表越界")
+        return bodyOff
+    }
+
+    /**
      * GZip 解压，**带上限分块读**。
      *
      * 原版 `EraBinaryDataReader.CreateReader` 把 `GZipStream` 交给 `BinaryReader` 一路读
      * （`EraBinaryDataReader.cs:807-815`），没有任何长度闸：几十 KB 的压缩体可以解出数 GB，
      * `OutOfMemoryError` 是 `Error`，读档链的 catch 接不住。移植侧按 [gunzipLimit] 边读边计数，
-     * 超限即抛 [SaveFormatException]（坏档 ⇒ 与原版「读档失败」同一条产品路径）
-     * —— `CHKDATA` / `CHKCHARADATA` 的 [peek] 也走这里，同一道闸。
+     * 超限即抛 [SaveFormatException]（坏档 ⇒ 与原版「读档失败」同一条产品路径）。
+     * `CHKDATA` / `CHKCHARADATA` 的 [peekHeader] 只解到头字段够用（[peekGzipHeader]），不走这道闸 ——
+     * 它本来就不该为读几个头字段把整份正文解出来。
      *
      * @param maxBytes 只给测试注入更小的预算用；生产调用一律用 [gunzipLimit]
      */
@@ -796,9 +992,10 @@ object SaveFormat {
     /**
      * 与 .NET 8 `GZipStream` 同壳的压缩（头 10 字节 + raw deflate + CRC32 + ISIZE）。
      * 头字段实测：MTIME=0 / XFL=0 / OS=0x0A；deflate 数据本身与 .NET 不保证逐字节相同。
+     *
+     * 流式本体（OOM-B，2026-11-08）：头 / deflate / 尾直写 [out]，不物化压缩副本。
      */
-    private fun gzip(payload: ByteArray): ByteArray {
-        val out = ByteArrayOutputStream(payload.size / 3 + 64)
+    private fun gzipTo(payload: ByteArray, out: java.io.OutputStream) {
         out.write(GZIP_HEADER)
         val def = Deflater(Deflater.DEFAULT_COMPRESSION, true)
         try {
@@ -815,7 +1012,6 @@ object SaveFormat {
         val crc = CRC32().apply { update(payload) }.value
         writeU32(out, crc)
         writeU32(out, payload.size.toLong() and 0xFFFF_FFFFL)
-        return out.toByteArray()
     }
 
     // ==================================================================
@@ -868,8 +1064,12 @@ object SaveFormat {
      */
     private const val REF_BYTES = 8
 
-    private class Cursor(val b: ByteArray) {
-        var pos = 0
+    /**
+     * 正文游标。[start] 让未压缩容器跳过容器头与校验表直接读正文，避免为读头再复制一份
+     * 整段 payload（[peekHeader] 的常数级开销靠它）。
+     */
+    private class Cursor(val b: ByteArray, start: Int = 0) {
+        var pos = start
 
         /** 已申报的分配字节数（[claim] 累加）。 */
         private var allocated = 0L
@@ -933,6 +1133,19 @@ object SaveFormat {
             return v
         }
 
+        /**
+         * 定宽 8 字节小端 IEEE-754（.NET `BinaryReader.ReadDouble`，EraBinaryDataReader.cs:170/:283-285）。
+         * 用 [Double.fromBits] 按原始位还原，不做任何十进制/字符串中转 ⇒ NaN 的尾数、
+         * `-0.0` 的符号位、次正规数都逐位保留。
+         */
+        fun readDouble(): Double {
+            need(8)
+            var v = 0L
+            for (i in 0 until 8) v = v or ((b[pos + i].toLong() and 0xFF) shl (8 * i))
+            pos += 8
+            return Double.fromBits(v)
+        }
+
         /** `m_WriteInt` 的对称读法（EraBinaryDataWriter.cs:175-196）。 */
         fun readVarInt(): Long {
             val first = u8()
@@ -990,6 +1203,35 @@ object SaveFormat {
             return n
         }
 
+        /**
+         * 密集 double 段的纯跳过：按各维乘积定宽推进，不分配、不逐元素解析。
+         *
+         * 与 [skipArray] 的区别来自编码本身 —— 浮点数组没有 `0xF0` 游程标记也没有 `0xFF`
+         * 终止符（EraBinaryDataWriter.cs:138-170），元素数完全由维度前缀决定，所以可以直接寻址。
+         * 维度取自 [readLength]，已在 `0..MAX_ARRAY_ELEMENTS` 内。
+         */
+        fun skipDoubles(key: String, vararg dims: Int) {
+            var total = 1L
+            for (d in dims) {
+                // 先比后乘：三个 16M 维相乘是 4.1e21，会翻过 Long 上界（9.2e18）
+                if (d > 0 && total > Long.MAX_VALUE / d) {
+                    throw SaveFormatException(
+                        "Float $key 的维度乘积超过可寻址上限（维度 ${dims.joinToString("×")}，偏移 $pos）",
+                    )
+                }
+                total *= d
+            }
+            val remaining = (b.size - pos).toLong()
+            // 定宽段的长度只受正文剩余字节约束：这里给的是**跳过**，不建数组，
+            // 所以既不能超剩余字节，也无需过 [MAX_ENTRY_BYTES] 那道分配闸。
+            if (total > remaining / DOUBLE_BYTES) {
+                throw SaveFormatException(
+                    "Float $key 声明 $total 个 double，正文只剩 $remaining 字节（偏移 $pos）",
+                )
+            }
+            pos += (total * DOUBLE_BYTES).toInt()
+        }
+
         private fun need(n: Int) {
             if (pos + n > b.size) throw SaveFormatException("payload 截断（偏移 $pos 需要 $n 字节）")
         }
@@ -1027,6 +1269,17 @@ object SaveFormat {
             }
         }
 
+        /**
+         * 定宽 8 字节小端 IEEE-754 —— 与 .NET `BinaryWriter.Write(double)` 同形。
+         * 浮点**不共享**整数的变长整数与 0 游程编码：写侧每个元素都是一条
+         * `writer.Write(arr[i])`（EraBinaryDataWriter.cs:136/:145/:156/:169），零值也照写。
+         * 走 [Double.toRawBits] 而非十进制文本，NaN 尾数与 `-0.0` 的符号位才可能逐位往返。
+         */
+        fun dbl(v: Double) {
+            val bits = v.toRawBits()
+            for (i in 0 until 8) buf.write(((bits ushr (8 * i)) and 0xFF).toInt())
+        }
+
         fun str(s: String) {
             val byteLen = s.length * 2
             var n = byteLen
@@ -1048,6 +1301,19 @@ object SaveFormat {
                 is SaveEntry.IntArray1 -> { u8(1); str(e.key); int1(e.values) }
                 is SaveEntry.IntArray2 -> { u8(2); str(e.key); int2(e) }
                 is SaveEntry.IntArray3 -> { u8(3); str(e.key); int3(e) }
+                is SaveEntry.FloatValue -> { u8(TAG_FLOAT); str(e.key); dbl(e.value) }
+                is SaveEntry.FloatArray1 -> {
+                    u8(TAG_FLOAT_ARRAY); str(e.key); i32(e.values.size)
+                    for (v in e.values) dbl(v)
+                }
+                is SaveEntry.FloatArray2 -> {
+                    u8(TAG_FLOAT_ARRAY2D); str(e.key); i32(e.dim0); i32(e.dim1)
+                    for (i in 0 until e.dim0 * e.dim1) dbl(e.values[i])
+                }
+                is SaveEntry.FloatArray3 -> {
+                    u8(TAG_FLOAT_ARRAY3D); str(e.key); i32(e.dim0); i32(e.dim1); i32(e.dim2)
+                    for (i in 0 until e.dim0 * e.dim1 * e.dim2) dbl(e.values[i])
+                }
                 is SaveEntry.StrValue -> { u8(16); str(e.key); str(e.value) }
                 is SaveEntry.StrArray1 -> { u8(17); str(e.key); str1(e.values) }
                 is SaveEntry.StrArray2 -> { u8(18); str(e.key); str2(e) }
@@ -1184,16 +1450,18 @@ object SaveFormat {
         return v
     }
 
-    private fun writeU32(out: ByteArrayOutputStream, v: Long) {
+    /** 写 32 位（OOM-B：收 `OutputStream` 而非 `ByteArrayOutputStream`，流式口与旧口共用）。 */
+    private fun writeU32(out: java.io.OutputStream, v: Long) {
         for (i in 0 until 4) out.write(((v ushr (8 * i)) and 0xFF).toInt())
     }
 
-    private fun writeU64(out: ByteArrayOutputStream, v: Long) {
+    /** 写 64 位（同 [writeU32] 的流式口）。 */
+    private fun writeU64(out: java.io.OutputStream, v: Long) {
         for (i in 0 until 8) out.write(((v ushr (8 * i)) and 0xFF).toInt())
     }
 }
 
-/** 存档头（[SaveFormat.peek] 的结果）。 */
+/** 存档头（[SaveFormat.peek] / [SaveFormat.peekHeader] 的结果）。 */
 data class SaveHeader(
     val binary: Boolean,
     val gzip: Boolean,

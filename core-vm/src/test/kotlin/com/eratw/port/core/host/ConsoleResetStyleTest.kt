@@ -99,6 +99,40 @@ class ConsoleResetStyleTest {
     }
 
     /**
+     * W8 刀四：`Config.ForeColor` 是装载期注入项（EmueraConsole.cs:206-208 构造两个
+     * StringStyle、FunctionIdentifier.cs:1501 RESETCOLOR 的落点）—— 注入值必须接管
+     * [currentFore] 的三条回落支与 printError 的默认样式行，SETCOLOR 的显式值不受影响。
+     */
+    @Test
+    fun injectedDefaultForeColorDrivesFallbackChainAndErrorLine() {
+        val custom = 0x112233
+        val s = LineBufferConsoleSink(clientWidth = 80, defaultForeColor = custom)
+        s.setUseUserStyle(true)
+
+        // 支 1：userStyle 开着但未 SETCOLOR（foreColor=null）⇒ 回落注入默认色，不是工厂常量。
+        s.printLine("a")
+        assertEquals(custom, s.snapshot()[0].segments.single().foreColor)
+
+        // SETCOLOR 的显式值照旧吃紧。
+        s.setForeColor(255, 0, 0)
+        s.printLine("b")
+        assertEquals(0xFF0000, s.snapshot()[1].segments.single().foreColor)
+
+        // 支 2：RESETCOLOR（resetStyle）⇒ 回注入默认色（原版 SetStringStyle(Config.ForeColor)）。
+        s.resetStyle()
+        s.printLine("c")
+        assertEquals(custom, s.snapshot()[2].segments.single().foreColor)
+
+        // 错误行走 defaultStyle（EmueraConsole.cs:3098-3115 UseUserStyle=false）⇒ 同一注入值。
+        s.setForeColor(255, 0, 0)
+        s.printError("boom")
+        assertEquals(custom, s.snapshot().last().segments.single().foreColor)
+
+        // 缺省不注入 = 工厂常量（基准侧 `emuera.config:24` 与之同值，读数不变）。
+        assertEquals(LineBufferConsoleSink.DEFAULT_FORE_COLOR, LineBufferConsoleSink().defaultForeColor)
+    }
+
+    /**
      * 接口缺省组合路径（委托型宿主，如 ProcessRuntime 的 ConsoleBridge 每只 setter
      * 转发真 sink）与 [LineBufferConsoleSink] 的字段直写覆写必须落到**同一终态**，
      * 且组合里不得出现背景/重绘动作（resetStyle 复位面 = 四项，出处见

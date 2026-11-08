@@ -1,6 +1,7 @@
 package com.eratw.port.uipreview
 
 import com.eratw.port.core.host.GraphicsSink
+import com.eratw.port.render.adapter.HtmlRunFlatten
 import com.eratw.port.render.glyph.CellMetrics
 import com.eratw.port.render.view.GraphicsLayer
 import com.eratw.port.render.view.GraphicsSinkBridge
@@ -21,9 +22,18 @@ import com.eratw.port.render.view.GraphicsSinkBridge
  * @param scriptFontPixelSize 脚本 `px` 的基准字号（= 会话生效 `Config.FontSize`）：预览要复现
  *   真机版面就必须与 `ConsoleFeed` 喂同一个值，否则 `<img>` 用语句打与用 HTML 打的尺寸分叉。
  *   0（缺省）= 不折算。
+ * @param sizeSource 图元尺寸源（[HtmlRunFlatten.ImageSizeSource]，生产形状 = [JvmImageFrames]）：
+ *   `PRINT_IMG` 缺宽按纵横比推宽、图元 miss 按 AltText 量宽（`ConsoleImagePart.cs:60-71`）。
+ *   预览喂的是与 [JvmImageFrames] 同一份表；null（缺省）= 判不了图元在不在，保持见方占位。
  */
 class JvmGraphicsSink(
     layer: GraphicsLayer,
     metrics: CellMetrics,
     scriptFontPixelSize: Int = 0,
-) : GraphicsSink by GraphicsSinkBridge(layer, metrics, scriptFontPixelSize = scriptFontPixelSize)
+    sizeSource: HtmlRunFlatten.ImageSizeSource? = null,
+) : GraphicsSink by GraphicsSinkBridge(
+    layer,
+    metrics,
+    scriptFontPixelSize = scriptFontPixelSize,
+    sizeSource = sizeSource,
+)

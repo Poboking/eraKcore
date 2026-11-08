@@ -7,8 +7,9 @@ import kotlin.test.assertEquals
  * CMP-81：`USE _RENAME.CSV FILE` 的读取入口。
  *
  * 运行期读开关、装载侧照开关行事（原版 `Config.cs:310` 读、`Process.cs:261-274` 依开关装载）。
- * 移植侧本卡只补 [EffectiveConfig.useRenameFile] 读取方法；接线（`CorpusCompile` 无条件
- * 加载、`LogicalLineReader.renameDic` 无运行期调用点）归组长。
+ * 移植侧本卡只补 [EffectiveConfig.useRenameFile] 读取方法；装载面接线已在
+ * `CorpusCompile` / `ModImportController` 按此位门控（`RenameFileGateTest` 钉），
+ * `LogicalLineReader.renameDic` 没有运行期调用点。
  *
  * 键与默认值：`ConfigKey.UseRenameFile`（`ConfigKey.kt:30` = `ConfigCode.cs:6`），
  * 缺省 false（`ConfigSpec.kt:103` = `ConfigData.cs:46`）。

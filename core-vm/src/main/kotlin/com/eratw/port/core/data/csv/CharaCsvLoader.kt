@@ -1,5 +1,6 @@
 package com.eratw.port.core.data.csv
 
+import com.eratw.port.core.lexer.longFromScaledDouble
 import com.eratw.port.core.vars.CharacterTemplate
 import com.eratw.port.core.vars.VariableRegistry
 import com.eratw.port.core.vars.VariableSizes
@@ -62,10 +63,16 @@ object CharaCsvLoader {
     }
 
     /**
-     * `Config.getFiles`（Config.cs:654-712）的文件序：本层文件按名序先出，随后子目录按名序递归。
+     * `Config.getFiles`（Config.cs:654-712）的文件序：本层文件先出、子目录随后按名序递归
+     * （`:690-704` 的循环在文件循环之后）。原版对本层文件与子目录各自 `Array.Sort` 排
+     * **全路径**（`:681` / `:697`），comparer = `Comparer<string>.Default` =
+     * `String.CompareTo` = **当前文化**比较 —— B6（2026-11-06 翻案）照抄：本层排序用
+     * [PATH_COLLATOR]（ja-JP 文化序，口径见其 KDoc），不再退化为 ordinal 文件名序。
+     * 同层内全路径共享目录前缀 ⇒ 按全路径比与按名比同序；这里仍按 `toString()` 全串比，
+     * 与 `:681` 的字面口径逐字对齐。
+     *
      * 与「收集完再按全路径排序」不同：`Chara9.csv` 会排在 `Chara0/Chara5.csv` **之前**
-     * （字典序会反过来）。原版 `Array.Sort` 排的是全路径且用当前文化比较（:681），
-     * 这里退化为「同层按文件名序」，只在含非 ASCII 文件名的同层里可能与 PC 分叉（登记项）。
+     * （原版是逐层排序后即输出，不是最后全局排）。
      */
     private fun findCharaFiles(dir: Path): List<Path> {
         val out = ArrayList<Path>()
@@ -79,8 +86,8 @@ object CharaCsvLoader {
         } catch (_: java.io.IOException) {
             return
         }
-        val files = entries.filter { !Files.isDirectory(it) }.sortedBy { it.fileName.toString() }
-        val subdirs = entries.filter { Files.isDirectory(it) }.sortedBy { it.fileName.toString() }
+        val files = entries.filter { !Files.isDirectory(it) }.sortedWith(compareBy(PATH_COLLATOR) { it.toString() })
+        val subdirs = entries.filter { Files.isDirectory(it) }.sortedWith(compareBy(PATH_COLLATOR) { it.toString() })
         for (e in files) {
             val n = e.fileName.toString()
             if (n.length >= 5 && n.substring(0, 5).equals("chara", ignoreCase = true) &&
@@ -91,6 +98,29 @@ object CharaCsvLoader {
         }
         for (sub in subdirs) visit(sub, out)
     }
+
+    /**
+     * 同层排序的文化口径（B6，2026-11-06）：**ja-JP**。
+     *
+     * 证据链：`Config.cs:681` 的 `Array.Sort(files)` 无 comparer ⇒ `Comparer<string>.Default`
+     * ⇒ `string.CompareTo(string)` = `CultureInfo.CurrentCulture.CompareInfo.Compare`（默认选项）。
+     * reference 全树对 `CurrentCulture` **零处改写**（只有 `CultureInfo.InvariantCulture` 的
+     * 内部键大写化，如 ConfigData.cs:264 / AConfigItem.cs:22，不涉排序）⇒ 游戏进程的文化 =
+     * 宿主 OS 文化；本游戏原产/预期运行环境是日文 Windows（CSV 标签全日文、emuera.config
+     * 为日文游戏），故「当前文化」取 ja-JP —— 契约明令「游戏原产文化 ja-JP 是什么就用什么，
+     * 别发明」。移植侧不读设备 Locale（Android 设备文化随玩家而变，会把文件序变成设备相关），
+     * 钉死 `Locale.JAPAN`。
+     *
+     * 实现 = `java.text.Collator`（TERTIARY 缺省强度 ⇒ 大小写敏感，与 .NET CompareTo 同档）。
+     * 实测分叉例（JVM Temurin 17 探针，2026-11-06）：`Charaa.csv < CharaA.csv`
+     * （文化序小写在前；ordinal 是 `A`(0x41) < `a`(0x61) 反序）、`Charaア < Charaい`
+     * （五十音 a 行先于 i 行；ordinal 是 い(0x3044) < ア(0x30A2) 反序）。
+     * TODO(verify)：.NET NLS 与 JVM ICU 的 ja-JP 排序键**不是同一实现**，残余差异面
+     * （长音符 `ー`、浊点组合、全角/半角宽）未经 .NET 8 探针对账 —— 与 verify-notes
+     * §16.3-1（SORTCHARA 字符串键）同一卡点，取到 PC oracle 后一并销账；语料 CSV 文件名
+     * 全 ASCII（`CHARA` 系 168 文件，2026-10-22 实测）⇒ 差异当前不可达。
+     */
+    private val PATH_COLLATOR: java.text.Collator = java.text.Collator.getInstance(java.util.Locale.JAPAN)
 
     /**
      * 文件名里 `CHARA` 前缀后的前导数字（`Chara1 霊夢.csv` → 1；无数字 → 0）。
@@ -417,7 +447,7 @@ object CharaCsvLoader {
                 if (d.isNaN() || d.isInfinite() || d > 9.223372036854776E18 || d < -9.223372036854776E18) {
                     return null
                 }
-                value = d.toLong() // C# `(long)num5`：截断取整
+                value = longFromScaledDouble(d) // C# `(long)num5`：x64 越界口径见该函数 KDoc
             }
         }
         return value

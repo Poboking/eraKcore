@@ -194,21 +194,23 @@ class MapDataAuditTest {
     // ==================================================================
 
     @Test
-    fun `DT_CELL_GETS 按 id 取整列强转中止（fixcore fn-data-B1）`() {
+    fun `DT_CELL_GETS 按 id 取整列强转中止（复刻 InvalidCastException）`() {
         val c = auditCtx()
         auditInt(c, "DT_CREATE", aS("T"))
         auditInt(c, "DT_COLUMN_ADD", aS("T"), aS("n"), aI(4))
         auditInt(c, "DT_COLUMN_ADD", aS("T"), aS("s"))
         auditInt(c, "DT_ROW_ADD", aS("T"), aS("n"), aI(123), aS("s"), aS("x"))
         val id = auditFirstRowId(c, "T")
-        // fixcore fn-data-B1（2026-10-26）落地本注曾经预留的复刻方向：原版按行号路径是
-        // obj.ToString()（:2535-2538）整列可取；按 id 路径却是 (string)obj 直接强转
-        // （:2529）—— InvalidCastException 且链路无 try（FunctionMethodTerm.cs:20-23）
-        // ⇒ 想定外中止。byId + 整列现在抛 CodeEE，行号路径维持 toString。
+        // 原断言（fixcore fn-data-B1 现状钉桩）：byId + 整列抛 CodeEE。
+        // 新断言：原版 byId 分支是 `(string)obj` 直接强转（FunctionMethodCreator.cs:2529），
+        // 装箱整数强转抛 InvalidCastException（dotnet 8 探针 C），链路无 try
+        // （FunctionMethodTerm.cs:20-23 → Process.cs 非 EmueraException 分支）⇒ 裸 CLR 异常；
+        // 按分歧 C 的裸 CLR→裸 JVM 映射（同 DT_COLUMN_NAMES 的 IndexOutOfBoundsException 先例）
+        // 改抛 ClassCastException。行号路径维持 obj.ToString()（:2538）。
         assertEquals("123", auditStr(c, "DT_CELL_GETS", aS("T"), aI(0), aS("n")))
-        assertFailsWith<CodeEE> { auditStr(c, "DT_CELL_GETS", aS("T"), aI(id), aS("n"), aI(1)) }
+        assertFailsWith<ClassCastException> { auditStr(c, "DT_CELL_GETS", aS("T"), aI(id), aS("n"), aI(1)) }
         assertEquals("x", auditStr(c, "DT_CELL_GETS", aS("T"), aI(id), aS("s"), aI(1)))
-        // 缺行 / 缺列 → ""（:2541）。
+        // 缺行 / 缺列 → ""（:2541）；DBNull 格 byId → ""（:2527-2531 落空 → :2541）。
         assertEquals("", auditStr(c, "DT_CELL_GETS", aS("T"), aI(99), aS("s")))
         assertEquals("", auditStr(c, "DT_CELL_GETS", aS("T"), aI(0), aS("NOPE")))
     }
@@ -261,19 +263,24 @@ class MapDataAuditTest {
     // ==================================================================
 
     @Test
-    fun `DT_ROW_ADD 不可空列未赋值的预填现状`() {
+    fun `DT_ROW_ADD 不可空列未赋值在 RowsAdd 边界中止（复刻 NoNullAllowed）`() {
         val c = auditCtx()
         auditInt(c, "DT_CREATE", aS("T"))
         // 第 4 参 0 → AllowDBNull=false（FunctionMethodCreator.cs:2117）。
         auditInt(c, "DT_COLUMN_ADD", aS("T"), aS("n"), aI(4), aI(0))
-        // 现状：newRow 预填类型零值（MapDataTableMethods.kt:476-487），行照常加入。
-        auditInt(c, "DT_ROW_ADD", aS("T"))
+        // 原断言（现状钉桩）：行照常加入、GET=0、ISNULL=0（类型零值预填）。
+        // 新断言：.NET NewRow 对不可空列保持 DBNull、:2318 Rows.Add 触发非空约束抛
+        // NoNullAllowedException（dotnet 8 探针 A5；异常后行不落表，探针 A5b）——
+        // 「不可空列预填 0」在 PC 上不可观测（旧登记名作废），移植侧按分歧 C 的裸异常
+        // 映射抛 IllegalStateException（链路无 try：FunctionMethodTerm.cs:20-23）。
+        assertFailsWith<IllegalStateException> { auditInt(c, "DT_ROW_ADD", aS("T")) }
+        assertEquals(0L, auditInt(c, "DT_ROW_LENGTH", aS("T")))
+        // 设了 DefaultValue 的不可空列：NewRow 填默认值、Rows.Add 放行（探针 D3）。
+        dtColumnOptionsDefault(c.store, "T", "n", aI(7))
+        val id = auditInt(c, "DT_ROW_ADD", aS("T"))
         assertEquals(1L, auditInt(c, "DT_ROW_LENGTH", aS("T")))
-        assertEquals(0L, auditInt(c, "DT_CELL_GET", aS("T"), aI(0), aS("n")))
-        assertEquals(0L, auditInt(c, "DT_CELL_ISNULL", aS("T"), aI(0), aS("n")))
-        // 登记分歧（需组长接线；ADR-005 议题）：原版 :2277 NewRow 对该列保持 DBNull、
-        // :2318 Rows.Add 触发 ADO.NET 非空约束 → NoNullAllowedException（框架语义，
-        // 仓库内无行内行号），即「加行时漏给不可空列」在 PC 上是运行错，移植侧静默 0。
+        assertEquals(7L, auditInt(c, "DT_CELL_GET", aS("T"), aI(id), aS("n"), aI(1)))
+        assertEquals(0L, auditInt(c, "DT_CELL_ISNULL", aS("T"), aI(id), aS("n"), aI(1)))
     }
 
     // ==================================================================
@@ -565,11 +572,73 @@ class MapDataAuditTest {
         // （语料 plugins/schema.xml:3 写的是宿主库名 "db"，表元素与数据行都叫 bbas_dataset；
         // ERB/BODY_INFO/BBAS_DATASET.ERB:11 传入 bbas_dataset，PC 装载成功并读出 160 行）。
         // wave/audit-dt 起 readTableFromSchema 不再拿 MainDataTable 卡名。
+        // DT-FRAME 波补 dotnet 8 探针（netcoreapp8.0 与游戏运行时同源）：J1/J6 —— ReadXmlSchema
+        // 不消费 MainDataTable（指向不存在的 "ghost" 也静默无视、不改名不抛）；J3/J4/J7 ——
+        // ERB 名匹配不到表元素名时抛 ArgumentException → :2749-2752 catch → 0（与上面
+        // 对照组同构）；J2b —— 装载后 WriteXmlSchema 输出的 MainDataTable 是表自身名。
         assertEquals(1L, auditInt(c, "DT_FROMXML", aS("T"), aS(schema), aS(data)))
         assertEquals(1L, auditInt(c, "DT_ROW_LENGTH", aS("T")))
         assertEquals("a", auditStr(c, "DT_CELL_GETS", aS("T"), aI(0), aS("nm")))
         // 对照组：表元素名与传入名不一致时仍然拒绝（原版 ReadXmlSchema 找不到同名表）。
         assertEquals(0L, auditInt(c, "DT_FROMXML", aS("T2"), aS(schema), aS(data)))
+    }
+
+    @Test
+    fun `DT_FROMXML 数据段畸形面的官方表现（探针 J9 J12 J13 J14 D3）`() {
+        val c = auditCtx()
+        val schema = "<xs:schema id=\"NewDataSet\" xmlns=\"\" " +
+            "xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" " +
+            "xmlns:msdata=\"urn:schemas-microsoft-com:xml-msdata\">" +
+            "<xs:element name=\"NewDataSet\" msdata:IsDataSet=\"true\" msdata:UseCurrentLocale=\"true\">" +
+            "<xs:complexType><xs:choice minOccurs=\"0\" maxOccurs=\"unbounded\">" +
+            "<xs:element name=\"T\"><xs:complexType><xs:sequence>" +
+            "<xs:element name=\"id\" type=\"xs:long\" />" +
+            "<xs:element name=\"nm\" type=\"xs:string\" minOccurs=\"0\" />" +
+            "<xs:element name=\"req\" type=\"xs:int\" />" +
+            "<xs:element name=\"dv\" type=\"xs:int\" default=\"7\" />" +
+            "</xs:sequence></xs:complexType></xs:element>" +
+            "</xs:choice></xs:complexType>" +
+            "<xs:unique name=\"Constraint1\" msdata:PrimaryKey=\"true\">" +
+            "<xs:selector xpath=\".//T\" /><xs:field xpath=\"id\" /></xs:unique>" +
+            "</xs:element></xs:schema>"
+        // J9：ReadXml（有 schema）不校验根元素名 —— 行元素按表名在任意深度匹配。
+        assertEquals(1L, auditInt(c, "DT_FROMXML", aS("T"), aS(schema), aS("<Foo><T><id>1</id><nm>a</nm><req>2</req></T></Foo>")))
+        assertEquals(1L, auditInt(c, "DT_ROW_LENGTH", aS("T")))
+        assertEquals("a", auditStr(c, "DT_CELL_GETS", aS("T"), aI(0), aS("nm")))
+        // J12：空根 0 行无错（返回 1，与 .NET mode=Auto rows=0 同面）。
+        assertEquals(1L, auditInt(c, "DT_FROMXML", aS("T"), aS(schema), aS("<DocumentElement />")))
+        assertEquals(0L, auditInt(c, "DT_ROW_LENGTH", aS("T")))
+        // J14：重复主键 → ConstraintException（装载期唯一约束）→ :2749-2752 catch → 0。
+        assertEquals(
+            0L,
+            auditInt(
+                c, "DT_FROMXML", aS("T"), aS(schema),
+                aS("<DocumentElement><T><id>1</id><req>1</req></T><T><id>1</id><req>2</req></T></DocumentElement>"),
+            ),
+        )
+        // J13：缺不可空列（req 无 minOccurs、无 default）→ ConstraintException → 0。
+        assertEquals(
+            0L,
+            auditInt(c, "DT_FROMXML", aS("T"), aS(schema), aS("<DocumentElement><T><id>1</id></T></DocumentElement>")),
+        )
+        // D3：缺有 DefaultValue 的不可空列（dv）→ 填默认值放行。
+        assertEquals(
+            1L,
+            auditInt(
+                c, "DT_FROMXML", aS("T"), aS(schema),
+                aS("<DocumentElement><T><id>1</id><req>5</req></T></DocumentElement>"),
+            ),
+        )
+        assertEquals(7L, auditInt(c, "DT_CELL_GET", aS("T"), aI(1), aS("dv"), aI(1)))
+        // 正常形态（含缺 dv 行）回归。
+        assertEquals(
+            1L,
+            auditInt(
+                c, "DT_FROMXML", aS("T"), aS(schema),
+                aS("<DocumentElement><T><id>2</id><nm>b</nm><req>9</req></T></DocumentElement>"),
+            ),
+        )
+        assertEquals(9L, auditInt(c, "DT_CELL_GET", aS("T"), aI(2), aS("req"), aI(1)))
     }
 
     @Test
@@ -592,9 +661,10 @@ class MapDataAuditTest {
         // 设 true（:1993-1996），移植侧对应 :529）。
         assertEquals(5L, auditInt(c, "DT_COLUMN_EXIST", aS("T12"), aS("NM")))
         assertEquals(5L, auditInt(c, "DT_COLUMN_EXIST", aS("T12"), aS("nm")))
-        // 登记分歧（登记不修正，TODO(verify)）：schema 里的 msdata:CaseSensitive 属性
-        // （语料 plugins/schema.xml:3 与 :7 都带 True）未被移植侧消费；.NET 是否据此设
-        // CaseSensitive 属框架行为（reference 无仓内行号）。语料读数列名全小写一致，暂无可观测差。
+        // 原 TODO(verify) 已销：schema 的 msdata:CaseSensitive 自 FN-07 起被真消费
+        // （readTableFromSchema → parseMsDataCase，dotnet 8 探针逐层喂属性读数见其 KDoc：
+        // 只认表元素属性、DataSet 级只参与合法性校验）。本用例 schema 两层都不带 ⇒ 框架
+        // 缺省 false，与上面两条断言同向。
     }
 
     // ==================================================================

@@ -206,12 +206,22 @@ object SystemStateGraph {
         },
         node(SystemStateCode.Train_CallEventComEnd, "endCallEventComEnd") {
             enter = "EVENTCOMEND 返回 / COM 链结束"
-            exit = "临时行校验失败 → Train_CallShowUserCom；否则回到 endCallEventTrain"
-            failure = "CALLTRAINEND 存在时直接终止本轮回合（不回训练菜单，Process.cs:2443-2447）"
-            evidence = "Process.cs:2424-2456"
-            to(SystemStateCode.Train_CallShowUserCom, "LastLineIsTemporary && needCheck", "Process.cs:2426-2436")
+            exit = "①临时行校验失败 → Train_CallShowUserCom；②eraTW AUTO_SAVE==\"前\" → " +
+                "内联走一遍自动存档链（见 AutoSave_CallSaveInfo 节点）；③CALLTRAIN 队列耗尽 → " +
+                "CALLTRAINEND(force=false)，调得动则原地返回（needCheck=false，Process.cs:2443-2447）；" +
+                "否则回到 endCallEventTrain"
+            failure = "宿主缺 saveTo（「前」档）→ BLOCKED，不伪造成败（移植侧扩展）"
+            evidence = "Process.cs:2424-2456（「前」分支出自裁定报告引新版 :1849-1891，TODO(verify)）"
+            to(
+                SystemStateCode.Train_CallShowUserCom,
+                "LastLineIsTemporary && !isCTrain && needCheck（末行还是空临时行时先删 2 逻辑行 + " +
+                    "画无效的值临时行，Process.cs:2428-2432；updatedGeneration 缺口登记）",
+                "Process.cs:2426-2436",
+            )
+            // CALLTRAINEND 派发成功时状态**原地不动**（:2446 的 return），原版靠 runSystemProc
+            // 循环再进本 handler，第二次 isCTrain 已 false 落到尾部。
             // 原版直接调用 endCallEventTrain()（:2455）；本移植拆成一步（见 BeginFlow KDoc）。
-            to(SystemStateCode.Train_CallEventTrain, "否则 → endCallEventTrain（本移植的一步拆分）", "Process.cs:2455")
+            to(SystemStateCode.Train_CallEventTrain, "否则 → endCallEventTrain（本移植的一步拆分）", "Process.cs:2449-2455")
             to(SystemStateCode.Train_CallEventCom, "endCallEventTrain 且 NEXTCOM >= 0", "Process.cs:2455 → 2228-2234")
             to(SystemStateCode.Train_CallShowStatus, "endCallEventTrain 且 NEXTCOM < 0", "Process.cs:2455 → 2240-2241")
         },
@@ -290,34 +300,43 @@ object SystemStateGraph {
         },
         node(SystemStateCode.Shop_CallEventShop, "endCallEventShop") {
             enter = "EVENTSHOP 返回 / 缺失"
-            exit = "AutoSave 开启且 calledWhenNormal → 自动存档链；否则 AutoSave_Skipped"
-            failure = "无（存档失败仅打印两行错误，Process.cs:2583-2588）"
-            evidence = "Process.cs:2553-2563"
+            exit = "saveTarget>=0 → 不重复进 AUTO_SAVE（入口闸，见 BeginFlow.saveTarget KDoc 的 TODO(verify)）；" +
+                "AutoSave 开启且 calledWhenNormal → beginAutoSave（SYSTEM_AUTOSAVE 优先，" +
+                "否则置 saveTarget=99 + SAVEDATA_TEXT 缺省时间戳 + SAVEINFO）；" +
+                "否则复位 saveTarget=-1 → AutoSave_Skipped"
+            failure = "存档失败不在此状态报（见 AutoSave_CallSaveInfo 的 endAutoSaveCallSaveInfo）"
+            evidence = "Process.cs:2553-2563 + :2565-2579"
             to(SystemStateCode.AutoSave_CallUniqueAutosave, "SYSTEM_AUTOSAVE 存在", "Process.cs:2565-2571")
             to(SystemStateCode.AutoSave_CallSaveInfo, "SYSTEM_AUTOSAVE 缺失且 SAVEINFO 存在", "Process.cs:2572-2578")
             to(SystemStateCode.AutoSave_Skipped, "AutoSave 关闭 / calledWhenNormal=false", "Process.cs:2561")
+            // 「不重复进」闸 + SAVEINFO 缺失的当场收口都直进 endAutoSave/endAutoSaveCallSaveInfo，
+            // 落点即 Shop_CallShowShop（无挂起 BEGIN 时）。
+            to(SystemStateCode.Shop_CallShowShop, "闸命中 / SAVEINFO 缺失当场收口", "Process.cs:1656-1659(报告引新版) / :2576-2577 / :2594-2600")
         },
         node(SystemStateCode.AutoSave_CallSaveInfo, "endAutoSaveCallSaveInfo") {
-            enter = "SAVEINFO 返回 / 缺失"
-            exit = "endAutoSave()：isBegun → 执行挂起的 BEGIN；否则 SHOW_SHOP(force)"
-            failure = "SHOW_SHOP 缺失 → CodeEE（force=true，Process.cs:2600）"
+            enter = "SAVEINFO 返回 / beginAutoSave 当场直调（SAVEINFO 缺失）"
+            exit = "saveTarget==99 ⇒ host.saveTo(99, SAVEDATA_TEXT)（Process.cs:2583）；" +
+                "失败 ⇒ 两行报错 + ReadAnyKey（:2584-2588，不抛不断）；" +
+                "无论成败复位 saveTarget=-1 后 endAutoSave()：isBegun → 执行挂起的 BEGIN；否则 SHOW_SHOP(force)"
+            failure = "SHOW_SHOP 缺失 → CodeEE（force=true，Process.cs:2600）；宿主缺 saveTo → BLOCKED（移植侧扩展，不伪造）"
             evidence = "Process.cs:2581-2601"
-            to(SystemStateCode.Shop_CallShowShop, "!state.isBegun", "Process.cs:2594-2600")
-            to(SystemStateCode.Shop_Begin, "state.isBegun（挂起的 BEGIN）", "Process.cs:2594-2598")
+            to(SystemStateCode.Shop_CallShowShop, "!state.isBegun", "Process.cs:2589 → 2594-2600")
+            to(SystemStateCode.Shop_Begin, "state.isBegun（挂起的 BEGIN）", "Process.cs:2589 → 2594-2598")
         },
         node(SystemStateCode.AutoSave_CallUniqueAutosave, "endAutoSave") {
-            enter = "SYSTEM_AUTOSAVE 返回"
-            exit = "同 endAutoSaveCallSaveInfo"
+            enter = "SYSTEM_AUTOSAVE 返回（该函数自管实存，注册表 :2032 直挂裸 endAutoSave）"
+            exit = "同 endAutoSaveCallSaveInfo 的收口半边（isBegun → BEGIN；否则 SHOW_SHOP）"
             failure = "SHOW_SHOP 缺失 → CodeEE（force=true）"
-            evidence = "Process.cs:2592-2601"
+            evidence = "Process.cs:2032 / :2592-2601"
             to(SystemStateCode.Shop_CallShowShop, "!state.isBegun", "Process.cs:2594-2600")
             to(SystemStateCode.Shop_Begin, "state.isBegun", "Process.cs:2594-2598")
         },
         node(SystemStateCode.AutoSave_Skipped, "(无)") {
             enter = "endCallEventShop 直接赋值（不是 runSystemProc 的入口）"
-            exit = "立即调用 endAutoSaveCallSaveInfo()（Process.cs:2561-2562）"
+            exit = "立即调用 endAutoSaveCallSaveInfo()（Process.cs:2561-2562）；" +
+                "saveTarget 已复位 -1 ⇒ :2583 判据不成立、不触实档（`MAKE AUTOSAVES:NO` 走的就是这条）"
             failure = "同 AutoSave_CallSaveInfo"
-            evidence = "Process.cs:2561-2562"
+            evidence = "Process.cs:2555 / :2561-2562"
             to(SystemStateCode.Shop_CallShowShop, "!state.isBegun", "Process.cs:2594-2600")
             to(SystemStateCode.Shop_Begin, "state.isBegun", "Process.cs:2594-2598")
         },

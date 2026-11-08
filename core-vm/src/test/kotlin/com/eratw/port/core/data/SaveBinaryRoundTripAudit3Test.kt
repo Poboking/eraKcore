@@ -91,6 +91,12 @@ class SaveBinaryRoundTripAudit3Test {
         private fun u8(v: Int) { body.write(v and 0xFF) }
         private fun i32(v: Int) = put(v.toLong(), 4)
         private fun i64(v: Long) = put(v, 8)
+
+        /**
+         * `BinaryWriter.Write(double)` = 裸 8 字节小端 IEEE-754（EraBinaryDataWriter.cs:136/:145/:156/:169）。
+         * 刻意**不复用** [mWriteInt]：浮点没有变长整数、没有 0 游程、数组结尾也不写 `0xFF`。
+         */
+        private fun f64(v: Double) = put(v.toRawBits(), 8)
         private fun mark(slot: Int, tag: Int) { marks[slot]++; u8(tag) }
 
         /**
@@ -234,6 +240,20 @@ class SaveBinaryRoundTripAudit3Test {
                 is SaveEntry.IntArray1 -> { u8(1); binString(e.key); dataInt1(e.values) }
                 is SaveEntry.IntArray2 -> { u8(2); binString(e.key); dataInt2(e.dim0, e.dim1, rows2(e.dim0, e.dim1, e.values)) }
                 is SaveEntry.IntArray3 -> { u8(3); binString(e.key); dataInt3(e.dim0, e.dim1, e.dim2, planes3(e.dim0, e.dim1, e.dim2, e.values)) }
+                // 浮点四型（EraBinaryDataWriter.cs:132-170）：定宽密集，长度/维度是 Int32，元素逐个裸写
+                is SaveEntry.FloatValue -> { u8(4); binString(e.key); f64(e.value) }
+                is SaveEntry.FloatArray1 -> {
+                    u8(5); binString(e.key); i32(e.values.size)
+                    for (v in e.values) f64(v)
+                }
+                is SaveEntry.FloatArray2 -> {
+                    u8(6); binString(e.key); i32(e.dim0); i32(e.dim1)
+                    for (i in 0 until e.dim0 * e.dim1) f64(e.values[i])
+                }
+                is SaveEntry.FloatArray3 -> {
+                    u8(7); binString(e.key); i32(e.dim0); i32(e.dim1); i32(e.dim2)
+                    for (i in 0 until e.dim0 * e.dim1 * e.dim2) f64(e.values[i])
+                }
                 is SaveEntry.StrValue -> { u8(16); binString(e.key); dataStr(e.value) }
                 is SaveEntry.StrArray1 -> { u8(17); binString(e.key); dataStr1(e.values) }
                 is SaveEntry.StrArray2 -> { u8(18); binString(e.key); dataStr2(e.dim0, e.dim1, rowsStr2(e.dim0, e.dim1, e.values)) }
@@ -569,6 +589,11 @@ class SaveBinaryRoundTripAudit3Test {
         is SaveEntry.IntArray1 -> "A1:${e.key}:${e.values.size}:${e.values.contentHashCode()}"
         is SaveEntry.IntArray2 -> "A2:${e.key}:${e.dim0}x${e.dim1}:${e.values.contentHashCode()}"
         is SaveEntry.IntArray3 -> "A3:${e.key}:${e.dim0}x${e.dim1}x${e.dim2}:${e.values.contentHashCode()}"
+        // 浮点走 toRawBits/contentHashCode（Arrays 版按 longBits 计），`-0.0` 与 `0.0`、不同尾数的 NaN 不混
+        is SaveEntry.FloatValue -> "F:${e.key}:${e.value.toRawBits()}"
+        is SaveEntry.FloatArray1 -> "F1:${e.key}:${e.values.size}:${e.values.contentHashCode()}"
+        is SaveEntry.FloatArray2 -> "F2:${e.key}:${e.dim0}x${e.dim1}:${e.values.contentHashCode()}"
+        is SaveEntry.FloatArray3 -> "F3:${e.key}:${e.dim0}x${e.dim1}x${e.dim2}:${e.values.contentHashCode()}"
         is SaveEntry.StrValue -> "S:${e.key}:${e.value.norm()}"
         is SaveEntry.StrArray1 -> "S1:${e.key}:${e.values.size}:${e.values.map { it.norm() }.hashCode()}"
         is SaveEntry.StrArray2 -> "S2:${e.key}:${e.dim0}x${e.dim1}:${e.values.map { it.norm() }.hashCode()}"
@@ -1081,6 +1106,14 @@ class SaveBinaryRoundTripAudit3Test {
 
     /** 语料 `sav/` 优先，回落仓内只读样本目录（与 [com.eratw.port.core.save.SaveFormatAuditTest] 同两处）。 */
     private fun sampleFiles(): List<File> {
+        System.getenv("ERATW_SAVE_SAMPLES")?.trim()?.takeIf { it.isNotEmpty() }?.let { raw ->
+            val dir = File(raw)
+            if (dir.isDirectory) {
+                val found = (dir.listFiles { f: File -> f.isFile && f.name.endsWith(".sav") }?.toList() ?: emptyList())
+                    .sortedBy { it.name }
+                if (found.isNotEmpty()) return found
+            }
+        }
         gameDir()?.resolve("sav")?.let { dir ->
             if (Files.isDirectory(dir)) {
                 val found = (dir.toFile().listFiles { f: File -> f.isFile && f.name.endsWith(".sav") }?.toList() ?: emptyList())
@@ -1088,12 +1121,8 @@ class SaveBinaryRoundTripAudit3Test {
                 if (found.isNotEmpty()) return found
             }
         }
-        val repo = sequenceOf(
-            File("../../.workbuddy/sav-backup/sav-20261018-110513"),
-            File("../.workbuddy/sav-backup/sav-20261018-110513"),
-            File(".workbuddy/sav-backup/sav-20261018-110513"),
-        ).firstOrNull { it.isDirectory } ?: return emptyList()
-        return (repo.listFiles { f: File -> f.isFile && f.name.endsWith(".sav") }?.toList() ?: emptyList()).sortedBy { it.name }
+        // 公开仓不内置内部存档备份：无语料 sav/ 也无显式 ERATW_SAVE_SAMPLES ⇒ 空样本，按 assumption 跳过。
+        return emptyList()
     }
 
     /**
@@ -1107,7 +1136,7 @@ class SaveBinaryRoundTripAudit3Test {
     @Test
     fun `真档正文与 C# 转写逐字节一致并统计标记族`() {
         val files = sampleFiles()
-        Assumptions.assumeTrue(files.isNotEmpty(), "既无 ERATW_GAMEDIR/sav 也无仓内 sav-backup 样本，跳过真档判据")
+        Assumptions.assumeTrue(files.isNotEmpty(), "既无 ERATW_GAMEDIR/sav 也无显式 ERATW_SAVE_SAMPLES 样本，跳过真档判据")
 
         val rows = ArrayList<String>()
         val diffs = ArrayList<String>()

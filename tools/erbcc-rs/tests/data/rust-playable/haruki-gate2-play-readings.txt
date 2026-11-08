@@ -1,0 +1,93 @@
+# erbcc-rs / rust-playable 车道登记：Rust 腿产物装进引擎后的实测读数（Haruki 机）
+# 产法：python devtools/verify_rust_erbc_playable.py all --register（或单独 gate1 / gate1w / gate2 / gate3）
+# 时间：2026-11-01 14:21:08　语料：C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\full\rust\erbc.v1
+# 机相关：读数含产出机绝对路径与 vm 版本；换机（或改 core-vm 源码树/编译器指纹）后重跑刷新，判据不放宽。
+
+## 开局链（vmdbg explore，内置 START 链 → 第1日）：Rust 腿产物原样读数
+ctl_kotlin_boot_fail_console_lines 175
+ctl_kotlin_boot_fail_console_sha256 d3631728e3ba0cafecd164639781dae8cb5e373af55dcbd3d043109e3784a6d7
+ctl_kotlin_boot_fail_reason 引导第 15 步期望子串未命中：「全部覆盖」（输入 1；屏尾无此串，见 boot-fail-console.txt）
+ctl_kotlin_boot_fail_stepIndex 14
+ctl_kotlin_boot_fail_systemState Normal
+ctl_kotlin_boot_steps_reached 14
+ctl_kotlin_explore_coverage_sha256 a52efbbe4a83ac329e6c856052a0ab3f8b4a6ac5bdbc3593d4f28a61d34ac634
+ctl_kotlin_explore_elapsed_s 21.2
+ctl_kotlin_explore_executedFunctions 1453
+ctl_kotlin_explore_executedStatements 2608/1712420
+ctl_kotlin_explore_ledgerLines 0
+ctl_kotlin_explore_ledger_sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+ctl_kotlin_explore_rc 1
+ctl_kotlin_explore_reason 引导第 15 步期望子串未命中：「全部覆盖」（输入 1；屏尾无此串，见 boot-fail-console.txt）
+ctl_kotlin_explore_recipe BUILTIN_START
+ctl_kotlin_explore_replay 1.txt: Enter ;; 0 ;; 开始游戏 ;; 0 ;; 请选择游戏模式 ;; Enter ;; 自定义你的角色 ;; 9999 ;; 设定完毕 ;; 0 ;; 这样真的可以吗 ;; 1100 ;; 1100 ;; 3 ;; 请选择地图的种类 ;; 1999 ;; 1999 ;; Enter ;; 设定完毕 ;; Enter ;; 0 ;; Enter ;; 私室 ;; 100 ;; 完成自定义阶段
+ctl_kotlin_explore_status BOOT_FAILED
+ctl_rust_boot_fail_console_lines 175
+ctl_rust_boot_fail_console_sha256 d3631728e3ba0cafecd164639781dae8cb5e373af55dcbd3d043109e3784a6d7
+ctl_rust_boot_fail_reason 引导第 15 步期望子串未命中：「全部覆盖」（输入 1；屏尾无此串，见 boot-fail-console.txt）
+ctl_rust_boot_fail_stepIndex 14
+ctl_rust_boot_fail_systemState Normal
+ctl_rust_boot_steps_reached 14
+ctl_rust_explore_coverage_sha256 a52efbbe4a83ac329e6c856052a0ab3f8b4a6ac5bdbc3593d4f28a61d34ac634
+ctl_rust_explore_elapsed_s 22.2
+ctl_rust_explore_executedFunctions 1453
+ctl_rust_explore_executedStatements 2608/1712420
+ctl_rust_explore_ledgerLines 0
+ctl_rust_explore_ledger_sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+ctl_rust_explore_rc 1
+ctl_rust_explore_reason 引导第 15 步期望子串未命中：「全部覆盖」（输入 1；屏尾无此串，见 boot-fail-console.txt）
+ctl_rust_explore_recipe BUILTIN_START
+ctl_rust_explore_replay 1.txt: Enter ;; 0 ;; 开始游戏 ;; 0 ;; 请选择游戏模式 ;; Enter ;; 自定义你的角色 ;; 9999 ;; 设定完毕 ;; 0 ;; 这样真的可以吗 ;; 1100 ;; 1100 ;; 3 ;; 请选择地图的种类 ;; 1999 ;; 1999 ;; Enter ;; 设定完毕 ;; Enter ;; 0 ;; Enter ;; 私室 ;; 100 ;; 完成自定义阶段
+ctl_rust_explore_status BOOT_FAILED
+rust_boot_fail_console_lines 736
+rust_boot_fail_console_sha256 ad83c330e724fb48f1976a441196ed383993c94e0f8a4ddfe9942c0d96a4b90b
+rust_boot_fail_reason 食谱耗尽于非终点等待点（终点「第1日」未现身；type=INT）
+rust_boot_fail_stepIndex 264
+rust_boot_fail_systemState Shop_WaitInput
+rust_boot_steps_reached 264
+rust_explore_coverage_sha256 1564789a932b753f54f43d51ed94f05752bd1572b107aa52d003d72023406f97
+rust_explore_elapsed_s 34.2
+rust_explore_executedFunctions 1979
+rust_explore_executedStatements 4288/1712420
+rust_explore_ledgerLines 0
+rust_explore_ledger_sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+rust_explore_rc 1
+rust_explore_reason 食谱耗尽于非终点等待点（终点「第1日」未现身；type=INT）
+rust_explore_recipe C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\tests\data\rust-playable\haruki-gate2-boot-recipe.txt
+rust_explore_replay 1.txt: Enter ;; 0 ;; 开始游戏 ;; 0 ;; 请选择游戏模式 ;; Enter ;; 自定义你的角色 ;; 9999 ;; 设定完毕 ;; 0 ;; 这样真的可以吗 ;; 1100 ;; 1100 ;; 3 ;; 请选择地图的种类 ;; 1999 ;; 1999 ;; Enter ;; 设定完毕 ;; Enter ;; 0 ;; Enter ;; 私室 ;; 100 ;; 完成自定义阶段 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0 ;; 0
+rust_explore_status BOOT_FAILED
+rust_slice_doku_ledger_sha256 8bf82c6d1ca84e3f1f9ce515382c93ab521828f36d87a399fa1df2ceef796e1f
+rust_slice_doku_pct 0.0
+rust_slice_doku_selected 141
+rust_slice_doku_status CODEEE=83,PASS=56,WALL_LIMIT=2
+rust_slice_doku_stmtPool 1712420
+rust_slice_doku_touched 289
+rust_slice_eaglov_ledger_sha256 5af297a0fd75a3f7457415b307326653a072d9d89bea2c8235e9dc78c822e38c
+rust_slice_eaglov_pct 0.0
+rust_slice_eaglov_selected 117
+rust_slice_eaglov_status CODEEE=82,PASS=35
+rust_slice_eaglov_stmtPool 1712420
+rust_slice_eaglov_touched 247
+rust_trace_fn EAGLOV_GET_BASE_RESOURCE
+rust_trace_rows 28
+rust_trace_sha256 866fc3b4e38f64c9c90254220ee88f5cf4d91b68e98b6b90dcf590980000fcba
+rust_trace_status PASS
+rust_trace_steps 250
+
+## 执行面读数（sweep 切片 + trace）：对照腿 Kotlin（Rust 与它逐项相等，相等性由 compare_two 断言，不等则整条命令已非零退出）
+slice_doku_ledger_sha256 8bf82c6d1ca84e3f1f9ce515382c93ab521828f36d87a399fa1df2ceef796e1f
+slice_doku_pct 0.0
+slice_doku_selected 141
+slice_doku_status CODEEE=83,PASS=56,WALL_LIMIT=2
+slice_doku_stmtPool 1712420
+slice_doku_touched 289
+slice_eaglov_ledger_sha256 5af297a0fd75a3f7457415b307326653a072d9d89bea2c8235e9dc78c822e38c
+slice_eaglov_pct 0.0
+slice_eaglov_selected 117
+slice_eaglov_status CODEEE=82,PASS=35
+slice_eaglov_stmtPool 1712420
+slice_eaglov_touched 247
+trace_fn EAGLOV_GET_BASE_RESOURCE
+trace_rows 28
+trace_sha256 866fc3b4e38f64c9c90254220ee88f5cf4d91b68e98b6b90dcf590980000fcba
+trace_status PASS
+trace_steps 250

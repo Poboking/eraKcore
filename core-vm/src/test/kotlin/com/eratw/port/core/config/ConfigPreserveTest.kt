@@ -128,16 +128,8 @@ class ConfigPreserveTest {
 
     @Test
     fun `真实语料 emuera-config 未修改时合并结果与原文逐字符一致`() {
-        val gameDir = locateGameDir()
-        if (gameDir == null) {
-            println("跳过 ConfigPreserveTest 的语料判据：未设置 ERATW_GAMEDIR / ERATW_CORPUS")
-            return
-        }
-        val file = File(gameDir, "emuera.config")
-        if (!file.isFile) {
-            println("跳过 ConfigPreserveTest 的语料判据：$file 不存在")
-            return
-        }
+        val gameDir = corpusGameDir()
+        val file = File(gameDir, EMUERA_CONFIG_FILE_NAME)
         val bytes = file.readBytes()
         assertTrue(
             bytes.size > 3 &&
@@ -148,11 +140,25 @@ class ConfigPreserveTest {
         )
         val text = String(bytes, 3, bytes.size - 3, Charsets.UTF_8)
         assertFalse(text.startsWith("\uFEFF"), "剥 BOM 后首字符不应还是 U+FEFF")
-        val lines = text.split("\n").let { if (it.lastOrNull()?.isEmpty() == true) it.dropLast(1) else it }
+        // ReadLine 口径：行内容不含行尾符（同 EmueraConfigParser.readConfigLines 的 removeSuffix）。
+        // 4.980 语料全 LF、4.981 全 CRLF：不剥尾 CR 的话，「TEXT EDITOR COMMAND LINE ARGUMENTS」
+        // —— 它就是 EditorArgument 条目（ConfigData.cs:93）—— 的直写分支（ConfigData.cs:564-568，
+        // 不 Trim）会把行尾 CR 吃进值里，mergeInto 重写时该行就多出一个 CR。
+        val lines = text.split("\n").map { it.removeSuffix("\r") }
+            .let { if (it.lastOrNull()?.isEmpty() == true) it.dropLast(1) else it }
 
         val store = ConfigStore()
         val result = EmueraConfigParser.loadGameFile(ConfigFile("emuera.config", lines), store)
-        assertEquals(97, result.records.size, "语料 97 行，全部落记录")
+        // 按根取列（configroot 波 2026-11-05）：尺子复用 corpusroot 路（`64b5acb4`）的
+        // CorpusProfile.detect —— 就近读 ERB/DIM.ERH 的 NOW_VERSION 认根，认不出/不在册自己判红。
+        // 旧实现把 4.981 的 103 写死，§5 标准闸（ERATW_GAMEDIR 恒指 4.980）下这一枚恒红。
+        val profile = com.eratw.port.boot.CorpusProfile.detect(gameDir.toPath())
+        assertEquals(
+            profile.emueraConfigLineCount,
+            result.records.size,
+            "$profile 语料的 emuera.config 应 ${profile.emueraConfigLineCount} 行、每行各落一条记录" +
+                "（4.980 = 97 行含 1 条未知键记录；4.981 = 103 行含 7 条）—— $file",
+        )
         assertEquals(0, result.warnings.size, "语料没有抛错行，合并前 store 是干净的")
         val english = EffectiveConfig.of(store).englishConfigOutput
         assertTrue(english, "语料是英文标签文件（OUTPUT ENGLISH ITEMS:YES）")
@@ -174,22 +180,23 @@ class ConfigPreserveTest {
         text.split("\n").count { it.startsWith(prefix) }
 
     /**
-     * 游戏目录（`emuera.config` 所在目录）：`ERATW_GAMEDIR` 优先（显式给出即权威）；
-     * 否则从 `ERATW_CORPUS`（指向 `<游戏目录>/ERB`）的父目录推；都没有就跳过。
+     * 语料游戏根（`emuera.config` 所在目录）：只认 `ERATW_GAMEDIR`（显式给出即权威），不猜路径。
+     * 未设置环境变量、或指到的目录里没有 `emuera.config` ⇒ **AssertionError 判红**。
+     * 旧实现是「两个来源都找不到就 println 跳过」：闸没导出变量时用例静默通过，是假闸
+     * （cfgolden 波 2026-11-06 拆掉，口径与 `ConfigChainTest.corpusRoot()` 对齐）。
      */
-    private fun locateGameDir(): File? {
-        System.getenv("ERATW_GAMEDIR")?.trim()?.takeIf { it.isNotEmpty() }?.let { env ->
-            val dir = File(env)
-            if (File(dir, "emuera.config").isFile) {
-                return dir
+    private fun corpusGameDir(): File {
+        val env = System.getenv("ERATW_GAMEDIR")
+            ?: run {
+                // 公开仓无外部语料/样本：按公开适配口径跳过（上游为硬判红）。
+                org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_GAMEDIR：跳过保留式写回语料判据")
+                throw AssertionError("unreachable")
             }
-        }
-        System.getenv("ERATW_CORPUS")?.trim()?.takeIf { it.isNotEmpty() }?.let { env ->
-            val parent = File(env).parentFile
-            if (parent != null && File(parent, "emuera.config").isFile) {
-                return parent
-            }
-        }
-        return null
+        val dir = File(env)
+        assertTrue(
+            File(dir, EMUERA_CONFIG_FILE_NAME).isFile,
+            "ERATW_GAMEDIR=$env 下没有 $EMUERA_CONFIG_FILE_NAME：它不是语料游戏根",
+        )
+        return dir
     }
 }

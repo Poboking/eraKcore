@@ -1,5 +1,6 @@
 ﻿package com.eratw.port.core.save
 
+import com.eratw.port.boot.CorpusProfile
 import com.eratw.port.core.data.csv.GameData
 import com.eratw.port.core.data.csv.GameDataLoader
 import com.eratw.port.core.data.save.SaveData
@@ -22,12 +23,11 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
-import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * 存档**写路径**的往返验收：真实 PC 存档（`.workbuddy/sav-backup/sav-20261018-110513/`，
- * 仓内只读样本）读 → 写 → 再读，逐字段对拍。
+ * 存档**写路径**的往返验收：真实 PC 存档（`ERATW_SAVE_SAMPLES` 指向的只读样本目录）
+ * 读 → 写 → 再读，逐字段对拍。公开仓不含样本时按适配口径 skip。
  *
  * ## 本文件钉住的三层
  *
@@ -57,6 +57,15 @@ import org.junit.jupiter.api.io.TempDir
  *   `isNullInOriginal`（总账 SAVE-04 收口，B5 L4）；见 [额外角色字段]。
  * - **Map/Xml/DT 扩展段**要求 `FileSystemOps` 拿到 `EmSaveSets`（`VarExt*.csv`）；
  *   未装配 = 空表 = 不写（`ConstantData.cs:1311-1316`）。本文件装 `ERATW_GAMEDIR/CSV` 的真表。
+ *
+ * ## 语料根两列（savecorpus 波，2026-11-06）
+ *
+ * 本文件的样本档是 **4.980 时代**的真实 PC 存档（`ERATW_SAVE_SAMPLES` 指向的目录），
+ * 而「写回时池面按哪一版注册」由 `ERATW_GAMEDIR` 指向的语料根决定：
+ * 语料根是 4.980 时样本与池同代 ⇒ 逐项全等；是 4.981 时池按新增 `SAVEDATA` 面重写样本 ⇒
+ * 出现对账清单里的差/缺/多。故凡**随池面走**的读数一律 `when (CorpusProfile)` 取列
+ * （见 [CorpusColumns]），不再写死 4.981 一列 —— 两个根都必须是绿的。
+ * 随样本字节走的读数（540 条全局条目、25 条全局档条目、168 个角色块等）两根同值，保留单常量并注明。
  */
 class SaveRoundTripTest {
 
@@ -64,22 +73,50 @@ class SaveRoundTripTest {
     // 装置
     // ------------------------------------------------------------------
 
-    /** 仓内只读样本目录；缺样本按假设失败跳过（不伪造读数）。 */
-    private fun samplesDir(): Path? = SAMPLE_CANDIDATES
-        .map { Path.of(it).toAbsolutePath().normalize() }
-        .firstOrNull { Files.isDirectory(it) }
+    /**
+     * 真存档样本目录：公开仓只认 `ERATW_SAVE_SAMPLES`（`-PsaveSamples` 由
+     * `core-vm/build.gradle.kts` 导出）。不携带任何内部存档备份路径；没有显式来源时按
+     * 公开适配口径跳过（上游是硬判红）。
+     */
+    private fun samplesDir(): Path {
+        val fromEnv = System.getenv("ERATW_SAVE_SAMPLES")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: run {
+                // 公开仓不含内部存档样本：按公开适配口径跳过。
+                org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_SAVE_SAMPLES：跳过真存档样本判据")
+                throw AssertionError("unreachable")
+            }
+        val p = Path.of(fromEnv)
+        if (Files.isDirectory(p)) return p
+        throw AssertionError("ERATW_SAVE_SAMPLES=$fromEnv 不是目录：真存档样本判据无根可对")
+    }
 
-    /** 游戏根：`ERATW_GAMEDIR` 显式给出即权威；回落 `ERATW_CORPUS`（指到 ERB 子树）的父目录。 */
-    private fun gameDir(): Path? {
+    /**
+     * 游戏根：`ERATW_GAMEDIR` 显式给出即权威；回落 `ERATW_CORPUS`（指到 ERB 子树）的父目录。
+     *
+     * 两根都没设 ⇒ **判红**（口径同 `core/config/ConfigChainTest` 的 `corpusRoot`）：
+     * 语料根是本族判据的取列依据，没有根就没有可对的读数。
+     */
+    private fun gameDir(): Path {
         System.getenv("ERATW_GAMEDIR")?.trim()?.takeIf { it.isNotEmpty() }?.let { return Path.of(it) }
-        val corpus = System.getenv("ERATW_CORPUS")?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val corpus = System.getenv("ERATW_CORPUS")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: run {
+                // 公开仓无外部语料/样本：按公开适配口径跳过（上游为硬判红）。
+                org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_GAMEDIR / ERATW_CORPUS：跳过存档写回语料根")
+                throw AssertionError("unreachable")
+            }
         return Path.of(corpus).parent
     }
 
-    private fun sample(name: String): ByteArray? {
-        val dir = samplesDir() ?: return null
-        val f = dir.resolve(name)
-        return if (Files.isRegularFile(f)) Files.readAllBytes(f) else null
+    /** 语料版本档：`ERB/DIM.ERH` 的 `#DIM CONST NOW_VERSION`（判不了 / 不在册 ⇒ 自己抛 AssertionError）。 */
+    private fun profile(): CorpusProfile = CorpusProfile.detect(gameDir())
+
+    /** 本轮的「随池面走」读数（见 [CorpusColumns]）；只在真的要写回时才判根。 */
+    private val columns: CorpusColumns by lazy { columnsOf(profile()) }
+
+    private fun sample(name: String): ByteArray {
+        val f = samplesDir().resolve(name)
+        if (!Files.isRegularFile(f)) throw AssertionError("存档样本 $name 不在位：$f")
+        return Files.readAllBytes(f)
     }
 
     private fun store(): VariableStore = VariableStore()
@@ -120,6 +157,12 @@ class SaveRoundTripTest {
         is SaveEntry.IntArray1 -> "I1:" + e.values.joinToString(",")
         is SaveEntry.IntArray2 -> "I2:${e.dim0}x${e.dim1}:" + e.values.joinToString(",")
         is SaveEntry.IntArray3 -> "I3:${e.dim0}x${e.dim1}x${e.dim2}:" + e.values.joinToString(",")
+        // 浮点按原始位签名（[Double.toList] 的十进制打印会把 `-0.0`/`0.0` 与不同尾数的 NaN 混成同一条）
+        is SaveEntry.FloatValue -> "F:" + e.value.toRawBits()
+        is SaveEntry.FloatArray1 -> "F1:" + e.values.map { it.toRawBits() }.joinToString(",")
+        is SaveEntry.FloatArray2 -> "F2:${e.dim0}x${e.dim1}:" + e.values.map { it.toRawBits() }.joinToString(",")
+        is SaveEntry.FloatArray3 ->
+            "F3:${e.dim0}x${e.dim1}x${e.dim2}:" + e.values.map { it.toRawBits() }.joinToString(",")
         is SaveEntry.StrValue -> "S:${e.value}"
         is SaveEntry.StrArray1 -> "S1:" + e.values.joinToString(",") { it ?: "" }
         is SaveEntry.StrArray2 -> "S2:${e.dim0}x${e.dim1}:" + e.values.joinToString(",") { it ?: "" }
@@ -164,6 +207,129 @@ class SaveRoundTripTest {
             }
         }
         return out
+    }
+
+    /** diffBlocks 行（`<label> <缺|差> <key>…`）归一成 `<缺|差> <key>`，剥掉 label。 */
+    private fun driftKey(diff: String): String {
+        val head = diff.substringBefore('：')
+        val m = Regex("(缺|差|多) (.+)$").find(head) ?: return head
+        return "${m.groupValues[1]} ${m.groupValues[2]}"
+    }
+
+    /**
+     * 4.981 语料升版后，老档（4.980 时代）经 4.981 变量池写回被改形/丢弃的**对账清单**
+     * （= [CorpusColumns.globalOrigSideDrift] 的 4.981 列；4.980 列是空集，见 [columnsOf]）。
+     * 每条都有语料出处，全部是「池按 4.981 注册面重写」的预期行为、不是引擎回归：
+     * - `差 ITEM / NOITEM / ITEMSALES`：4.981 VariableSize.csv:17-19 把三者 1000→1200 ⇒ 数组装长；
+     * - `差 PLANT_TYPE / PLANT_DAYS / PLANT_GROW / PLANT_DRY / PLANT_FOOD / HATAKE_NAME`：
+     *   4.980 DIM.ERH:251 `PLANT_TYPE, 5` → 4.981 由 `DLC/生活系统大修/0_生活系统_变量.ERH:90`
+     *   起接管（`PLANT_TYPE, 240` 等），种田面数组扩容；
+     * - `缺 P_AdjList / P_AdjListDone`：4.980 `魔改内容/qol/qol_skipmove.ERH:2/:4` 的 SAVEDATA
+     *   全局声明在 4.981 整文件移除 ⇒ 池里不再注册、写出自然没有（原版 varTokenDic 同口径）；
+     * - `缺 MP_GRADE`：4.980 `DLC/魔法DLC/魔法相关参数.ERH:20` 是 GLOBAL SAVEDATA，
+     *   4.981 `:23` 改成 CHARADATA ⇒ 全局块不再有它；
+     * - `差 BIRD_CAGE / BIRD_NAME / EGG_SPAWN / EGG_KIND / EGG_STOCK / BIRD_COND /
+     *   BIRD_FAVORITE / BIRD_ID`：4.981 `コマンド関連/COMF/日常系/EGGFARM.ERH:7` 的
+     *   EGGFARM_MAXCAGE 3→8 ⇒ 养鸡面数组 3→8；
+     * - `差 GLOBAL_BONUS`：4.980 DIM.ERH:765 12 格 → 4.981 `:883` 16 格；
+     * - `差 NEW_SAVE_MARK`：4.980 魔改内容/MODDING_VALUE.ERH:8 1001 格 → 4.981 `:5` 1002 格。
+     */
+    private val SAVE_CORPUS_DRIFT: Set<String> = setOf(
+        "差 ITEM", "差 NOITEM", "差 ITEMSALES",
+        "差 PLANT_TYPE", "差 PLANT_DAYS", "差 PLANT_GROW", "差 PLANT_DRY", "差 PLANT_FOOD",
+        "差 HATAKE_NAME",
+        "缺 P_AdjList", "缺 P_AdjListDone", "缺 MP_GRADE",
+        "差 BIRD_CAGE", "差 BIRD_NAME", "差 EGG_SPAWN", "差 EGG_KIND", "差 EGG_STOCK",
+        "差 BIRD_COND", "差 BIRD_FAVORITE", "差 BIRD_ID",
+        "差 GLOBAL_BONUS", "差 NEW_SAVE_MARK",
+    )
+
+    /**
+     * 角色面的同源对账清单：
+     * - `差 BUFF`：4.980 DIM.ERH:453 `CHARADATA SAVEDATA BUFF, 16` → 4.981 `:571` 50 格；
+     * - `缺 cTempRawPerm`：4.980 `魔改内容/AnonTW搬运口上标识符库.ERH:6` 的 CHARADATA SAVEDATA
+     *   在 4.981 整文件移除。
+     */
+    private val CHARA_CORPUS_DRIFT: Set<String> = setOf(
+        "差 BUFF", "缺 cTempRawPerm",
+    )
+
+    /**
+     * 4.981 新注册、经 4.981 池面写回 4.980 时代样本档时允许多出的角色字段（9 个）。
+     * 全部取证为 4.981 新增 `CHARADATA SAVEDATA`（4.980 语料全库无此声明）：
+     * - `MP_GRADE`：4.980 `DLC/魔法DLC/魔法相关参数.ERH:20` 为 `#DIM SAVEDATA MP_GRADE`（全局），
+     *   4.981 `:23` 改 `#DIM SAVEDATA CHARADATA MP_GRADE`（转角色级）；
+     * - `M_TALENT`：4.981 同文件 `:17` 新增 `#DIM SAVEDATA CHARADATA M_TALENT,22`；
+     * - `Setting_CFLAG`/`Setting_TCVAR`：4.981 `DLC/实用设置补丁/实用设置.ERH:13-14` 新增；
+     * - `EVENT_CLOTHING_SET_STACK/SOURCE/PARAM`：4.981 `fromEN/QOL/QoL_Misc.ERH:75-77` 新增；
+     * - `CUSTOM_DAILY_OUTFIT`：4.981 `fromEN/QOL/QoL_Misc.ERH` 新增（4.980 全库 grep 无）；
+     * - `SEMEN_MATRIX`：4.981 `魔改内容/SEMEN_MATRIX.ERH:7` 新增。
+     * 与全局面「多 KOJO_PRESET / KOJO_PRESET_NAME」同机制：写侧按池面落已注册变量的格，
+     * 原版样本档（4.980 时代）没有这些格子。
+     */
+    private val EXTRA_CHARA_FIELDS_981: Set<String> = setOf(
+        "Setting_CFLAG", "Setting_TCVAR", "M_TALENT", "MP_GRADE",
+        "EVENT_CLOTHING_SET_STACK", "EVENT_CLOTHING_SET_SOURCE", "EVENT_CLOTHING_SET_PARAM",
+        "CUSTOM_DAILY_OUTFIT", "SEMEN_MATRIX",
+    )
+
+    /**
+     * 「样本档（4.980 时代）经**本轮语料根**的变量池写回」这一动作的期望读数，按根一列。
+     *
+     * 为什么必须两列：样本字节不随语料根变（仓内备份 6 个 `.sav` 全部 git 跟踪），
+     * 但写回时池的注册面随 `ERATW_GAMEDIR` 变 —— 4.980 根下样本与池同代 ⇒ 逐项全等；
+     * 4.981 根下池多了/改了一批 `SAVEDATA` 声明 ⇒ 出现对账清单里的差/缺/多。
+     * 旧版把这些读数写死成 4.981 一列，闸口径（AGENTS.md §5）指向 4.980 时恒红。
+     */
+    private class CorpusColumns(
+        /** 写回后全局块的条目数（样本基线 540 条）。 */
+        val writtenGlobalCount: Int,
+        /** 原档侧允许出现的「缺/差」（空集 = 逐项全等）。 */
+        val globalOrigSideDrift: Set<String>,
+        /** 角色块原档侧允许出现的「缺/差」（空集 = 逐项全等）。 */
+        val charaOrigSideDrift: Set<String>,
+        /** 写出面允许**多出**的角色字段。 */
+        val extraCharaFields: Set<String>,
+        /** `global.sav` 回写的差异行（`全局 <缺|差|多> <key>`，不含「：」之后的取值）。 */
+        val globalSaveDiffLines: Set<String>,
+        /** `GLOBAL_BONUS` 写回后尾部的零格数（0 = 数组长度不变）。 */
+        val globalBonusTailZeros: Int,
+        /** 断言消息里的口径说明。 */
+        val note: String,
+    )
+
+    /**
+     * 两列读数。4.980 列 = 本路 2026-11-06 在 `ERATW_GAMEDIR=…/eratw-画蛇添足版eratw4.980`
+     * 下**实读**（写回 save00.sav：`back.variables.size`=540、`diffBlocks` 原档侧空、
+     * 角色块差异空、额外角色字段空；写回 global.sav：25→25 无差异、`GLOBAL_BONUS` 12→12）；
+     * 4.981 列 = 合流头实测的原钉值（本路未改读数）。
+     */
+    private fun columnsOf(profile: CorpusProfile): CorpusColumns = when (profile) {
+        // 4.980 列：样本档与池同代 ⇒ 写回逐项全等。实读出处见本函数 KDoc。
+        CorpusProfile.V4_980 -> CorpusColumns(
+            writtenGlobalCount = 540,
+            globalOrigSideDrift = emptySet(),
+            charaOrigSideDrift = emptySet(),
+            extraCharaFields = emptySet(),
+            globalSaveDiffLines = emptySet(),
+            globalBonusTailZeros = 0,
+            note = "4.980 池面 = 样本同代，写回应逐项全等（2026-11-06 实读）",
+        )
+        // 4.981 列：池按新增 SAVEDATA 面重写样本 ⇒ 下表逐条对账（合流头实测）。
+        CorpusProfile.V4_981 -> CorpusColumns(
+            writtenGlobalCount = 749,
+            globalOrigSideDrift = SAVE_CORPUS_DRIFT,
+            charaOrigSideDrift = CHARA_CORPUS_DRIFT,
+            extraCharaFields = EXTRA_CHARA_FIELDS_981,
+            globalSaveDiffLines = setOf(
+                "全局 差 GLOBAL_BONUS",
+                "全局 差 NEW_SAVE_MARK",
+                "全局 多 KOJO_PRESET",
+                "全局 多 KOJO_PRESET_NAME",
+            ),
+            globalBonusTailZeros = 4,
+            note = "4.981 池面把 4.980 时代样本按新注册面重写（对账清单见 SAVE_CORPUS_DRIFT 等）",
+        )
     }
 
     /** 整帧差异（头 + 角色块 + 全局块）。 */
@@ -247,12 +413,10 @@ class SaveRoundTripTest {
     @Test
     fun `真实存档重编码后逐项一致`() {
         val names = listOf("save00.sav", "save01.sav", "save02.sav", "save03.sav", "save1000.sav", "global.sav")
-        val missing = names.filter { sample(it) == null }
-        Assumptions.assumeTrue(missing.isEmpty(), "缺少 PC 存档样本：$missing")
 
         val diffs = ArrayList<String>()
         for (name in names) {
-            val src = sample(name)!!
+            val src = sample(name)
             val orig = SaveFormat.read(src)
             val rebuilt = rebuild(orig)
             val payloadOrig = SaveFormat.sourcePayloadOf(src)
@@ -279,8 +443,7 @@ class SaveRoundTripTest {
     @Test
     fun `未改动存档写回原字节`() {
         val src = sample("save00.sav")
-        Assumptions.assumeTrue(src != null, "缺少 save00.sav 样本")
-        val back = SaveFormat.write(SaveFormat.read(src!!))
+        val back = SaveFormat.write(SaveFormat.read(src))
         assertTrue(back.contentEquals(src), "未改动档必须原样回写（SaveFormat.write 的 sourceFile 分支）")
     }
 
@@ -296,8 +459,7 @@ class SaveRoundTripTest {
     @Test
     fun `重新压缩的容器与 GZip 同壳`() {
         val src = sample("save00.sav")
-        Assumptions.assumeTrue(src != null, "缺少 save00.sav 样本")
-        val written = SaveFormat.write(rebuild(SaveFormat.read(src!!)))
+        val written = SaveFormat.write(rebuild(SaveFormat.read(src)))
 
         var magic = 0L
         for (i in 0 until 8) magic = magic or ((written[i].toLong() and 0xFF) shl (8 * i))
@@ -336,20 +498,19 @@ class SaveRoundTripTest {
     @Test
     fun `真实存档经变量池写盘后逐项一致`(@TempDir tmp: Path) {
         val src = sample("save00.sav")
-        Assumptions.assumeTrue(src != null, "缺少 save00.sav 样本")
         val game = gameDir()
-        Assumptions.assumeTrue(game != null, "缺少 ERATW_GAMEDIR")
-        val csv = game!!.resolve("CSV")
+        val csv = game.resolve("CSV")
         val data = GameDataLoader.load(csv)
-        Assumptions.assumeTrue(data != null, "缺少 ERATW_GAMEDIR/CSV，无法建真实变量池")
+            ?: throw AssertionError("$csv 装不出 CSV 注册表：语料根不完整（ERATW_GAMEDIR=$game），无法建真实变量池")
+        val cols = columns
 
         val root = Files.createDirectories(tmp.resolve("game"))
         val sav = Files.createDirectories(root.resolve("sav"))
-        Files.write(sav.resolve("save00.sav"), src!!)
+        Files.write(sav.resolve("save00.sav"), src)
         val sets = EmSaveSets.parse(csv)
         val cfg = SaveConfig.ERATW
 
-        val store = realStore(data!!)
+        val store = realStore(data)
         FileSystemOps(store, RootedSaveFileIo(root), cfg, sets).loadData(0)
         assertEquals(168, store.characters.count, "样本实测角色数 168（spec §6.2）")
 
@@ -361,14 +522,21 @@ class SaveRoundTripTest {
         assertEquals(1808L, readU32(written, 8), "写出的档仍是 1808 容器")
         val back = SaveFormat.read(written)
         assertEquals(orig.characters.size, back.characters.size, "角色数")
-        assertEquals(orig.variables.size, back.variables.size, "全局条目数（540）")
+        // 两根同值，实读：样本档自带 540 条全局条目（与语料根无关，样本是同一份字节）
+        assertEquals(540, orig.variables.size, "样本（4.980 时代档）实测全局条目数 540")
+        assertEquals(cols.writtenGlobalCount, back.variables.size, "写回后的全局条目数（${cols.note}）")
 
-        // 全局块：540 条逐项相等（RANDDATA 也在其中，spec §6.4）
+        // 全局块：原档的 540 条要么原样写回、要么命中本根的语料升版对账清单（见 [columnsOf]）；
+        // 写出面多出的条目是本根新注册的全局变量，属语料升版的预期增量，不算差异。
         val globalDiffs = diffBlocks("全局", orig.variables, back.variables)
-        assertTrue(globalDiffs.isEmpty(), "全局块差异：\n" + globalDiffs.take(20).joinToString("\n"))
+        val origSide = globalDiffs.map { driftKey(it) }.filter { !it.startsWith("多 ") }
+        assertTrue(
+            origSide.all { it in cols.globalOrigSideDrift },
+            "全局块原档侧出现对账清单之外的差异（${cols.note}）：\n" + globalDiffs.joinToString("\n"),
+        )
         assertEquals("RANDDATA", orig.variables.first { it.key == "RANDDATA" }.key, "真档全局块含 RANDDATA")
 
-        // 角色块：原档的每个条目都必须原样写回
+        // 角色块：原档的每个条目都必须原样写回（角色面语料漂移见 CHARA_CORPUS_DRIFT）
         val charDiffs = ArrayList<String>()
         for (i in 0 until orig.characters.size) {
             val o = byKey(orig.characters[i])
@@ -378,15 +546,23 @@ class SaveRoundTripTest {
                 if (w == null) charDiffs.add("角色$i 缺 $k") else if (w != v) charDiffs.add("角色$i 差 $k")
             }
         }
-        assertTrue(charDiffs.isEmpty(), "角色块丢字段：\n" + charDiffs.take(20).joinToString("\n"))
+        assertTrue(
+            charDiffs.map { driftKey(it) }.all { it in cols.charaOrigSideDrift },
+            "角色块出现对账清单之外的丢字段/改值（${cols.note}）：\n" + charDiffs.distinct().joinToString("\n"),
+        )
 
-        // 不该再多出任何角色字段：`NICKNAME`/`MASTERNAME` 为空的格原版整条不落（总账 SAVE-04）
+        // 不该再多出任何角色字段——除本根新注册的 CHARADATA 变量（4.981 是 9 个，见 EXTRA_CHARA_FIELDS_981）：
+        // `NICKNAME`/`MASTERNAME` 为空的格原版整条不落（总账 SAVE-04）
         val extra = LinkedHashSet<String>()
         for (i in 0 until orig.characters.size) {
             val o = byKey(orig.characters[i])
             for (k in byKey(back.characters[i]).keys) if (!o.containsKey(k)) extra.add(k)
         }
-        assertEquals(emptySet<String>(), extra, "额外角色字段应为空（原版按值省略 null 格，见 [额外角色字段]）")
+        assertEquals(
+            emptySet<String>(),
+            extra - cols.extraCharaFields,
+            "额外角色字段应为空（原版按值省略 null 格，见 [额外角色字段]；${cols.note}）",
+        )
 
         // 描述原样（SAVEDATA_TEXT 是写侧入参，Process.cs:2872）
         assertEquals(text, back.text, "描述文本")
@@ -423,8 +599,7 @@ class SaveRoundTripTest {
     @Test
     fun `额外角色字段`() {
         val src = sample("save00.sav")
-        Assumptions.assumeTrue(src != null, "缺少 save00.sav 样本")
-        val payload = SaveFormat.sourcePayloadOf(src!!)
+        val payload = SaveFormat.sourcePayloadOf(src)
         assertNotNull(payload)
         assertEquals(0, countUtf16(payload, "NICKNAME"), "PC 样本 payload 里不出现 NICKNAME（UTF-16LE 字节搜索）")
         // 走同一条判定入口，钉住「本仓认为它进档」这一现状（上修则会红，提醒同步本用例）
@@ -438,20 +613,19 @@ class SaveRoundTripTest {
     @Test
     fun `真实全局档经变量池写盘后逐项一致`(@TempDir tmp: Path) {
         val src = sample("global.sav")
-        Assumptions.assumeTrue(src != null, "缺少 global.sav 样本")
         val game = gameDir()
-        Assumptions.assumeTrue(game != null, "缺少 ERATW_GAMEDIR")
-        val csv = game!!.resolve("CSV")
+        val csv = game.resolve("CSV")
         val data = GameDataLoader.load(csv)
-        Assumptions.assumeTrue(data != null, "缺少 ERATW_GAMEDIR/CSV")
+            ?: throw AssertionError("$csv 装不出 CSV 注册表：语料根不完整（ERATW_GAMEDIR=$game）")
+        val cols = columns
 
         val root = Files.createDirectories(tmp.resolve("game"))
         Files.createDirectories(root.resolve("sav"))
-        Files.write(root.resolve("sav/global.sav"), src!!)
+        Files.write(root.resolve("sav/global.sav"), src)
         val sets = EmSaveSets.parse(csv)
         val cfg = SaveConfig.ERATW
 
-        val store = realStore(data!!)
+        val store = realStore(data)
         assertTrue(FileSystemOps(store, RootedSaveFileIo(root), cfg, sets).loadGlobal(), "LOADGLOBAL 应成功")
         FileSystemOps(store, RootedSaveFileIo(root), cfg, sets).saveGlobal()
 
@@ -459,9 +633,25 @@ class SaveRoundTripTest {
         val orig = SaveFormat.read(src)
         val back = SaveFormat.read(written)
         assertEquals(SaveFileKind.GLOBAL, back.fileType, "类别（EraSaveFileType.Global）")
+        // 两根同值，实读：样本档自带 25 条全局条目（与语料根无关）
         assertEquals(25, orig.variables.size, "样本实测全局条目数 25")
+        // 本根池面写回样本的差异逐条对账（4.981 列是 4 处语料升版项，4.980 列是空集）：
+        // - GLOBAL_BONUS 12→16 格（4.980 DIM.ERH:765 → 4.981 DIM.ERH:883，前 12 格原值 + 4 个 0）；
+        // - NEW_SAVE_MARK 1001→1002 格（4.980 MODDING_VALUE.ERH:8 → 4.981 :5）⇒ 数组长一位；
+        // - 多 KOJO_PRESET / KOJO_PRESET_NAME（4.981 DLC/实用设置补丁/实用设置.ERH:30-31 新注册）。
         val diffs = diffBlocks("全局", orig.variables, back.variables)
-        assertTrue(diffs.isEmpty(), "全局档字段差异：\n" + diffs.take(20).joinToString("\n"))
+        assertEquals(
+            cols.globalSaveDiffLines,
+            diffs.map { it.substringBefore('：') }.toSet(),
+            "全局档差异须恰为本根的对账项（${cols.note}）：\n" + diffs.joinToString("\n"),
+        )
+        val bonusOrig = (orig.variables.first { it.key == "GLOBAL_BONUS" } as SaveEntry.IntArray1).values.toList()
+        val bonusBack = (back.variables.first { it.key == "GLOBAL_BONUS" } as SaveEntry.IntArray1).values.toList()
+        assertEquals(
+            bonusOrig + List(cols.globalBonusTailZeros) { 0L },
+            bonusBack,
+            "GLOBAL_BONUS = 原 ${bonusOrig.size} 格原值 + ${cols.globalBonusTailZeros} 个 0（${cols.note}）",
+        )
         assertEquals("", back.text, "全局档描述恒空串（VariableEvaluator.cs:2488）")
     }
 
@@ -469,19 +659,18 @@ class SaveRoundTripTest {
     @Test
     fun `改动单字段后写盘只该字段变化`(@TempDir tmp: Path) {
         val src = sample("save00.sav")
-        Assumptions.assumeTrue(src != null, "缺少 save00.sav 样本")
         val game = gameDir()
-        Assumptions.assumeTrue(game != null, "缺少 ERATW_GAMEDIR")
-        val csv = game!!.resolve("CSV")
+        val csv = game.resolve("CSV")
         val data = GameDataLoader.load(csv)
-        Assumptions.assumeTrue(data != null, "缺少 ERATW_GAMEDIR/CSV")
+            ?: throw AssertionError("$csv 装不出 CSV 注册表：语料根不完整（ERATW_GAMEDIR=$game）")
+        val cols = columns
 
         val root = Files.createDirectories(tmp.resolve("game"))
         val sav = Files.createDirectories(root.resolve("sav"))
-        Files.write(sav.resolve("save00.sav"), src!!)
+        Files.write(sav.resolve("save00.sav"), src)
         val sets = EmSaveSets.parse(csv)
         val cfg = SaveConfig.ERATW
-        val store = realStore(data!!)
+        val store = realStore(data)
         FileSystemOps(store, RootedSaveFileIo(root), cfg, sets).loadData(0)
 
         val orig = SaveFormat.read(src)
@@ -505,13 +694,19 @@ class SaveRoundTripTest {
         assertEquals(newValue, after[slot], "改后的值")
         assertEquals(orig.text, back.text, "描述不变")
 
-        // 其余全局条目与全部角色条目逐项不变
+        // 其余全局条目与全部角色条目：原档侧要么原样写回、要么命中本根的对账清单
+        //（4.981 池面写回会多出新注册的全局变量，与 [真实存档经变量池写盘后逐项一致] 同一口径，不算差异）
         val others = orig.variables.filter { it.key != moneyKey }
         val othersBack = back.variables.filter { it.key != moneyKey }
-        assertTrue(diffBlocks("全局(除 MONEY)", others, othersBack).isEmpty(), "其余全局条目不应变化")
+        val otherDiffs = diffBlocks("全局(除 MONEY)", others, othersBack)
         assertTrue(
-            missingOnly("角色0", orig.characters[0], back.characters[0]).isEmpty(),
-            "角色块不应丢字段或改值：${missingOnly("角色0", orig.characters[0], back.characters[0]).take(5)}",
+            otherDiffs.map { driftKey(it) }.all { it in cols.globalOrigSideDrift || it.startsWith("多 ") },
+            "其余全局条目出现对账清单之外的差异（${cols.note}）：\n" + otherDiffs.joinToString("\n"),
+        )
+        assertTrue(
+            missingOnly("角色0", orig.characters[0], back.characters[0])
+                .map { driftKey(it) }.all { it in cols.charaOrigSideDrift },
+            "角色块出现对账清单之外的丢字段/改值：${missingOnly("角色0", orig.characters[0], back.characters[0]).take(5)}",
         )
     }
 
@@ -655,7 +850,7 @@ class SaveRoundTripTest {
         data.templates.forEach { store.registerTemplate(it) }
         store.loadItemPrice(data.itemPrices)
         store.reloadStrNames()
-        val game = gameDir() ?: error("真实变量池需要 ERATW_GAMEDIR（调用方已 assume）")
+        val game = gameDir()
         val inst = SystemVariableBootstrap.install(
             store,
             erhDeclarations(game),
@@ -693,12 +888,4 @@ class SaveRoundTripTest {
         return out
     }
 
-    private companion object {
-        /** 样本候选：gradle test 的 cwd 是模块目录 `core-vm/`，故上溯两级即仓库根。 */
-        val SAMPLE_CANDIDATES = listOf(
-            "../../.workbuddy/sav-backup/sav-20261018-110513",
-            "../.workbuddy/sav-backup/sav-20261018-110513",
-            ".workbuddy/sav-backup/sav-20261018-110513",
-        )
-    }
 }

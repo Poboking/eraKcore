@@ -109,4 +109,17 @@ class ParallelLoadSeamTest {
         assertEquals("侧车格式错", e.message, "装载层报错口径必须原样冒到宿主（不换一句话）")
         assertTrue(boom.cancel(1_000))
     }
+
+    /**
+     * W8 刀五：`await()` 先于 `start()` 必须当场点名，不许把「忘起线程」伪装成
+     * 「body 返回 null」（`Thread.join()` 对未启动线程是立即返回的 no-op ⇒ 旧写法
+     * 拿到假 null，装载层会静默降级成多余的同步解析）。
+     */
+    @Test
+    fun `await 先于 start 当场 IllegalStateException 不返回假 null`() {
+        val t = ParallelTask<String>("eratw-meta-unstarted") { "不该被跑" }
+        val e = assertFailsWith<IllegalStateException> { t.await() }
+        assertTrue(e.message!!.contains("eratw-meta-unstarted"), "点名是哪条任务漏了 start：${e.message}")
+        assertFalse(t.isDone, "从未 start 的任务不处于「已完成」态")
+    }
 }

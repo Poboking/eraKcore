@@ -1,0 +1,12 @@
+# erbcc-rs / rust-kernel 路的登记基准：纯 Kotlin 工具链真跑产出的三件套读数
+# 产法（2026-11-01，Haruki 机，main 波次分支 wave/rust-erbcc 的本 worktree）：
+#   export JAVA_HOME='C:\DSH\eratw-安卓移植计划\.tooling\jdk-17.0.20.1+1'; export PATH="$JAVA_HOME/bin:$PATH"
+#   语料 = fixtures/golden 的 13 个 GOLDEN_*.ERB 复制成 PARITY_*.ERB，放 <repo>/tools/erbcc-rs/build/parity-game/ERB（旁边补空 CSV/）
+#   ./gradlew --configure-on-demand :tools:erbcc:compileCorpus -Pcorpus=<repo>/tools/erbcc-rs/build/parity-game/ERB -Pout=<repo>/tools/erbcc-rs/build/baseline/gradle-parity
+# 只登记三件套：manifest.txt 的 corpus-root 行是本机绝对路径（机器相关），逐字节判据由
+#   tests/compile_parity.rs 用「腿 A/腿 B 同一份语料」现场对拍，不走登记值。
+# 刷新条件：core-vm 编译器源码变了导致产物字节变化时，重跑上面那条命令并重新登记。
+# 最近一次重生成：2026-11-02 00:15:20 · python devtools/erbcc_rs_parity.py regen --lane rust-kernel
+erbc.v1/program.erbc 157227 a7f1afb4c6640d990e86266b4bba66807da917f8ac759bdec24a03d44643a4b7
+erbc.v1/program.meta 11143 da6c18e35673b93fb43579f3ae32c8513f89abfe30932eff7fe757d5061df26b
+erbc.v1/program.stmt.idx 4332 aa5c76dea11d1530c9eb0aac8860901f1c5bed3502c2c68799b6e61f914a624d

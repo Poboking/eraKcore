@@ -180,10 +180,26 @@ class CsvDataAuditTest {
     }
 
     @Test
-    fun `合成数据 GAMEBASE 代码不可解析写 0 并告警`() {
+    fun `合成数据 GAMEBASE 代码不可解析写 0 但不告警`() {
+        // GameBase.cs:132-136：`if (tryatoi(...) && ScriptUniqueCode == 0L)` 才 Warn ⇒
+        // 解析失败（tryatoi 返回 false，out 落 0）**不告警**；只有真读到 0 码才告。
         val dir = createTempDirectory("eratw-gamebase0")
         try {
             dir.resolve("GameBase.csv").writeText("コード,abc\n")
+            val w = ArrayList<String>()
+            val base = GameBaseLoader.load(dir, w)
+            assertEquals(0L, base.gameCode)
+            assertTrue(w.isEmpty(), w.toString())
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `合成数据 GAMEBASE 代码为 0 才告警`() {
+        val dir = createTempDirectory("eratw-gamebasezero")
+        try {
+            dir.resolve("GameBase.csv").writeText("コード,0\n")
             val w = ArrayList<String>()
             val base = GameBaseLoader.load(dir, w)
             assertEquals(0L, base.gameCode)
@@ -251,6 +267,9 @@ class CsvDataAuditTest {
     @Test
     fun `真实语料 VariableSize 消费侧尺寸`() {
         val dir = requireCsvDir()
+        // 根自适应（corpusroot 波）：ITEMNAME/ITEMPRICE 两根不同值（4.980=1000、4.981=1200），
+        // 按当前根档案取列；根不认识 ⇒ CorpusProfile.detect 判红（语料被换/被改必须撞红）。
+        val profile = com.eratw.port.boot.CorpusProfile.detect(dir)
         val data = GameDataLoader.load(dir)
         assertNotNull(data)
         val sizes = data.registry.sizes
@@ -261,9 +280,9 @@ class CsvDataAuditTest {
         assertEquals(10000, sizes.maxDataList[15])   // CFLAG,10000 + CFLAGNAME,10000
         assertEquals(1000, sizes.maxDataList[4])     // TRAINNAME,1000
         assertEquals(20000, sizes.maxDataList[10])   // STR,20000
-        assertEquals(1000, sizes.maxDataList[6])     // ITEMNAME,1000
+        assertEquals(profile.itemNameSize, sizes.maxDataList[6])   // ITEMNAME（${profile.name} 列：1000/1200；VariableSize.csv:74）
         assertEquals(10000, sizes.int1D[3])          // FLAG,10000
-        assertEquals(1000, sizes.int1D[60])          // ITEMPRICE ← ITEMNAME
+        assertEquals(profile.itemNameSize, sizes.int1D[60])        // ITEMPRICE ← ITEMNAME 同步
         assertEquals(20000, sizes.str1D[1])          // STR,20000
         assertEquals(200, sizes.int1D[VariableCode.lowIndex(VariableCode.LOCAL_VAR)])
         assertEquals(200, sizes.int1D[VariableCode.lowIndex(VariableCode.ARG)])
@@ -286,17 +305,20 @@ class CsvDataAuditTest {
     @Test
     fun `真实语料 29 槽名字表读数`() {
         val dir = requireCsvDir()
+        val profile = com.eratw.port.boot.CorpusProfile.detect(dir)
         val data = GameDataLoader.load(dir)
         assertNotNull(data)
         val t = data.registry.csvTables
 
-        // 存在且非空的槽：首项 / 尾项逐槽核对（文件行数见交付报告表格）
-        assertEquals("Ｃ感覚", t[0][0]); assertEquals("TSLv", t[0][60])
-        assertEquals("Ｃ経験", t[1][0]); assertEquals("站式小人飞机杯Ａ绝顶经验", t[1][138])
-        assertEquals("処女", t[2][0]); assertEquals("濃厚精液殘留", t[2][711])
+        // 存在且非空的槽：首项 / 尾项逐槽核对（文件行数见交付报告表格）。
+        // 4.981 名字表大面积简体化；与 4.980 的差集只有 5 格（两根 CSV 逐格对照，2026-11-05），
+        // 简体格按 ${profile.name} 列取，其余格子两根同值、维持单一定值。
+        assertEquals(profile.ablName0, t[0][0]); assertEquals("TSLv", t[0][60])
+        assertEquals(profile.expName0, t[1][0]); assertEquals("站式小人飞机杯Ａ绝顶经验", t[1][138])
+        assertEquals(profile.talentName0, t[2][0]); assertEquals("濃厚精液殘留", t[2][711])
         assertEquals("快Ｃ", t[3][0]); assertEquals("否定", t[3][100])
         assertEquals("愛撫", t[4][0]); assertEquals("自定义指令", t[4][381])
-        assertEquals("苦痛刻印", t[5][0]); assertEquals("成長", t[5][8])
+        assertEquals("苦痛刻印", t[5][0]); assertEquals(profile.markName8, t[5][8])
         assertEquals("跳蛋", t[6][0]); assertEquals("永久凍土欠片", t[6][998])
         assertEquals("体力", t[7][0]); assertEquals("絶頂余韻", t[7][35])
         assertEquals("快Ｃ", t[8][0]); assertEquals("魔力印记", t[8][233])
@@ -306,7 +328,7 @@ class CsvDataAuditTest {
         assertEquals("下半身着衣状況", t[12][0]); assertEquals("PREV_PANTY_STATE", t[12][905])
         assertEquals("休憩FLAG", t[13][0]); assertEquals("DEFAULT_PREGNANCY_MODE", t[13][9126])
         assertEquals("射精部位", t[14][1]); assertEquals("WeddingNight", t[14][917])
-        assertEquals("既成事実", t[15][1]); assertEquals("LatestEggGiftDay", t[15][9173])
+        assertEquals(profile.cflagName1, t[15][1]); assertEquals("LatestEggGiftDay", t[15][9173])
         assertEquals("射精部位", t[16][2]); assertEquals("口服避孕药（假）", t[16][998])
         assertEquals("FIRSTTIME", t[17][0]); assertEquals("童貞喪失履歴", t[17][48])
         assertEquals("口", t[18][0]); assertEquals("腸内", t[18][7])

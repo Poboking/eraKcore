@@ -348,7 +348,12 @@ internal class FlatArgs(private val src: FlatStmtSource, start: Int, private val
         }
     }
 
-    /** `n + 每项（type + left + right + operator）`（对偶 `caseList`，`CaseStmt` / `CaseArgument` 专用）。 */
+    /**
+     * `n + 每项（type + left + right + operator）`（对偶 `caseList`，`CaseStmt` / `CaseArgument` 专用）。
+     *
+     * 运算符槽写的是 `OperatorCode.ordinal`（`FlatStatements` 的 `caseList` 写入口同槽序），
+     * 越界线值只可能是畸形记录：与 [caseType] / [sortOrder] / [dtOptions] 同口径当场拒绝。
+     */
     fun caseList(): List<CaseExpression> {
         val n = count("caseList", slotsPerItem = 4)
         return ArrayList<CaseExpression>(n).apply {
@@ -356,7 +361,9 @@ internal class FlatArgs(private val src: FlatStmtSource, start: Int, private val
                 val type = caseType(next())
                 val left = expr()
                 val right = expr()
-                val op = OperatorCode.entries[next()]
+                val wire = next()
+                val op = OperatorCode.entries.getOrNull(wire)
+                    ?: throw ErbcDecodeException(p - 1, "扁平参数记录未知 OperatorCode 线值: $wire")
                 add(CaseExpression(type, left, right, op))
             }
         }

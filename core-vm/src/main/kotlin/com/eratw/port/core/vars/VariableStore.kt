@@ -1,5 +1,6 @@
 package com.eratw.port.core.vars
 
+import com.eratw.port.core.entity.VirtualCharaIndexResolver
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.VarInfo
 import com.eratw.port.core.expr.VariableHandles
@@ -49,6 +50,16 @@ private const val LOCAL_SLOT_INITIAL = 4
 private val SCOPE_ANY: Any = Any()
 
 /**
+ * 内建浮点标量列（fork-src `dataFloat`）的槽数。
+ *
+ * = 1.824 的 `__COUNT_STRING__`（fork-src `VariableData.cs:155-160` 复用该计数建
+ * `double[__COUNT_STRING__]`）。`RESULTF` 占第 1 格（spec: variables.yaml 的
+ * float_vars.scalars，转引 fork-src `VariableData.cs:182`），其槽位号现在由
+ * [VariableRegistry] 里那条定义的 `index`（= `code & 0xFFFF`）给出，本层不再抄一遍。
+ */
+private const val FLOAT_SCALAR_SLOTS = 2
+
+/**
  * 变量存储池：全局列 + 角色列 + 用户变量 + 局部变量，并实现 expr 层的 [VariableReader]。
  *
  * 布局（ADR-004）：
@@ -69,10 +80,24 @@ class VariableStore(
      */
     initialCharaCapacity: Int = 1,
     var randProvider: RandProvider? = null,
+    /**
+     * 角色下标解析层（D-2/§16.4；null = 无 Mod = 逐位旁路，连 resolve 都不调）。
+     *
+     * 由宿主装配（core 不持有投射状态）：resolver 持有 `VirtualCharaNoRegistry` 的
+     * **引用**而非快照——读档时 `mergeSnapshot` 填充内容对本类透明，构造注入即可满足
+     * 「先恢复 .rt2 注册表、再解析 .sav 角色块」的读档序（§16 第 6 点）。
+     * `rowOfEntity` 桥（生产 = `ICharaSlotProjector.charIndexOf`，M5-2 接真实桥）同由
+     * 宿主在构造 resolver 时提供。宿主未注入而脚本访问 v ≥ CHARANUM 的下标：走既有
+     * 越界判定抛 `OoRCharaVarArg`——与原版行为一致，不是错误。
+     */
+    charaIndexResolver: VirtualCharaIndexResolver? = null,
 ) : VariableReader, VariableWriter, VariableHandles {
 
     private val sizes = registry.sizes
     val characters: CharacterTable = CharacterTable(sizes, config, initialCharaCapacity)
+
+    /** 角色下标解析层（见构造参数 KDoc）；`null` 时 [resolveCharaPos] 原值直通。 */
+    private val charaIndexResolver: VirtualCharaIndexResolver? = charaIndexResolver
 
     /**
      * 附属运行时状态（XML/Map/DT/图形池）。与变量池同生命周期——一个 VM 一套，
@@ -139,6 +164,52 @@ class VariableStore(
 
     private fun intCol3(index: Int): LongArray = intCol(gInt3, index, gInt3Len[index])
 
+    /**
+     * 存档抓取用的系统整型列快照（整列一次取走，替代逐元素 `readInt(def.name, …)`）。
+     *
+     * 存在理由：`save/SaveCapture.entryForDef` 对 `TA`/`TB` 这类 3 维列原本是**每个元素**做一次
+     * 按名解析 + 一块新的下标数组（出厂尺寸 100×100×100 ⇒ 一次存档 200 万轮），堆贴顶时正是
+     * 「玩久了存不上」（2026-11-01 OOM 单）的尖峰形状。
+     *
+     * **只在能与逐元素读法证明等值时**返回非 null，其余一律返回 null 让调用方退回原路径：
+     * - 按名解析到的就是这个 def（同名私有/用户变量遮蔽时，`readInt(def.name, …)` 读的是**那个**
+     *   变量，批量面不能替它改口径）；
+     * - 不是 [VarDef.isForbid]（该形态下逐元素读的第一句就抛「尺寸为 0」，批量不能替它决定报不报）；
+     * - 列长 == `def.dims` 各维乘积（[checkFlat] 的行主序公式 `elem = elem * n + v` 与抓取侧的
+     *   下标拆解同一条，长度对不上就没有下标对应关系可言）。
+     *
+     * 返回的是**副本**：抓取之后脚本还会继续写这一列，活数组绝不能交出去。
+     */
+    internal fun captureSystemIntColumn(def: VarDef): LongArray? {
+        if (def.isForbid) return null
+        if (resolveEntry(def.name) !== def) return null
+        var product = 1L
+        for (n in def.dims) product *= n
+        val column = when (def.storage) {
+            // 未分配列 == 全 0 列（读法 `?.get(elem) ?: 0L` 的同一口径），长度取分配时的同一读数；
+            // 读数与 def 的维度乘积不一致就交回逐元素路径（批量面不能改变条目长度）。
+            Storage.G_INT1 -> gInt1[def.index] ?: return zeroColumn(product, sizes.int1D[def.index])
+            Storage.G_INT2 -> gInt2[def.index] ?: return zeroColumn(product, gInt2Len[def.index])
+            Storage.G_INT3 -> gInt3[def.index] ?: return zeroColumn(product, gInt3Len[def.index])
+            else -> return null
+        }
+        if (product != column.size.toLong()) return null
+        return column.copyOf()
+    }
+
+    private fun zeroColumn(product: Long, columnLength: Int): LongArray? =
+        if (product == columnLength.toLong()) LongArray(columnLength) else null
+
+    /** [captureSystemIntColumn] 的字符串列版本（`G_STR1`，元素走驻留池解码）。 */
+    internal fun captureSystemStrColumn(def: VarDef): Array<String?>? {
+        if (def.isForbid) return null
+        if (def.storage != Storage.G_STR1) return null
+        if (resolveEntry(def.name) !== def) return null
+        val column = gStr1[def.index]
+        if (def.dims.size != 1 || column.size != def.dims[0]) return null
+        return Array<String?>(column.size) { pool.lookup(column[it]) }
+    }
+
     // 维度乘积走 [dimProduct]（Long 预乘 + 上限判定）：VARIABLESIZE.CSV 会把这里的维度
     // 换成装载期数值，Int 折叠溢出会先分配成负数/偏小数组，再在寻址时炸成 AIOOBE。
     private val gStr1: Array<IntArray> = Array(sizes.str1D.size) { IntArray(sizes.str1D[it]) }
@@ -146,6 +217,158 @@ class VariableStore(
 
     /** ITEMPRICE 的常量来源（ITEM.CSV 第 3 列）。spec: ConstantData.cs:1803-1813 */
     private var itemPriceSource: LongArray = LongArray(sizes.int1D[60])
+
+    // ---- 浮点列（4.981 fork 第三型；1.824 完全没有） ----
+    //
+    // 语义权威 = `specs/variables.yaml` 的 `float_vars.storage` 一段，它转引 **fork-src**
+    // `MinorShift.Emuera.GameData.Variable/VariableData.cs`：
+    // - `:26,29,32,35` —— 四件套字段 `dataFloat`(double[]) / `dataFloatArray`(double[][]) /
+    //   `dataFloatArray2D`(double[][,,]) / `dataFloatArray3D`；
+    // - `:155-160` —— 构造时长复用整数侧的计数常量：`dataFloat` 取 `__COUNT_STRING__`(=2)、
+    //   `dataFloatArray` 取 `__COUNT_STRING_ARRAY__`(=7)，各槽先置**空数组**；2D/3D 只是空容器；
+    // - `:668-669` —— `SetDefaultValue` 只把 `dataFloat` 整列清 `0.0`（不清 dataFloatArray）；
+    // - `:182` + `VariableToken.cs:947-971` —— `RESULTF` 是 `dataFloat[1]` 的 0 维包装，
+    //   读写入口 = `VariableEvaluator.RESULTF`（`VariableEvaluator.cs:3105-3108`）。
+    //
+    // ⚠ **1.824 参考树没有这一面**：本机 `reference/emuera-cs/` 的 VariableData.cs 里
+    // `grep double` 零命中（`dataString` 还在 :2878、`SetDefaultValue` 在 :3385 —— 与上述行号
+    // 完全不同源）。⇒ 本节行号一律对 **4.981 fork 证据树**（vendor emuera-skia @48494165）
+    // 逐条实测复核过（2026-10-31，g9 路次），不再是 spec 转引的二手依据。
+    //
+    // 移植形态的取舍（有意与四件套**不同**，理由逐条）：
+    // - 只有 `dataFloat`（标量列）在移植侧真实存在，且只服务 `RESULTF` 一个名字 ⇒
+    //   按 [FLOAT_SCALAR_SLOTS] 建 2 格、`RESULTF` 占第 1 格；第 0 格按 fork 同样存在但
+    //   **归属名字未钉**（TODO(verify)），移植侧留空、不可达。
+    //   `dataFloatArray/2D/3D` 在 fork 里是「系统 1D/2D/3D 浮点数组列」，而 4.981 语料里
+    //   唯一的系统浮点只有标量 `RESULTF` 与函数局部 `LOCALF`/`ARGF` ⇒ 移植侧不建那三张
+    //   空表（建了也没有槽名可指），改为下面按需的浮点局部实例 + 用户 `#DIMF` 列。
+    // - `LOCALF`/`ARGF` 不是「一列系统数组」而是**每函数一份**的 1 维实例，与
+    //   `LOCAL`/`ARG`（[Storage.L_INT]）同形；复用 [Local1D] 那套密集槽位镜像会把
+    //   热路径的作废判据牵进来，而浮点访问在语料里只有两条触发点 ⇒ 单开一张冷表
+    //   [floatLocalsByFunc]，语义与 `localsByFunc` 相同（以函数键分实例、递归共用）。
+    // - 三名的名字/code/维度/出厂档位归 [VariableRegistry]（[Storage.L_FLOAT] /
+    //   [Storage.G_FLOAT0]），本层只按 `storage` 分派数据落点；`LOCALF`/`ARGF` 的
+    //   **默认长度**取注册表 `dims[0]` = [VariableSizes.float1D] 那一格
+    //   （VARIABLESIZE.CSV 的浮点行改写它，spec: fork-src ConstantData.cs:532-533；
+    //   原版同一条链是 `VariableData.cs:376-379` 读 `VariableFloatArrayLength`），
+    //   再按函数由 `#LOCALFSIZE` / 形参声明拉长（[LocalLengths.floatLocal] /
+    //   [LocalLengths.floatArg]，见 [resolveFloatLocalSize]）。
+    private val floatScalars: DoubleArray = DoubleArray(FLOAT_SCALAR_SLOTS)
+
+    /**
+     * 每函数的浮点局部实例（`LOCALF`/`ARGF`），键 = 大写函数键 → 大写变量名 → 实例。
+     *
+     * 与 [localsByFunc] 的 `Local1D` 分家而不合并，理由见上面「移植形态的取舍」第 2 条。
+     * 实例的数组**懒分配**（与 `Local1D.ints` 同口径）：从没写过也没读过 ⇒ 不占格子，
+     * 读它等价于读一条全 `0.0` 的数组（默认值 0.0 的依据 = fork-src `:668-669`）。
+     */
+    private val floatLocalsByFunc = HashMap<String, HashMap<String, FloatLocal>>()
+
+    /** 浮点局部/标量的一次解析结果（句柄式的轻壳，只为让读写共用同一个函数体）。 */
+    private class FloatLocal(val name: String, val size: Int) {
+        var data: DoubleArray? = null
+    }
+
+    /** `RESULTF` 的内建浮点标量落点（0 维，数组本体是 [floatScalars]）。 */
+    private class FloatScalar(val slot: Int)
+
+    /** 用户 `#DIMF` 变量的公共基类（见 [StaticFloatUserVar] / [DynamicFloatUserVar]）。 */
+    abstract class FloatUserVar(spec: DimSpec, def: VarDef) : UserVar(spec, def) {
+        /** 元素下标（已压平）读；越界由 [VariableStore] 的校验负责，本层不再判。 */
+        abstract fun readElem(elem: Int): Double
+
+        abstract fun writeElem(elem: Int, value: Double)
+
+        // 浮点列**不提供**整数/字符串通道：原版浮点 token 只覆写 GetFloatValue/SetValue(double)，
+        // 按整数或字符串读它在 fork 里同样是错误（TODO(verify)：fork-src 的具体文案未取证）。
+        // 报错文案与 `UserVar` 基类（UserVariables.kt:1599-1613）的「不是整数变量」区分开，
+        // 让「把浮点当整数读」在报文里一眼可辨。
+        override fun readInt(charPos: Int, elem: Int): Long =
+            throw CodeEE("变量 ${def.name} 是浮点变量，不能当整数读取")
+
+        override fun writeInt(charPos: Int, elem: Int, value: Long) =
+            throw CodeEE("变量 ${def.name} 是浮点变量，不能写入整数")
+
+        override fun readStr(charPos: Int, elem: Int): String =
+            throw CodeEE("变量 ${def.name} 是浮点变量，不能当字符串读取")
+
+        override fun writeStr(charPos: Int, elem: Int, value: String) =
+            throw CodeEE("变量 ${def.name} 是浮点变量，不能写入字符串")
+    }
+
+    /**
+     * 静态（含 GLOBAL/SAVEDATA）`#DIMF` 变量：一份 `DoubleArray`，按 `#DIMF` 初值建列。
+     *
+     * 依据：fork-src `VariableData.cs:469-474`（全局/静态分支）；初值来自 `DefaultFloat`
+     * （`UserDefinedVariableData.cs:21,317-338`，单值广播到全格），没写初值时为 0.0
+     * （fork-src `:668-669` 的 `dataFloat` 出厂口径）。
+     */
+    class StaticFloatUserVar(spec: DimSpec, def: VarDef) : FloatUserVar(spec, def) {
+        private var data: DoubleArray? = null
+
+        /** 声明的浮点初值（null ⇒ 0.0）；单值广播到全部格子。 */
+        private val defaultValue: Double get() = spec.defaultsFloat ?: 0.0
+
+        private fun arr(): DoubleArray = data ?: DoubleArray(spec.totalSize) { defaultValue }.also { data = it }
+
+        override fun readElem(elem: Int): Double = arr()[elem]
+
+        /**
+         * 单格写。常量闸相位同 `StaticIntUserVar.writeInt`（UserVariables.kt）：官方存储层
+         * 写入口无常量闸，拦截在解析期（移植侧 `stmt/ArgBuilders.kt` 的 set :1768 等），
+         * 这里不再二次拦。
+         */
+        override fun writeElem(elem: Int, value: Double) {
+            arr()[elem] = value
+        }
+
+        override fun setDefault() {
+            // 原地重置、不换数组对象（与 StaticIntUserVar 同理：REF/外部别名指向同一实例）；
+            // 复位的目标是 `#DIMF` 初值（不是无条件 0.0），与整数侧 `defArray` 回填同口径。
+            arr().fill(defaultValue)
+        }
+
+        override fun rawArray(): Any = arr()
+    }
+
+    /**
+     * 私有动态（DYNAMIC）`#DIMF` 变量：栈式嵌套作用域，与 `DynamicIntUserVar` 同构。
+     *
+     * 依据：fork-src `VariableData.cs:585-591`（私有动态分支，1 维）；作用域压弹的
+     * 1.824 同族口径见 `UserVariables.kt:1694-1721`（`VariableData.cs:1820-1901`）。
+     * 动态变量「作用域外访问」报错照抄整数侧文案方向。
+     */
+    class DynamicFloatUserVar(spec: DimSpec, def: VarDef) : FloatUserVar(spec, def) {
+        private var data: DoubleArray? = null
+        private val stack = ArrayDeque<DoubleArray>()
+
+        private fun arr(): DoubleArray =
+            data ?: throw CodeEE("动态变量 ${def.name} 在当前作用域外被访问")
+
+        override fun readElem(elem: Int): Double = arr()[elem]
+
+        override fun writeElem(elem: Int, value: Double) {
+            arr()[elem] = value
+        }
+
+        /** 每次 ScopeIn 新建的列按 `#DIMF` 初值填（null ⇒ 0.0），与静态侧同口径。 */
+        private fun newScopeArray(): DoubleArray = DoubleArray(spec.totalSize) { spec.defaultsFloat ?: 0.0 }
+
+        override fun scopeIn() {
+            data?.let { stack.addLast(it) }
+            data = newScopeArray()
+        }
+
+        override fun scopeOut() {
+            data = if (stack.isEmpty()) null else stack.removeLast()
+        }
+
+        /** 动态变量无值时不做初始化（与 `DynamicIntUserVar` 同口径，spec: VariableData.cs:1836-1838）。 */
+        override fun setDefault() {}
+
+        override fun rawArray(): Any? = data
+    }
+
 
     // ---- 用户变量 ----
     private val userVars = LinkedHashMap<String, UserVar>()
@@ -386,6 +609,180 @@ class VariableStore(
         plusIntEntry(resolveEntry(name) ?: throw CodeEE("未定义的变量 $name"), name, indices, delta)
 
     /**
+     * 浮点读入口（4.981 第三型）。
+     *
+     * 解析序与 [readInt] **不同**，且这是有意的：原版 `IdentifierDictionary.GetVariableToken`
+     * 的优先序是「私有 → 局部 → 系统」，而 `LOCALF`/`ARGF` 落在 `localvarTokenDic`
+     * （spec: fork-src VariableData.cs:376-379）、`RESULTF` 落在 `varTokenDic`（spec: 同文件 :182），
+     * 三者都**每函数/每格一份**地按当前帧就地取实例（理由见 [floatLocalsByFunc] 的 KDoc），
+     * 不能复用 `resolveEntry` 那条「先用户变量再系统表」的整型/字符串通道。
+     * 优先序本身与 [readInt] 同构：先看用户变量（含同名 `#DIMF`），再看系统表，见
+     * [resolveFloatEntry]。
+     */
+    override fun readFloat(name: String, indices: LongArray): Double =
+        readFloatEntry(resolveFloatEntry(name) ?: throw CodeEE("未定义的变量 $name"), name, indices)
+
+    /**
+     * 名字 → 浮点条目（系统浮点寄存器 / 浮点局部实例 / 用户 `#DIMF`）。
+     *
+     * 非浮点条目命中时**在这里就报错**（而不是交给读函数再判），因为「未定义的变量 X」
+     * 与「X 不是浮点变量」是两句不同的话，前者必须只在名字彻底不存在时才说。
+     */
+    private fun resolveFloatEntry(name: String): Any? {
+        lookupUserVar(name)?.let { v ->
+            return if (v is FloatUserVar) v else throw CodeEE("变量 $name 不是浮点变量")
+        }
+        val def = registry.def(name) ?: return null
+        if (def.type != VarType.FLOAT) throw CodeEE("变量 $name 不是浮点变量")
+        return builtinFloatEntry(def)
+    }
+
+    /**
+     * 名字 → 系统浮点条目；名字不在注册表里、或登记的不是浮点 ⇒ null（调用方自决报错口径）。
+     *
+     * [getLength] 用它来回答 `VARSIZE("LOCALF")`。
+     */
+    private fun builtinFloatOf(name: String): Any? {
+        val def = registry.def(name) ?: return null
+        if (def.type != VarType.FLOAT) return null
+        return builtinFloatEntry(def)
+    }
+
+    /**
+     * 注册表里那条浮点定义 → 运行期条目。
+     *
+     * - [Storage.L_FLOAT]（`LOCALF`/`ARGF`）：**每函数一份**，需要当前有帧；原版局部变量
+     *   在函数外访问是装载期就禁止的形态，移植侧的等价报错与 `Local1D` 路径同文案方向
+     *   （「只能在函数内使用」）。实例按 [resolveFloatLocalSize] 定长并缓存（同函数递归共用）。
+     * - [Storage.G_FLOAT0]（`RESULTF`）：内建浮点标量列的第 `def.index` 格
+     *   （spec: fork-src VariableEvaluator.cs:3105-3108 的
+     *   `DataFloat[(int)(VariableCode.RESULTF & __LOWERCASE__)]` —— 槽位号就是 code 的低 16 位）。
+     */
+    private fun builtinFloatEntry(def: VarDef): Any = when (def.storage) {
+        Storage.L_FLOAT -> {
+            val f = topFrame() ?: throw CodeEE("变量 ${def.upperName} 只能在函数内使用")
+            floatLocalsByFunc.getOrPut(f.funcKey) { HashMap() }
+                .getOrPut(def.upperName) { FloatLocal(def.upperName, resolveFloatLocalSize(f.funcKey, def)) }
+        }
+        Storage.G_FLOAT0 -> FloatScalar(def.index)
+        else -> throw CodeEE("变量 ${def.name} 不是浮点变量")
+    }
+
+    /**
+     * 浮点局部的有效长度：`max(VARSIZE 档, #LOCALFSIZE[, 形参声明长])`。
+     *
+     * - 档位下界 = [VariableSizes.float1D] 那一格（出厂 10，spec: fork-src
+     *   `ConstantData.cs:211-217`；`VARIABLESIZE.CSV` 的浮点行改写它，spec: :532-533；
+     *   原版把这一格交给 `VariableLocal` 当 `size`，spec: `VariableData.cs:376-379`）；
+     * - `LOCALF`：`max(档位, #LOCALFSIZE)`；
+     * - `ARGF`：`max(档位, #LOCALFSIZE, 形参声明长)` —— 「声明只增不减」对应
+     *   spec: fork-src `VariableLocal.cs:50-53` 的
+     *   `if (newSize < size && (ARG || ARGS || ARGF)) newSize = size`。
+     *
+     * ⚠ **与 fork 的两处已知口径差**（本路按 g1 契约取上述上界，逐条已实测取证，
+     * 改动会影响 g1 已验收的 `FloatDeclFaceTest` ⇒ 留给组长裁决，见交付报告）：
+     * 1. fork 的 `ARGF` 只读 `func.ArgFloatLength`（`VariableLocal.cs:48-49`），
+     *    `#LOCALFSIZE` 记在 `func.LocalFloatLength` 上（`LogicalLineParser.cs:257-266`），
+     *    两者不互相抬界 ⇒ 严格照抄应是 `max(档位, 形参声明长)`，本式多并入了 `#LOCALFSIZE`；
+     * 2. fork 对**非事件函数**的 `LOCALF` 不做下界钳制（`VariableLocal.cs:52` 的钳制名单里
+     *    没有 LOCALF），只有事件函数在分组时按 `getLocalDefaultSize("LOCALF")` 抬到档位
+     *    （spec: fork-src `LabelDictionary.cs:155-173, :226-253`）⇒ 严格照抄时
+     *    `#LOCALFSIZE 4` 在非事件函数里是**缩到 4**，本式仍取 max。
+     */
+    private fun resolveFloatLocalSize(funcKey: String, def: VarDef): Int {
+        val base = def.dims[0]
+        val len = localLengths[upperOf(funcKey)] ?: return base
+        return when (def.code) {
+            VariableCode.ARGF -> maxOf(base, len.floatLocal, len.floatArg)
+            else -> maxOf(base, len.floatLocal)
+        }
+    }
+
+    /**
+     * 浮点读的**唯一**函数体（与 [writeFloat] / [plusFloat] 同一套条目与校验）。
+     *
+     * 未分配的浮点局部等价于全 `0.0`（默认值依据 = fork-src `VariableData.cs:668-669`）。
+     */
+    private fun readFloatEntry(e: Any, name: String, indices: LongArray): Double = when (e) {
+        is FloatUserVar -> {
+            val slot = checkAndSlot(e, indices)
+            e.readElem(slot.toInt())
+        }
+        is FloatScalar -> {
+            checkFloatScalarSlot(name, indices)
+            floatScalars[e.slot]
+        }
+        is FloatLocal -> {
+            val elem = checkFloatLocalSlot(e, name, indices)
+            e.data?.get(elem) ?: 0.0
+        }
+        else -> throw CodeEE("变量 $name 不是浮点变量")
+    }
+
+    /** 浮点写的**唯一**函数体；[name] 口径同 [writeIntEntry]（只喂写观察口，源拼写原样传）。 */
+    private fun writeFloatEntry(e: Any, name: String, indices: LongArray, value: Double) {
+        // DBG4 P3 观察口（入口、校验前），守卫与整数/字符串支逐字同形：
+        // 单次 volatile 读 + `watches` 名单短路 ⇒ 生产路径（probe 为 null）零开销、miss 零分配。
+        // 浮点走**自己的通道** [VarWriteProbe.onWriteFloat]（默认实现是空体 ⇒ 既有实现方
+        // 一行不改也照常编译），不把 double 折成 `toRawBits()` 塞进整数通道 ——
+        // 那会让调试器显示一个看不懂的巨大整数，比不报更糟。
+        val p = writeProbe
+        if (p != null && p.watches(name)) runCatching { p.onWriteFloat(name, indices, value) }
+        when (e) {
+            is FloatUserVar -> {
+                val slot = checkAndSlot(e, indices)
+                e.writeElem(slot.toInt(), value)
+            }
+            is FloatScalar -> {
+                checkFloatScalarSlot(name, indices)
+                floatScalars[e.slot] = value
+            }
+            is FloatLocal -> {
+                val elem = checkFloatLocalSlot(e, name, indices)
+                val arr = e.data ?: DoubleArray(e.size).also { e.data = it }
+                arr[elem] = value
+            }
+            else -> throw CodeEE("变量 $name 不是浮点变量")
+        }
+    }
+
+    /** 浮点增量（`+=` 的落点）；返回加完的新值。口径同 [plusIntEntry]（读-加-写，非原子）。 */
+    private fun plusFloatEntry(e: Any, name: String, indices: LongArray, delta: Double): Double {
+        val cur = readFloatEntry(e, name, indices)
+        val next = cur + delta
+        writeFloatEntry(e, name, indices, next)
+        return next
+    }
+
+    /**
+     * 0 维浮点（`RESULTF`）的下标校验：不带下标。
+     *
+     * 文案与 [checkFlat] 的 0 维分支同源（都走 [zeroDVarHasArg]，官方 `Error.ZeroDVarHasArg`），
+     * 保证「按浮点读」与「按下标个数读」报的是同一句话。
+     */
+    private fun checkFloatScalarSlot(name: String, indices: LongArray) {
+        if (indices.isNotEmpty()) throw zeroDVarHasArg(name)
+    }
+
+    /**
+     * 1 维浮点局部（`LOCALF`/`ARGF`）的下标校验：恰好 1 个下标，且**在 Long 域**判界。
+     *
+     * 判据来自 `LocalVariableToken.cs:39-45`（`arguments[0] < 0 || arguments[0] >= size`，
+     * arguments 是 long）—— 先 toInt 会把 `2^32` 回绕成 0 静默别名到 0 号元素。
+     * 文案与 [localInt] / [checkElement] 的局部支同形。
+     */
+    private fun checkFloatLocalSlot(l: FloatLocal, name: String, indices: LongArray): Int {
+        if (indices.size != 1) {
+            throw CodeEE("变量 ${l.name} 需要 1 个下标（实际 ${indices.size}）")
+        }
+        val x = indices[0]
+        if (x < 0 || x >= l.size) {
+            throw oorVarArg(name, 1, x)
+        }
+        return x.toInt()
+    }
+
+    /**
      * 名字 → 变量条目（[UserVar] 或 [VarDef]），解析顺序与原生 `readInt` 一致：
      * 先用户变量（私有按当前帧隔离），再系统变量表。
      *
@@ -544,6 +941,23 @@ class VariableStore(
         return found
     }
 
+    /**
+     * 系统变量被按**错的类型**读写时的文案（三型各说各的）。
+     *
+     * 存在理由：4.981 的三个浮点名进 [VariableRegistry] 后，`LOCALF` 这类名字在整型/字符串
+     * 通道里也查得到定义，沿用改造前那句「是字符串变量」（整数↔字符串两型时代的写法）
+     * 会把浮点说成字符串。口径与 [FloatUserVar] 的「是浮点变量，不能当整数读取」同一句式；
+     * INT/STR 两型的原文案逐字不变。
+     */
+    private fun wrongTypeError(def: VarDef, want: String): CodeEE {
+        val actual = when (def.type) {
+            VarType.FLOAT -> "浮点"
+            VarType.STR -> "字符串"
+            VarType.INT -> "整数"
+        }
+        return CodeEE("变量 ${def.name} 是${actual}变量，不能$want")
+    }
+
     /** 整型读的**唯一**函数体（按名入口与 [readIntH] 共用）。 */
     private fun readIntEntry(e: Any, indices: LongArray): Long {
         if (e is UserVar) {
@@ -551,7 +965,7 @@ class VariableStore(
             return e.readInt((slot ushr 32).toInt(), slot.toInt())
         }
         val def = e as VarDef
-        if (def.type != VarType.INT) throw CodeEE("变量 ${def.name} 是字符串变量，不能当整数读取")
+        if (def.type != VarType.INT) throw wrongTypeError(def, "当整数读取")
         if (def.storage == Storage.PSEUDO) return pseudoInt(def, indices)
         if (def.storage == Storage.L_INT) {
             // 局部变量：长度按函数声明决定（可能大于默认 1000），[localInt] 自带 Long 口径
@@ -559,14 +973,24 @@ class VariableStore(
             checkElement(def, indices)
             return localInt(def, indices[0])
         }
-        val elem = checkFlat(def, indices)
+        val slot = checkFlat(def, indices)
+        val charPos = (slot ushr 32).toInt()
+        val elem = slot.toInt()
         return when (def.storage) {
             Storage.G_INT1 -> gInt1[def.index]?.get(elem) ?: 0L
             Storage.G_INT2 -> gInt2[def.index]?.get(elem) ?: 0L
             Storage.G_INT3 -> gInt3[def.index]?.get(elem) ?: 0L
-            Storage.C_INT0 -> characters.int0[def.index].get(indices[0].toInt(), 0)
-            Storage.C_INT1 -> characters.int1[def.index].get(indices[0].toInt(), elem)
-            Storage.C_INT2 -> characters.int2[def.index].get(indices[0].toInt(), elem)
+            Storage.C_INT0 -> characters.int0[def.index].get(charPos, 0)
+            Storage.C_INT1 -> {
+                // B5 半死闸：0 维 int0（ISASSI/NO）不在 Dispose 释放面内，不过闸（分档见
+                // CharacterTable.disposed KDoc）；1 维/2 维被置 null ⇒ 读 = NRE 等价。
+                characters.requireSystemRowAlive(charPos)
+                characters.int1[def.index].get(charPos, elem)
+            }
+            Storage.C_INT2 -> {
+                characters.requireSystemRowAlive(charPos)
+                characters.int2[def.index].get(charPos, elem)
+            }
             else -> throw CodeEE("变量 ${def.name} 不是整数数组")
         }
     }
@@ -578,18 +1002,24 @@ class VariableStore(
             return e.readStr((slot ushr 32).toInt(), slot.toInt())
         }
         val def = e as VarDef
-        if (def.type != VarType.STR) throw CodeEE("变量 ${def.name} 是整数变量，不能当字符串读取")
+        if (def.type != VarType.STR) throw wrongTypeError(def, "当字符串读取")
         if (def.storage == Storage.PSEUDO) return pseudoStr(def)
         if (def.storage == Storage.L_STR) {
             checkElement(def, indices)
             return localStr(def, indices[0])
         }
-        val elem = checkFlat(def, indices)
+        val slot = checkFlat(def, indices)
+        val charPos = (slot ushr 32).toInt()
+        val elem = slot.toInt()
         return when (def.storage) {
             Storage.G_STR0 -> pool.lookup(gStr0[0])
             Storage.G_STR1 -> pool.lookup(gStr1[def.index][elem])
-            Storage.C_STR0 -> pool.lookup(characters.str0[def.index].get(indices[0].toInt(), 0))
-            Storage.C_STR1 -> pool.lookup(characters.str1[def.index].get(indices[0].toInt(), elem))
+            Storage.C_STR0 -> pool.lookup(characters.str0[def.index].get(charPos, 0))
+            Storage.C_STR1 -> {
+                // B5 半死闸（0 维 str0 = NAME/CALLNAME 族不在 Dispose 释放面内，不过闸）
+                characters.requireSystemRowAlive(charPos)
+                pool.lookup(characters.str1[def.index].get(charPos, elem))
+            }
             Storage.CSV_CONST -> registry.csvTables[def.index][elem]
             else -> throw CodeEE("变量 ${def.name} 不是字符串数组")
         }
@@ -703,6 +1133,14 @@ class VariableStore(
     override fun writeStr(name: String, indices: LongArray, value: String) =
         writeStrEntry(resolveEntry(name) ?: throw CodeEE("未定义的变量 $name"), name, indices, value)
 
+    /** 浮点写入口（[VariableWriter.writeFloat] 的实现）。解析序见 [readFloat] 的 KDoc。 */
+    override fun writeFloat(name: String, indices: LongArray, value: Double) =
+        writeFloatEntry(resolveFloatEntry(name) ?: throw CodeEE("未定义的变量 $name"), name, indices, value)
+
+    /** 浮点增量入口（[VariableReader.plusFloat] 的实现）。 */
+    override fun plusFloat(name: String, indices: LongArray, delta: Double): Double =
+        plusFloatEntry(resolveFloatEntry(name) ?: throw CodeEE("未定义的变量 $name"), name, indices, delta)
+
     /**
      * 整型写的**唯一**函数体（按名入口与 [writeIntH] 共用）。
      *
@@ -720,7 +1158,7 @@ class VariableStore(
             return
         }
         val def = e as VarDef
-        if (def.type != VarType.INT) throw CodeEE("变量 ${def.name} 是字符串变量，不能写入整数")
+        if (def.type != VarType.INT) throw wrongTypeError(def, "写入整数")
         if (def.storage == Storage.PSEUDO) throw pseudoAssignError(def, wantStr = false, arrayForm = false)
         if (!def.isWritable) throw CodeEE("变量 ${def.name} 是常量，不能赋值")
         if (def.storage == Storage.L_INT) {
@@ -728,14 +1166,23 @@ class VariableStore(
             setLocalInt(def, indices[0], value)
             return
         }
-        val elem = checkFlat(def, indices)
+        val slot = checkFlat(def, indices)
+        val charPos = (slot ushr 32).toInt()
+        val elem = slot.toInt()
         when (def.storage) {
             Storage.G_INT1 -> intCol1(def.index)[elem] = value
             Storage.G_INT2 -> intCol2(def.index)[elem] = value
             Storage.G_INT3 -> intCol3(def.index)[elem] = value
-            Storage.C_INT0 -> characters.int0[def.index].set(indices[0].toInt(), 0, value)
-            Storage.C_INT1 -> characters.int1[def.index].set(indices[0].toInt(), elem, value)
-            Storage.C_INT2 -> characters.int2[def.index].set(indices[0].toInt(), elem, value)
+            Storage.C_INT0 -> characters.int0[def.index].set(charPos, 0, value)
+            Storage.C_INT1 -> {
+                // B5 半死闸（写侧；分档与依据见读侧同族注释 + CharacterTable.disposed KDoc）
+                characters.requireSystemRowAlive(charPos)
+                characters.int1[def.index].set(charPos, elem, value)
+            }
+            Storage.C_INT2 -> {
+                characters.requireSystemRowAlive(charPos)
+                characters.int2[def.index].set(charPos, elem, value)
+            }
             // 整数伪变量全部只读：上面 `pseudoAssignError` 已无条件抛出，本分支不可达。
             // 保留是为了与 writeStrEntry 的 PSEUDO 分支（那条是活路径）对称，别误删。
             Storage.PSEUDO -> setPseudo(def, value)
@@ -754,20 +1201,26 @@ class VariableStore(
             return
         }
         val def = e as VarDef
-        if (def.type != VarType.STR) throw CodeEE("变量 ${def.name} 是整数变量，不能写入字符串")
+        if (def.type != VarType.STR) throw wrongTypeError(def, "写入字符串")
         if (!def.isWritable) throw CodeEE("变量 ${def.name} 是常量，不能赋值")
         if (def.storage == Storage.L_STR) {
             checkElement(def, indices)
             setLocalStr(def, indices[0], pool.intern(value))
             return
         }
-        val elem = checkFlat(def, indices)
+        val slot = checkFlat(def, indices)
+        val charPos = (slot ushr 32).toInt()
+        val elem = slot.toInt()
         val id = pool.intern(value)
         when (def.storage) {
             Storage.G_STR0 -> gStr0[0] = id
             Storage.G_STR1 -> gStr1[def.index][elem] = id
-            Storage.C_STR0 -> characters.str0[def.index].set(indices[0].toInt(), 0, id)
-            Storage.C_STR1 -> characters.str1[def.index].set(indices[0].toInt(), elem, id)
+            Storage.C_STR0 -> characters.str0[def.index].set(charPos, 0, id)
+            Storage.C_STR1 -> {
+                // B5 半死闸（写侧）
+                characters.requireSystemRowAlive(charPos)
+                characters.str1[def.index].set(charPos, elem, id)
+            }
             // 字符串伪变量（WINDOW_TITLE 可写，其余在 setPseudoStr 里抛「不能赋值」）：
             // 与 writeIntEntry 不同，这里**没有**前置的 pseudoAssignError 拦截，分支是活路径。
             Storage.PSEUDO -> setPseudoStr(def, value)
@@ -901,13 +1354,17 @@ class VariableStore(
                 // 旧实现直接返回声明尺寸（REF 恒为 0），VARSIZE 会静默得到 0。
                 val ref = v as RefUserVar
                 val len = ref.boundLength()
-                    ?: throw CodeEE("引用变量 ${v.def.name} 未绑定目标（EmptyRefVar）")
+                    ?: throw emptyRefVar(v.def.name)
                 if (dimension < 0) {
-                    if (rank != 1) throw CodeEE("变量 $name 是 $rank 维，必须指定维度")
+                    // spec: ReferenceToken.cs:38-41 —— array != null 但 Dimension != 1 时
+                    // 无参 GetLength 抛 GetSizeDimError（实参 = 维数、变量名，`Lang.cs:1630`）。
+                    if (rank != 1) throw getSizeDimError(rank, v.def.name)
                     return len
                 }
                 if (dimension >= rank) {
-                    throw CodeEE("变量 $name 不存在第 ${dimension + 1} 维（维度 $rank）")
+                    // 官方逐字（2026-11-05 lane negrange）：ReferenceToken.cs:55 的 GetSizeNonExistDim，
+                    // 实参 = varName。旧自造串「变量 X 不存在第 N 维（维度 R）」退役。
+                    throw getSizeNonExistDim(v.def.name)
                 }
                 // spec: ReferenceToken.cs:45-56 —— 每维长度 = `array.GetLength(dimension)`，
                 // 即**目标数组的形状**（不是声明尺寸，REF 声明期恒 0）。形状由绑定点
@@ -925,10 +1382,25 @@ class VariableStore(
                 )
             }
             if (dimension < 0) {
-                if (rank != 1) throw CodeEE("变量 $name 是 $rank 维，必须指定维度")
+                // spec: UserDefinedVariableToken.cs:40-47 —— 非 REF 的用户变量同形态抛
+                // GetSizeDimError（`Lang.cs:1630`；实参 = Dimension、varName）。
+                if (rank != 1) throw getSizeDimError(rank, v.def.name)
                 return v.def.dims[0]
             }
             return v.def.length(dimension)
+        }
+        // 系统浮点（`LOCALF`/`ARGF` 有长度、`RESULTF` 是 0 维没有长度）在注册表里有定义，
+        // 但长度是**按当前帧**算的（`#LOCALFSIZE` / 形参声明 / VARSIZE 档位三者取上界），
+        // 不是注册表里那个装载期 `dims[0]` ⇒ 先于下面的通用支问它们，
+        // 否则 `VARSIZE("LOCALF")` 会报「未定义的变量」。
+        builtinFloatOf(name)?.let { b ->
+            when (b) {
+                is FloatLocal -> {
+                    if (dimension > 0) throw CodeEE("变量 ${b.name} 不存在第 ${dimension + 1} 维")
+                    return b.size
+                }
+                is FloatScalar -> throw CodeEE("伪变量 ${upperOf(name)} 没有尺寸")
+            }
         }
         val def = registry.def(name) ?: throw CodeEE("未定义的变量 $name")
         if (def.storage == Storage.PSEUDO) throw CodeEE("伪变量 ${def.name} 没有尺寸")
@@ -945,20 +1417,45 @@ class VariableStore(
         // 的 GetLength 本身不抛），元素访问才由 CheckElement 判越界。旧实现抛 CodeEE 会让
         // VARSIZE 与 VARSET 的缺省区间（end = GetLength()）在禁用数组上直接失败。
         if (dimension < 0) {
-            if (def.dims.size != 1) throw CodeEE("变量 ${def.name} 是 ${def.dims.size} 维，必须指定维度")
+            // 官方按 token 族分三条键，本支按 storage 族分流（2026-11-05 lane errtext4 收文案）：
+            // - 角色变量 0 维 = GetSize0DCharaVar（CharaVariableToken.cs:36-38）；
+            // - 角色变量多维 = GetSizeCharaVarWithoutDim（:40）；
+            // - 其余（系统全局 / 用户变量族）= GetSizeDimError（VariableData.cs:156「2」/:256「3」、
+            //   UserDefinedVariableToken.cs:46）。
+            // 判界条件一字未动（仍 `rank != 1` 才抛）：0 维非角色变量原版不抛、本层历来抛，
+            // 那是**语义**偏差、不属本波文案面，登记在交付回执。
+            val rank = def.dims.size
+            if (rank != 1) {
+                throw when {
+                    def.isCharacterData && rank == 0 -> getSize0DCharaVar(def.name)
+                    def.isCharacterData -> getSizeCharaVarWithoutDim(rank, def.name)
+                    else -> getSizeDimError(rank, def.name)
+                }
+            }
             return def.dims[0]
         }
         // spec: CharaVariableToken.GetLength(dimension) —— dimension 直接索引元素尺寸（不含角色位置）
         return def.length(dimension)
     }
 
-    /** 区间赋值合法性：端点允许等于长度。spec: VariableData.cs:89-100 */
+    /**
+     * 区间赋值合法性：端点允许等于长度。spec: VariableData.cs:89-100
+     *
+     * 官方端点越界的文案是 `Error.OoRInstructionArg`（`{funcName}命令的第{argNo}个参数({值})超出数组"{变量名}"的范围`），
+     * 实参号由官方各调用点自带（VARSET=3/4、SUMARRAY=2/3…）。本函数是官方
+     * `IsArrayRangeValid` 的移植侧镜像、**生产无调用点**（现存 caller 只有 vars 测试装置），
+     * 参数号按「区间双端点在实参表中的 1 基位置」默认 1/2，由调用方按自己的语句覆盖
+     * （2026-11-05 lane negrange：退役自造串「X 的第 1/2 个区间参数 N 越界（变量 Y 长度 L）」，
+     * 判界逻辑一字未动）。
+     */
     fun isArrayRangeValid(
         name: String,
         indices: LongArray,
         index1: Long,
         index2: Long,
         funcName: String = "SET",
+        startArgNo: Int = 1,
+        endArgNo: Int = 2,
     ) {
         val def = registry.def(name) ?: throw CodeEE("未定义的变量 $name")
         checkElement(def, indices)
@@ -966,6 +1463,8 @@ class VariableStore(
         // 全局 2D/3D 按最后一维（spec: VariableData.cs:185-196 / :289-300）；
         // 局部变量按函数声明的实际长度（spec: LocalVariableToken.cs:47-58）。
         val len = when {
+            // 0 维角色变量：原版 `sizes[0]` 在空 sizes 上崩成裸 IndexOutOfRangeException
+            // （CharaVariableToken.cs:72-83 无前置判），Lang 表无对应串 ⇒ 崩溃折码、自造允许。
             def.isCharacterData -> def.dims.firstOrNull() ?: throw CodeEE("变量 ${def.name} 不是数组，没有区间")
             def.storage == Storage.L_INT || def.storage == Storage.L_STR -> {
                 val f = topFrame() ?: throw CodeEE("变量 ${def.name} 只能在函数内使用")
@@ -974,10 +1473,10 @@ class VariableStore(
             else -> def.dims.last()
         }
         if (index1 < 0 || index1 > len) {
-            throw CodeEE("$funcName 的第 1 个区间参数 $index1 越界（变量 ${def.name} 长度 $len）")
+            throw oorInstructionArg(funcName, startArgNo, index1, def.name)
         }
         if (index2 < 0 || index2 > len) {
-            throw CodeEE("$funcName 的第 2 个区间参数 $index2 越界（变量 ${def.name} 长度 $len）")
+            throw oorInstructionArg(funcName, endArgNo, index2, def.name)
         }
     }
 
@@ -1067,6 +1566,51 @@ class VariableStore(
     }
 
     /**
+     * 批量赋值的浮点形态（`SET 倍率, 1.0, 2.0` 一类）。
+     *
+     * 与整数/字符串重载同一口径：**先查 userVar 再查系统表**，未命中复用 [writeFloat]
+     * 逐元素写 ⇒ 下标个数/越界/常量的检查语义与标量写完全一致（同一函数体，不可能分叉）。
+     * 原版 `SetValue(double[])` 只由浮点数组 token 覆写（fork-src 的 `dataFloatArray` 一族，
+     * 转引 specs/variables.yaml float_vars.storage）；0 维的 `RESULTF` 没有数组形态 ⇒
+     * 与 [setValues] 的 G_STR0 分支同方向报「被当作数组调用」。
+     */
+    fun setValues(name: String, indices: LongArray, values: DoubleArray) {
+        val e = resolveFloatEntry(name) ?: throw CodeEE("未定义的变量 $name")
+        if (e is FloatScalar) throw CodeEE("非数组浮点变量\"$name\"被当作数组调用")
+        val lastDim = if (indices.isEmpty()) 0 else indices.size - 1
+        val base = if (indices.isEmpty()) longArrayOf(0L) else indices
+        val start = base[lastDim]
+        if (values.isNotEmpty()) {
+            // 前移判界（整数/字符串重载的同一口径，见上面两段 KDoc 的「整条前移拒绝」）：
+            // 逐元素写会先把 0..n-1 落成新值、才在越界那一格报错 ⇒ `#DIMF 倍率,3` 上
+            // `SET 倍率, 1,2,3,4` 留下半写态。区间连续，两端合法即全合法。
+            val last = base.copyOf()
+            last[lastDim] = start
+            checkFloatArraySlot(e, name, last)
+            if (values.size > 1) {
+                val tail = base.copyOf()
+                tail[lastDim] = start + values.size - 1
+                checkFloatArraySlot(e, name, tail)
+            }
+        }
+        for (i in values.indices) {
+            val idx = base.copyOf()
+            idx[lastDim] = start + i
+            writeFloat(name, idx, values[i])
+        }
+    }
+
+    /** [writeFloatEntry] 的前置校验部分（不写值）；数组形态赋值的前移判界用。 */
+    private fun checkFloatArraySlot(e: Any, name: String, indices: LongArray) {
+        when (e) {
+            is FloatUserVar -> checkAndSlot(e, indices)
+            is FloatLocal -> checkFloatLocalSlot(e, name, indices)
+            is FloatScalar -> checkFloatScalarSlot(name, indices)
+            else -> throw CodeEE("变量 $name 不是浮点变量")
+        }
+    }
+
+    /**
      * 伪变量赋值的报错分派表。
      *
      * 原版的「伪变量」由三类 token 组成，赋值报错按 token 类虚派发，本层把三类压进同一个
@@ -1140,7 +1684,7 @@ class VariableStore(
                 // 这里不许改回 getLength(name)：它 dimension<0 时走 ReferenceToken.GetLength()，
                 // 多维 REF 会先抛「必须指定维度」（:38-41），与上面的整块覆盖口径冲突。
                 val len = v.boundLength()
-                    ?: throw CodeEE("引用变量 $name 未绑定目标（EmptyRefVar）")
+                    ?: throw emptyRefVar(name)
                 if (def.dims.size == 1) {
                     val to = if (end >= 0) end else len
                     checkRangeEndpoints(def, len, start, to)
@@ -1159,10 +1703,12 @@ class VariableStore(
             // from=0/to=total 恒过守卫。
             checkRangeEndpoints(def, total, from, to)
             val charPos = if (def.isCharacterData) {
-                if (charaPos < 0 || charaPos >= characters.count) {
-                    throw CodeEE("变量 $name 的角色位置 $charaPos 越界（角色数 ${characters.count}）")
+                // D-2：整段写通道的角色位同过唯一翻译入口（§16.4）；OOR 原值穿透。
+                val pos = resolveCharaPos(charaPos.toLong())
+                if (pos < 0 || pos >= characters.count) {
+                    throw oorCharaVarArg(name, 1, pos)
                 }
-                charaPos
+                pos.toInt()
             } else {
                 0
             }
@@ -1192,15 +1738,22 @@ class VariableStore(
             Storage.G_INT2 -> intCol2(def.index).fill(value)
             Storage.G_INT3 -> intCol3(def.index).fill(value)
             Storage.C_INT0 -> {
-                if (charaPos < 0 || charaPos >= characters.count) {
-                    throw CodeEE("变量 ${def.name} 的角色位置 $charaPos 越界（角色数 ${characters.count}）")
+                // D-2：同上（§16.4）；OOR 原值穿透，文案第 3 实参 = 原始下标。
+                val pos = resolveCharaPos(charaPos.toLong())
+                if (pos < 0 || pos >= characters.count) {
+                    throw oorCharaVarArg(def.name, 1, pos)
                 }
-                characters.int0[def.index].set(charaPos, 0, value)
+                characters.int0[def.index].set(pos.toInt(), 0, value)
             }
             Storage.C_INT1 -> {
-                if (charaPos < 0 || charaPos >= characters.count) {
-                    throw CodeEE("变量 ${def.name} 的角色位置 $charaPos 越界（角色数 ${characters.count}）")
+                // D-2：同上（§16.4）。
+                val pos = resolveCharaPos(charaPos.toLong())
+                if (pos < 0 || pos >= characters.count) {
+                    throw oorCharaVarArg(def.name, 1, pos)
                 }
+                // B5 半死闸（VARSET 整段写；原版 CharaVariableToken.SetValueAll 落在
+                // dataIntegerArray[i] 上，半死行 = null ⇒ NRE）
+                characters.requireSystemRowAlive(pos.toInt())
                 val col = characters.int1[def.index]
                 val len = col.sizes[0]
                 // spec: VariableEvaluator.cs:271-286 + CharaVariableToken.cs:72-83 ——
@@ -1208,13 +1761,16 @@ class VariableStore(
                 // IndexOutOfBoundsException，而原版是 CodeEE(OoRInstructionArg)。
                 checkRangeEndpoints(def, len, start, end)
                 val to = if (end >= 0) end else len
-                for (e in start until to) col.set(charaPos, e, value)
+                for (e in start until to) col.set(pos.toInt(), e, value)
             }
             Storage.C_INT2 -> {
-                if (charaPos < 0 || charaPos >= characters.count) {
-                    throw CodeEE("变量 ${def.name} 的角色位置 $charaPos 越界（角色数 ${characters.count}）")
+                // D-2：同上（§16.4）。
+                val pos = resolveCharaPos(charaPos.toLong())
+                if (pos < 0 || pos >= characters.count) {
+                    throw oorCharaVarArg(def.name, 1, pos)
                 }
-                characters.int2[def.index].fill(charaPos, value)
+                characters.requireSystemRowAlive(pos.toInt())
+                characters.int2[def.index].fill(pos.toInt(), value)
             }
             Storage.L_INT -> {
                 // 整组写入必须是**首次触碰** LOCAL 的常见形态（`VARSET LOCAL` 开函数）：
@@ -1241,7 +1797,7 @@ class VariableStore(
             // VariableEvaluator.cs:289-314；端点判界 spec: ReferenceToken.cs:78-89）。
             if (v is RefUserVar) {
                 val len = v.boundLength()
-                    ?: throw CodeEE("引用变量 $name 未绑定目标（EmptyRefVar）")
+                    ?: throw emptyRefVar(name)
                 if (v.def.dims.size == 1) {
                     val to = if (end >= 0) end else len
                     checkRangeEndpoints(v.def, len, start, to)
@@ -1258,10 +1814,12 @@ class VariableStore(
             // （spec: UserDefinedVariableToken.cs:90-102 + VariableData.cs:48-54，空区间空转）。
             checkRangeEndpoints(v.def, total, from, to)
             val pos = if (v.def.isCharacterData) {
-                if (charaPos < 0 || charaPos >= characters.count) {
-                    throw CodeEE("变量 $name 的角色位置 $charaPos 越界（角色数 ${characters.count}）")
+                // D-2：同上（§16.4）。
+                val p = resolveCharaPos(charaPos.toLong())
+                if (p < 0 || p >= characters.count) {
+                    throw oorCharaVarArg(name, 1, p)
                 }
-                charaPos
+                p.toInt()
             } else {
                 0
             }
@@ -1289,21 +1847,27 @@ class VariableStore(
                 if (start < to) a.fill(id, start, to)
             }
             Storage.C_STR0 -> {
-                if (charaPos < 0 || charaPos >= characters.count) {
-                    throw CodeEE("变量 ${def.name} 的角色位置 $charaPos 越界（角色数 ${characters.count}）")
+                // D-2：同上（§16.4）；OOR 原值穿透，文案第 3 实参 = 原始下标。
+                val pos = resolveCharaPos(charaPos.toLong())
+                if (pos < 0 || pos >= characters.count) {
+                    throw oorCharaVarArg(def.name, 1, pos)
                 }
-                characters.str0[def.index].set(charaPos, 0, id)
+                characters.str0[def.index].set(pos.toInt(), 0, id)
             }
             Storage.C_STR1 -> {
-                if (charaPos < 0 || charaPos >= characters.count) {
-                    throw CodeEE("变量 ${def.name} 的角色位置 $charaPos 越界（角色数 ${characters.count}）")
+                // D-2：同上（§16.4）。
+                val pos = resolveCharaPos(charaPos.toLong())
+                if (pos < 0 || pos >= characters.count) {
+                    throw oorCharaVarArg(def.name, 1, pos)
                 }
+                // B5 半死闸（VARSETS 整段写；同 [setAll] 的 C_INT1 分支）
+                characters.requireSystemRowAlive(pos.toInt())
                 val col = characters.str1[def.index]
                 val len = col.sizes[0]
                 // 同 [setAll]：spec: VariableEvaluator.cs:289-314 + CharaVariableToken.cs:72-83
                 checkRangeEndpoints(def, len, start, end)
                 val to = if (end >= 0) end else len
-                for (e in start until to) col.set(charaPos, e, id)
+                for (e in start until to) col.set(pos.toInt(), e, id)
             }
             Storage.L_STR -> {
                 // 同 setAll：VARSET/VARSETS 可能是函数内首次触碰 LOCAL/LOCALS。
@@ -1321,13 +1885,38 @@ class VariableStore(
     /**
      * 角色变量 1 维区间端点检查（端点可等于长度）。
      * spec: VariableEvaluator.cs:271-314 的 `IsArrayRangeValid` + CharaVariableToken.cs:72-83。
+     *
+     * 文案 = 官方 `Error.OoRInstructionArg`（`Lang.cs:1626` / reference 内嵌表 :361 /
+     * 语料根表 :575 同文），实参依次「语句名、1 基参数号、端点值、变量名」——
+     * 原版到这一层的唯一喂值是 `VariableEvaluator.cs:275/:303` 的
+     * `IsArrayRangeValid(start, end, "VARSET", 3L, 4L)`（起点是 VARSET 的第 3 参、终点第 4 参），
+     * 所以缺省就按这一组喂。函数侧（SUMARRAY / MATCH / MAXARRAY / FINDELEMENT /
+     * INRANGEARRAY / STRJOIN）各自带语句名与参数号，那一路在 `fn/VarMethods.kt` 的
+     * `arrayRangeOoR`，不经本函数。
+     *
+     * 本层的可达性：`setAll` / `setAllStr` 的生产调用点只有两处 ——
+     * `sem/StatementExecutor.kt` 的 VARSET（2096/2098、4171/4173）与
+     * `fn/VarWriteMethods.kt` 的 VARSETEX（370/410）；后者在 `checkRangeEndpoint`
+     * 里已自持一道端点闸（负终点则被折算成 `to = len` 后才进本函数），
+     * 故本函数的串实际只会随 VARSET 上屏。**判界逻辑一字未动**（2026-11-05 lane errtext4
+     * 只换文案；负端点的语句层闸同在 `StatementExecutor`，2026-11-05 lane negrange
+     * 已把那一道的文案接到本键 —— 官方 `IsArrayRangeValid` 对 index1/index2 的 `< 0`
+     * 一支即抛 `OoRInstructionArg`，两侧现在同串同键）。
      */
-    private fun checkRangeEndpoints(def: VarDef, len: Int, start: Int, end: Int) {
+    private fun checkRangeEndpoints(
+        def: VarDef,
+        len: Int,
+        start: Int,
+        end: Int,
+        funcName: String = "VARSET",
+        startArgNo: Int = 3,
+        endArgNo: Int = 4,
+    ) {
         if (start < 0 || start > len) {
-            throw CodeEE("变量 ${def.name} 的区间起点 $start 越界（长度 $len）")
+            throw oorInstructionArg(funcName, startArgNo, start.toLong(), def.name)
         }
         if (end > len) {
-            throw CodeEE("变量 ${def.name} 的区间终点 $end 越界（长度 $len）")
+            throw oorInstructionArg(funcName, endArgNo, end.toLong(), def.name)
         }
     }
 
@@ -1367,7 +1956,25 @@ class VariableStore(
         return addCharacter(tmpl)
     }
 
-    /** ADDCHARA 的 CSV 号变体：未命中则伪角色。spec: VariableEvaluator.cs:1223-1232 */
+    /**
+     * ADDCHARA 的 CSV 号变体：未命中则伪角色。spec: VariableEvaluator.cs:1223-1232
+     *
+     * 扫描源与原版不同口径（AUD-d1 语料普查后判死，登记以备换游戏时复核）：原版
+     * `GetCharacterTemplateFromCsvNo` 扫**全模板列表**（spec: ConstantData.cs:1240-1250，
+     * `foreach` 命中即返回），本处扫 [templatesByNo] 的值集 ⇒ 只在「同一 NO 有多个模板」时
+     * 分叉（[registerTemplate] 对重复 NO 只保首个，后面的模板在本表里根本没有）。本语料
+     * `CSV/Chara` 的 168 个模板 `番号` 取 0..167 且互不重复（逐文件首列普查），分叉条件不成立。
+     *
+     * 唯一消费点是 `ADDDEFCHARA`（sem/StatementExecutor.kt，spec: Process.cs:1284-1294）：
+     * 先取 0 号，再在 `GameBase.最初からいるキャラ > 0` 时补一条 —— 本语料 `CSV/GameBase.csv`
+     * 连「キャラ」开头的键都没有 ⇒ data/csv/GameBaseLoader.kt 不落值、保持
+     * 默认 -1 ⇒ 只有 0 号那一次。`ADDSPCHARA` 不走这里（按 NO 查表，
+     * spec: FunctionIdentifier.cs:1376-1383）。
+     *
+     * csvNo 取值两侧也不同（原版从相对路径名取数字 ⇒ 本语料 168 个模板全 0；本移植按文件名
+     * 取 ⇒ 0..167），但 `csvNo=0` 两侧都落在 `Chara0.csv` 那一个模板上，无可观测差异；
+     * 换游戏时会分叉的口径详见 data/csv/CharaCsvLoader.kt 类 KDoc。
+     */
     fun addCharacterFromCsvNo(csvNo: Long): Int {
         val tmpl = templatesByNo.values.firstOrNull { it.csvNo == csvNo } ?: CharacterTemplate.pseudo(csvNo)
         return addCharacter(tmpl)
@@ -1487,26 +2094,40 @@ class VariableStore(
      *    同一组互异元素，**余下元素的相对顺序与摘除次序无关** ⇒ 终态逐行相同。
      *    「删一半时列表被别处读到」的中间态不可观测（本函数内无回调、无求值），
      *    故不需要把摘除次序改成实参顺序。
-     * 2. **失败路径：半死态取「不可观测」处置（B），不改表示**——原版在第 k 个元素抛
-     *    CodeEE 时，前 k 个元素**已经 Dispose 但仍在表内**（`Remove` 循环在 `:1269`，
-     *    抛错时不可达），后续读这些角色会踩被置 null 的私有数组（NullReferenceException）。
-     *    但这条半死态在原版**没有任何可观测出口**：
-     *    - `Dispose`（CharacterData.cs:756-770）只把本实例的 dataIntegerArray /
-     *      dataStringArray / dataIntegerArray2D 元素置 null，**不写任何共享状态**、
-     *      不动 `CharacterList` 的 Count 与顺序 ⇒ 异常本身携带的信息（:1259/:1264 的文案）
-     *      与抛错瞬间的 CHARANUM 都与「未 Dispose」完全一致；
-     *    - 异常从 `DoInstruction`（Process.cs:1047）一路穿出 `runScriptProc`，由
-     *      `DoScript` 的顶层 catch（Process.cs:462-476）交给 `handleException`
-     *      （Process.cs:595-643）打印；`console.ThrowError`（EmueraConsole.cs:757-768）
-     *      把状态置 `ConsoleState.Error`，而 `RunEmueraProgram`（EmueraConsole.cs:1090-1100）
-     *      只在 `state != ConsoleState.Error` 时才再调 `DoScript` ⇒ **同一会话里不会再有
-     *      下一条语句去读那半个表**；
-     *    - 回标题走 `GotoTitle`（EmueraConsole.cs:2570-2578）→ `BeginTitle`
-     *      （Process.cs:480-485）→ `vEvaluator.ResetData()`，半死表整体丢弃。
-     *    故本侧「校验期零副作用」（抛错后角色完好、照常可读）在可达路径上与原版**逐项同读**。
-     *    TODO(verify): 仅 `Program.DebugMode` 的调试命令行（EmueraConsole.cs:2166-2252）
-     *    能在 Error 态单条求值、可能踩到被置 null 的数组；该面本移植未实现，若日后接线
-     *    调试控制台需重评（届时按 A/C 处置）。
+     * 2. **失败路径：半死态已按原版复刻（B5 翻案，2026-11-06；旧裁定「不可观测、不改表示」废弃）**——
+     *    原版在第 k 个元素抛 CodeEE 时，前 k 个元素**已经 Dispose 但仍在表内**（`Remove` 循环在
+     *    `:1269`，抛错时不可达）。本侧现在同样**边校验边置半死位**（循环内
+     *    [CharacterTable.disposeRow]，抛错不回滚），对半死行的后续访问按原版
+     *    `CharacterData.Dispose`（CharacterData.cs:756-770）的**释放面**分档：
+     *    - 系统 1 维/2 维角色变量（`int1`/`str1`/`int2` = dataIntegerArray/dataStringArray/
+     *      dataIntegerArray2D，被 Dispose 置 null）→ 读写皆抛裸 [NullPointerException]
+     *      （.NET NullReferenceException 的裸 JVM 映射，口径照 §13.2 分歧 C 先例），
+     *      闸在 [CharacterTable.requireSystemRowAlive]，接进 readIntEntry/writeIntEntry/
+     *      readStrEntry/writeStrEntry 的 `Storage.C_INT1/C_INT2/C_STR1` 分支与
+     *      [setAll]/[setAllStr] 的对应分支、[CharacterTable.copy]（COPYCHARA/ADDCOPYCHARA）；
+     *    - 0 维（`int0`/`str0` = dataInteger/dataString）与用户 CVAR 列
+     *      （UserDefCVarDataList，CharacterData.cs:85/:124，Dispose 不触碰）→ 照常读写旧值，
+     *      **不**过闸（VARSET NAME / 读 NO / 读用户 CVAR 与原版同读）。
+     *    可观测性口径（复刻时的边界，均已核）：
+     *    - `Dispose` 不写任何共享状态、不动 `CharacterList` 的 Count 与顺序 ⇒ 抛错瞬间的
+     *      文案（:1259/:1264）与 CHARANUM 与「未 Dispose」完全一致（本侧同）；
+     *    - 该 CodeEE **不可被捕获**：ERB 没有通用 try 块，TRY* 家族只在**自己的**语句执行里
+     *      查 `func.JumpToEndCatch`（FunctionIdentifier.cs:3284/:3583-3585/:3705-3707），
+     *      DELCHARA 的 CodeEE 从 `DoInstruction`（Process.cs:1047）直穿顶层 catch
+     *      （Process.cs:462-476）→ `handleException` → `ConsoleState.Error`，同一会话
+     *      不再有后续语句（EmueraConsole.cs:757-768/:1090-1100）；移植侧同构
+     *      （TRYC 家族 = 调用/跳转目标捕面，无通用块）⇒ 存档面（SaveCapture）永远看不到
+     *      半死行；假想强行存档的官方形态也已核：`CharacterData.SaveToStreamBinary`
+     *      （CharacterData.cs:513-558）把置 null 的三族数组（:532/:535/:538）传给
+     *      `EraBinaryDataWriter.WriteWithKey`，其 `is` 类型链（EraBinaryDataWriter.cs:83-173）
+     *      对 null 全部落空 ⇒ **静默不写该条目**（0 维 :526/:529 与用户 CVAR :553 照写）。
+     *      本侧存档面维持整行照写（可达流上零观测差；若将来接调试控制台打开可达流，
+     *      按「只写 0 维 + 用户 CVAR」补 —— TODO(verify)）；
+     *    - 回标题 `GotoTitle`（EmueraConsole.cs:2570-2578）→ `BeginTitle`（Process.cs:480-485）
+     *      → `vEvaluator.ResetData()`，半死表整体丢弃（本侧 [deleteAllCharacters] → clear）。
+     *    原版半死行的 NRE 抛点在**数组元素解引用处**（`dataIntegerArray[i][…]` 的外层为 null），
+     *    本侧收拢成行列级单点闸：行已定、列族已定（C_* 只含系统列），抛点先后与原版
+     *    「该变量的第一次触碰」一致；同一表达式里先读后写的次序由求值序自然保持。
      * 3. `:1257` 的越界判定用 long 与 `Count` 比（不先 `(int)` 截断），本侧同形；
      *    `(int)` 截断只发生在**通过判定之后**取元素时（`:1261`）。
      *
@@ -1528,11 +2149,20 @@ class VariableStore(
                 throw CodeEE("相同的注册角色编号(" + p.toString() + ")被重复指定")
             }
             seen.add(i)
+            // B5 翻案：原版在校验循环内逐个 Dispose（:1267），抛错**不回滚** ⇒ 第 k 个越界时
+            // 前 k 个「已释放但仍在表内」。本侧 [CharacterTable.disposeRow] 置半死位，
+            // 后续对半死行系统 1 维/2 维变量的读写走 NRE 等价闸（见 [CharacterTable.requireSystemRowAlive]）。
+            characters.disposeRow(i)
         }
         // 降序按位删除；与原版「先整体 Dispose 再按对象 Remove」的成功路径等价性论证见 KDoc
         for (i in seen.sortedDescending()) characters.removeAt(i)
     }
 
+    /**
+     * DELCHARA-ALL / RESETDATA / 读档前的角色清空。
+     * spec: VariableEvaluator.cs:1275-1285（DelAllCharacter：逐角色 Dispose 再 Clear）——
+     * 复位归还列容量的对拍与安全性论证见 [CharacterTable.clear] 的 KDoc。
+     */
     fun deleteAllCharacters() = characters.clear()
 
     /**
@@ -1810,10 +2440,39 @@ class VariableStore(
 
     private fun createUserVar(spec: DimSpec, def: VarDef, chara: Boolean): UserVar = when {
         spec.isRef -> RefUserVar(spec, def, pool)
+        // 浮点支**必须在 isStr 之前**判：`DimSpec.isFloat` 与 `isStr` 互斥，但两者都 false
+        // 不代表整数（spec: UserVariables.kt:54-61 的字段注释同口径）。
+        // 依据 fork-src VariableData.cs:469-474（静态/全局）与 :585-591（私有动态），
+        // **两支都只建 1 维**；本机 reference 是 1.824（无浮点族）⇒ 行号转引自
+        // specs/variables.yaml 的 float_vars 段，TODO(verify) 见 [floatScalars] 的 KDoc。
+        spec.isFloat && !spec.isStatic -> DynamicFloatUserVar(spec, def)
+        spec.isFloat -> StaticFloatUserVar(spec, def)
         spec.isStr && (!spec.isStatic) -> DynamicStrUserVar(spec, def, pool)
         spec.isStr -> StaticStrUserVar(spec, def, pool)
         !spec.isStatic -> DynamicIntUserVar(spec, def)
         else -> StaticIntUserVar(spec, def)
+    }
+
+    /**
+     * `#DIMF` 的维度守卫：只允许 **1 维**，0 维与 2D/3D 一律报错。
+     *
+     * 依据（fork-src，转引 specs/variables.yaml 的 float_vars.dimf）：
+     * `VariableData.cs:469-474`（全局/静态只建 1D 浮点 token）、`:553-559`（私有静态）、
+     * `:585-591`（私有动态）—— 三处都是「非 1 维即 `ExeEE(AbnormalVarDeclaration)`」。
+     *
+     * 落点为什么在**存储层**再来一遍：声明期 `DimParser` 已经挡掉「显式写了两段及以上尺寸」
+     * （UserVariables.kt 的 `#DIMF` 段），但 `declareUserVar` 还有第二个入口 =
+     * 编译期元数据（BootMetadata 的 private-dim）与测试手工构造的 DimSpec —— 那两条不经过
+     * `DimParser`。本守卫与声明期同一口径，报错文案对齐原版 `AbnormalVarDeclaration` 的语义
+     * （「只能是 1 维」），不让非法形状静默落成一张多维浮点列。
+     */
+    private fun checkFloatDimShape(spec: DimSpec) {
+        if (spec.dims.size != 1) {
+            throw CodeEE(
+                "#DIMF ${spec.name} 只能是 1 维（实得 ${spec.dims.size} 维；" +
+                    "2D/3D 一律 ExeEE(AbnormalVarDeclaration)）",
+            )
+        }
     }
 
     /**
@@ -1826,6 +2485,9 @@ class VariableStore(
      * 本守卫兜住**编译期元数据**（BootMetadata 的 private-dim）与手工构造的 DimSpec。
      */
     private fun checkUserVarShape(spec: DimSpec) {
+        // `#DIMF` 的 1 维限制先于乘积守卫：0 维（`dims` 空）在下面那条会**直接 return**
+        // （标量按 1 个元素），浮点的 0 维形态必须报错而不是放行。
+        if (spec.isFloat) checkFloatDimShape(spec)
         if (spec.isRef || spec.dims.isEmpty()) return // REF 声明尺寸恒 0；标量按 1 个元素
         dimProduct(spec.name, spec.dims)
     }
@@ -1880,8 +2542,18 @@ class VariableStore(
      * ART 上走 ICU CaseMapper（逐字符 `String.charAt` + `Character.toUpperCaseImpl`），
      * 世界初始化那一页实测占 VM 线程采样 9% 并逐次分配。变量名集合有限（全量语料 2 万余个），
      * 用一张名字表记忆归一结果；命中路径只剩一次 String.hashCode（JDK/ART 自带缓存）+ equals。
+     *
+     * **有界（fix-varcapacity）**：条目数钳在 [MAX_UPPER_NAMES]（LRU 逐出，accessOrder 表）。
+     * 纯缓存论据：`upperOf` 的结果是 `name.uppercase()` 的**纯函数**（无宿主态、无计数器），
+     * 逐出后重建得到同一个值；全量语料约 2 万余名，上限取 3 倍余量 ⇒ 生产档位实际逐不出，
+     * 只在「运行期动态拼名字」这类非原版路径上兜住无界增长。缓存不进
+     * `StateHash`（它不属可观测状态，且本对象在哈希装置的 OPAQUE_MARKERS「Store」里止步）。
      */
-    private val upperNames = HashMap<String, String>(4096)
+    private val upperNames: MutableMap<String, String> =
+        object : LinkedHashMap<String, String>(4096, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean =
+                size > MAX_UPPER_NAMES
+        }
 
     /**
      * [upperOf] 的**单槽身份备忘**（PERF 2026-10-27）。
@@ -2073,13 +2745,45 @@ class VariableStore(
     // 函数帧 / 局部变量
     // ==================================================================
 
-    /** 函数声明中的 LOCAL/LOCALS/ARG/ARGS 长度（由参数声明决定）。 */
+    /**
+     * 函数声明中的 LOCAL/LOCALS/ARG/ARGS 长度（由参数声明决定），以及 4.981 fork 的
+     * 浮点局部面（`floatLocal` = `#LOCALFSIZE n`，`floatArg` = 形参声明长出的 ARGF 长度）。
+     *
+     * spec: VariableLocal.cs:40-90（整数侧）；浮点侧 `#LOCALFSIZE` 见
+     * fork-src `LogicalLineParser.cs:257-266`、`ConstantData.cs:211-217`。
+     */
     data class LocalLengths(
         val local: Int = 0,
         val locals: Int = 0,
         val arg: Int = 0,
         val args: Int = 0,
-    )
+        /** `#LOCALFSIZE n`；0 = 未声明（取默认 10）。 */
+        val floatLocal: Int = 0,
+        /** 形参声明长出的浮点局部长度（ARGF）；0 = 未声明。 */
+        val floatArg: Int = 0,
+    ) {
+        companion object {
+            /**
+             * 形参表里 ARGF 的个数 = 该函数 ARGF 的**声明长**（fork 的 `label.ArgFloatLength`）。
+             *
+             * 原版按 `max(下标 + 1)` 取（spec: fork-src ErbLoader.cs:600-602,709-710,787：
+             * `maxArgF` 初值 **-1**，每条 ARGF 形参用 `vTerm.getEl1forArg + 1` 抬上界）；
+             * 移植侧的形参表在进程序表时已经**剥掉下标**（spec:
+             * [com.eratw.port.core.stmt.FuncLabelStmt.paramNames] 的「下标被剥掉，供 arity /
+             * 类型桶计数使用」），与整数侧 `argIntCount` 的「按个数分桶」同一口径
+             * （erbcc `CorpusCompile.kt:641-642` 的 `params.size - strParam` 也是数个数）。
+             * ⇒ 写成 `@F(ARGF, ARGF:5)` 这种跳号形参在移植侧得到 2 而不是 6；
+             * TODO(verify)：4.981 语料实测 **0 处** ARGF 形参（`grep -ri ARGF ERB/` 零命中，
+             * 2026-10-31），故该形态无对拍样本。
+             *
+             * `paramNames` 为空（`.erbc` v1 容器不带段 8）⇒ 0 ⇒ 与改造前的 `floatArg` 恒 0 同值。
+             */
+            fun floatArgFromParams(paramNames: List<String>): Int =
+                paramNames.count { it.startsWith(ARGF_PARAM_PREFIX, ignoreCase = true) }
+
+            private const val ARGF_PARAM_PREFIX = "ARGF"
+        }
+    }
 
     fun defineLocalLengths(funcKey: String, lengths: LocalLengths) {
         localLengths[funcKey.uppercase()] = lengths
@@ -2114,6 +2818,10 @@ class VariableStore(
      * [resetLocals]：原版 1.824 **没有**"每次函数调用清零 LOCAL"的调用点——
      * `SetDefaultLocalValue` 只被 RESETDATA 与两个存档装载函数调用
      * （spec: VariableEvaluator.cs:1339, 2441, 2626），故默认 false。
+     * skia 魔改引擎（4.981 实跑的 Emuera_skia）同一口径：全树 `SetDefaultLocalValue`
+     * 也只有这三处调用点、`ClearLocalValue` 只在 `Dispose()`
+     * （unpacked/skia-decompiled: VariableData.cs:3362,3374,4212；
+     * VariableEvaluator.cs:1339,2441,2626）⇒ LOCAL 生命周期只有「跨 CALL 持久」一条。
      */
     fun enterFunction(funcKey: String, resetLocals: Boolean = false) {
         // PERF（2026-10-26）：走 [upperOf] 名字大写记忆表，替代每次 `_CALL` 一次的
@@ -2125,6 +2833,9 @@ class VariableStore(
         // 与**每次进/出函数**（`refreshPrivMap`）上；一次取好之后热路径只剩字段读。
         // 语义不变：`localsByFunc.getOrPut` 的实例与 `privateVars[key]` 的引用原样搬进帧。
         val privMap = privateVars[key]
+        // 局部状态按函数一份：跨 CALL 持久、递归帧共享（spec: VariableLocal.cs:15,26-33；
+        // skia 同构：IdentifierDictionary.cs:453-475 先 GetExistLocalVariableToken、
+        // 只有缺席才新建 ⇒ 归零只发生在 ResetData/读档/Dispose，见本函数 KDoc）。
         val state = localsByFunc.getOrPut(key) { LocalState() }
         // 槽位镜像按函数复用（见 [LocalState]）：首次进这个函数时建一次，之后每次
         // `_CALL` 只是把同一份数组挂到新帧上，**零分配**。
@@ -2321,6 +3032,9 @@ class VariableStore(
             it.ints?.fill(0)
             it.strs?.fill(0)
         }
+        // 浮点局部（`LOCALF`/`ARGF`）随同一条 `#LOCALFSIZE`/RESETDATA 面复位；
+        // 默认值 0.0 的依据 = fork-src VariableData.cs:668-669（dataFloat 全清 0.0）。
+        floatLocalsByFunc[funcKey]?.values?.forEach { it.data?.fill(0.0) }
     }
 
     private fun currentLocal(name: String): Local1D? =
@@ -2462,7 +3176,7 @@ class VariableStore(
         // spec: LocalVariableToken.cs:39-45 —— 先用 long 与长度比较再转 Int；
         // 先 toInt 会把 2^32 回绕成 0 静默读写第 0 个元素。
         if (index < 0 || index >= lv.size) {
-            throw CodeEE("变量 ${def.name} 的下标 $index 越界（长度 ${lv.size}）")
+            throw oorVarArg(def.name, 1, index)
         }
         val i = index.toInt()
         val arr = lv.ints ?: LongArray(lv.size).also { lv.ints = it }
@@ -2473,7 +3187,7 @@ class VariableStore(
     private fun setLocalInt(def: VarDef, index: Long, value: Long) {
         val lv = localFor(def)
         if (index < 0 || index >= lv.size) {
-            throw CodeEE("变量 ${def.name} 的下标 $index 越界（长度 ${lv.size}）")
+            throw oorVarArg(def.name, 1, index)
         }
         val arr = lv.ints ?: LongArray(lv.size).also { lv.ints = it }
         arr[index.toInt()] = value
@@ -2483,7 +3197,7 @@ class VariableStore(
     private fun localStr(def: VarDef, index: Long): String {
         val lv = localFor(def)
         if (index < 0 || index >= lv.size) {
-            throw CodeEE("变量 ${def.name} 的下标 $index 越界（长度 ${lv.size}）")
+            throw oorVarArg(def.name, 1, index)
         }
         val arr = lv.strs ?: IntArray(lv.size).also { lv.strs = it }
         return pool.lookup(arr[index.toInt()])
@@ -2493,7 +3207,7 @@ class VariableStore(
     private fun setLocalStr(def: VarDef, index: Long, id: Int) {
         val lv = localFor(def)
         if (index < 0 || index >= lv.size) {
-            throw CodeEE("变量 ${def.name} 的下标 $index 越界（长度 ${lv.size}）")
+            throw oorVarArg(def.name, 1, index)
         }
         val arr = lv.strs ?: IntArray(lv.size).also { lv.strs = it }
         arr[index.toInt()] = id
@@ -2569,7 +3283,10 @@ class VariableStore(
             return rng.next(32768L) % bound
         }
         val bound = indices[0]
-        if (bound <= 0) throw CodeEE("RAND 的参数必须为正数（实际 $bound）")
+        // 文案逐字对齐官方 zhs（`emuera-zhs.xml:376` Error.RandArgIsNegative，模板里的
+        // `{0}` 就是 bound；抛点 `VariableData.cs` RandToken :846-851 的 `num <= 0`）。
+        // 2026-10-31 玩家报告 M_KOJO_EVENT_K70_31 行6087 实证玩家看到的就是这一句。
+        if (bound <= 0) throw CodeEE("RAND不能指定0以下的值($bound)")
         return rng.next(bound)
     }
 
@@ -2602,7 +3319,7 @@ class VariableStore(
                 val len = localSizeOf(f, def)
                 val x = indices[0]
                 if (x < 0 || x >= len) {
-                    throw CodeEE("变量 ${def.name} 的下标 $x 越界（长度 $len）")
+                    throw oorVarArg(def.name, 1, x)
                 }
             }
             return
@@ -2630,35 +3347,42 @@ class VariableStore(
      * 也必然通过（同一份 indices、两步之间无副作用），删掉不改变可观测行为。
      *
      * 只服务**非局部变量**（`L_INT`/`L_STR` 由 [checkElement] 的原分支处理）。
+     *
+     * D-2 起返回 [packSlot] 形态（角色位高 32 位 + 元素下标低 32 位），角色位经
+     * [resolveCharaPos] 翻译（无 resolver = 原值直通，golden 零变化）；非角色变量
+     * 高 32 位恒 0。调用方解包后用翻译值访问存储——`indices[0]` 原值在虚拟 NO 域
+     * 不再是合法行号，禁止再直接使用。
      */
-    private fun checkFlat(def: VarDef, indices: LongArray): Int {
+    private fun checkFlat(def: VarDef, indices: LongArray): Long {
         if (def.isForbid) throw CodeEE("变量 ${def.name} 的尺寸为 0（IsForbid），不可使用")
         if (indices.size != def.argCount) {
             throw CodeEE("变量 ${def.name} 需要 ${def.argCount} 个下标（实际 ${indices.size}）")
         }
         val dims = def.dims
         if (def.isCharacterData) {
-            val pos = indices[0]
+            // D-2：角色位唯一翻译入口（§16.4）。OOR 时 resolveCharaPos 返回**原值**，
+            // 下面的既有判定与文案（第 3 实参 = 脚本看到的原始下标）零改动。
+            val pos = resolveCharaPos(indices[0])
             if (pos < 0 || pos >= characters.count) {
-                throw CodeEE("角色变量 ${def.name} 的第 1 参数 $pos 越界（角色数 ${characters.count}）")
+                throw oorCharaVarArg(def.name, 1, pos)
             }
-            if (dims.isEmpty()) return 0
+            if (dims.isEmpty()) return packSlot(pos.toInt(), 0)
             var elem = 0
             var d = 0
             while (d < dims.size) {
                 val v = indices[d + 1]
                 val n = dims[d]
                 if (v < 0 || v >= n) {
-                    throw CodeEE("变量 ${def.name} 的第 ${d + 2} 维下标 $v 越界（长度 $n）")
+                    throw oorCharaVarArg(def.name, d + 2, v)
                 }
                 elem = elem * n + v.toInt()
                 d++
             }
-            return elem
+            return packSlot(pos.toInt(), elem)
         }
         if (dims.isEmpty()) {
-            if (indices.isNotEmpty()) throw CodeEE("变量 ${def.name} 是 0 维变量，不带下标")
-            return 0
+            if (indices.isNotEmpty()) throw zeroDVarHasArg(def.name)
+            return 0L
         }
         var elem = 0
         var d = 0
@@ -2666,12 +3390,30 @@ class VariableStore(
             val v = indices[d]
             val n = dims[d]
             if (v < 0 || v >= n) {
-                throw CodeEE("变量 ${def.name} 的第 ${d + 1} 维下标 $v 越界（长度 $n）")
+                throw oorVarArg(def.name, d + 1, v)
             }
             elem = elem * n + v.toInt()
             d++
         }
-        return elem
+        return elem.toLong()
+    }
+
+    /**
+     * 角色位的**唯一翻译入口**（D-2/§16.4）：`resolver == null`（无 Mod）或注册表空时
+     * 逐位旁路——原值直通，热路径只多一次 null 比较。
+     *
+     * 关键形态：resolver 返回 `OOR`（未投射/未分配/负数/超 Int 域）时**返回原值而非
+     * 哨兵**——翻译后的值要么是合法行号（`0 until characters.count` 内，resolver 自身
+     * 已判 `row in 0 until charaNum`），要么是原始越界值；调用点既有的
+     * `pos < 0 || pos >= characters.count` 判定与 `oorCharaVarArg` 抛点因此**零改动**，
+     * 且报错文案的第 3 实参显示的是脚本看到的原值（如未投射的虚拟 NO 10005），
+     * 不是翻译后的 -1——官方 `OoRCharaVarArg` 的 {2} 必须是原值
+     * （spec: CharaVariableToken.cs:56-70 的 `arguments[0].ToString()`）。
+     */
+    private fun resolveCharaPos(raw: Long): Long {
+        val resolver = charaIndexResolver ?: return raw
+        val row = resolver.resolve(raw, characters.count)
+        return if (row == VirtualCharaIndexResolver.OOR) raw else row.toLong()
     }
 
     /**
@@ -2691,7 +3433,7 @@ class VariableStore(
      */
     private fun refElem(ref: RefUserVar, indices: LongArray): Int {
         val len = ref.boundLength()
-            ?: throw CodeEE("引用变量 ${ref.def.name} 未绑定目标（EmptyRefVar）")
+            ?: throw emptyRefVar(ref.def.name)
         val rank = ref.spec.dims.size
         if (rank <= 0) throw CodeEE("引用变量 ${ref.def.name} 的下标个数非法（$rank）")
         if (indices.size != rank) {
@@ -2702,12 +3444,12 @@ class VariableStore(
             if (rank == 1) {
                 val i = indices[0]
                 if (i < 0 || i >= len) {
-                    throw CodeEE("引用变量 ${ref.def.name} 的下标 $i 越界（目标长度 $len）")
+                    throw oorVarArg(ref.def.name, 1, i)
                 }
                 return i.toInt()
             }
             if (indices.all { it == 0L }) {
-                if (len <= 0) throw CodeEE("引用变量 ${ref.def.name} 的下标 0 越界（目标长度 $len）")
+                if (len <= 0) throw oorVarArg(ref.def.name, 1, 0)
                 return 0
             }
             throw CodeEE(
@@ -2716,14 +3458,13 @@ class VariableStore(
             )
         }
         // spec: ReferenceToken.cs:58-76 —— 逐维 `arguments[d] < 0 || >= array.GetLength(d)`，
-        // 报错文案按维号（1 起）与长度。下标比较用 Long（目标维度是 Int，先 toInt 会截断）。
+        // 报错文案按维号（1 起）走官方 `Error.OoRVarArg`（原版实参就是变量名 + 字面量维号 + 下标）。
+        // 下标比较用 Long（目标维度是 Int，先 toInt 会截断）。
         var idx = 0
         for (d in dims.indices) {
             val v = indices[d]
             if (v < 0 || v >= dims[d]) {
-                throw CodeEE(
-                    "引用变量 ${ref.def.name} 的第 ${d + 1} 维下标 $v 越界（长度 ${dims[d]}）",
-                )
+                throw oorVarArg(ref.def.name, d + 1, v)
             }
             idx = idx * dims[d] + v.toInt()
         }
@@ -2754,13 +3495,14 @@ class VariableStore(
         if (dims.isEmpty()) {
             if (def.isCharacterData) {
                 if (indices.size != 1) throw CodeEE("变量 ${def.name} 需要 1 个下标（角色位置）")
-                val pos = indices[0]
+                // D-2：角色位唯一翻译入口（§16.4）；OOR 时原值穿透，判定与文案零改动。
+                val pos = resolveCharaPos(indices[0])
                 if (pos < 0 || pos >= characters.count) {
-                    throw CodeEE("角色变量 ${def.name} 的角色位置 $pos 越界（角色数 ${characters.count}）")
+                    throw oorCharaVarArg(def.name, 1, pos)
                 }
                 return packSlot(pos.toInt(), 0)
             }
-            if (indices.isNotEmpty()) throw CodeEE("变量 ${def.name} 是 0 维变量，不带下标")
+            if (indices.isNotEmpty()) throw zeroDVarHasArg(def.name)
             return packSlot(0, 0)
         }
         if (indices.size != def.argCount) {
@@ -2769,9 +3511,10 @@ class VariableStore(
         var off = 0
         var pos = 0
         if (def.isCharacterData) {
-            val p = indices[0]
+            // D-2：同上（§16.4），OOR 原值穿透。
+            val p = resolveCharaPos(indices[0])
             if (p < 0 || p >= characters.count) {
-                throw CodeEE("角色变量 ${def.name} 的第 1 参数 $p 越界（角色数 ${characters.count}）")
+                throw oorCharaVarArg(def.name, 1, p)
             }
             pos = p.toInt()
             off = 1
@@ -2782,7 +3525,9 @@ class VariableStore(
             val x = indices[d + off]
             val n = dims[d]
             if (x < 0 || x >= n) {
-                throw CodeEE("变量 ${def.name} 的第 ${d + off + 1} 维下标 $x 越界（长度 $n）")
+                // 角色变量的第 1 个实参是角色位，故逐维文案的序号要连着角色位往后数
+                // （spec: CharaVariableToken.cs:60-68 喂的是 "2"/"3"）。
+                if (off == 1) throw oorCharaVarArg(def.name, d + 2, x) else throw oorVarArg(def.name, d + 1, x)
             }
             elem = elem * n + x.toInt()
             d++
@@ -2825,6 +3570,12 @@ class VariableStore(
             gStr1[i].fill(0)
         }
         gStr0[0] = 0
+
+        // 浮点标量列（fork-src `dataFloat`）在原版 `SetDefaultValue` 里是**整列清 0.0**
+        // （fork-src VariableData.cs:668-669，且只清 dataFloat、不清 dataFloatArray/2D/3D）。
+        // 移植侧该列只有 `RESULTF` 一个可达槽 ⇒ 原地 fill，不换数组对象（与整数列同一红线：
+        // 外部若持有别名必须看得见这次复位）。
+        floatScalars.fill(0.0)
 
         // STR 用 STR.CSV 的名字表填充以兼容旧脚本。spec: VariableData.cs:3414-3416
         val strCol = gStr1[VariableCode.lowIndex(VariableCode.STR)]
@@ -2926,6 +3677,10 @@ class VariableStore(
                 lv.strs?.fill(0)
             }
         }
+        // 浮点局部与 LOCAL/ARG 同族（RESETDATA 复位函数局部），清零而非丢实例。
+        for (byName in floatLocalsByFunc.values) {
+            for (fl in byName.values) fl.data?.fill(0.0)
+        }
         for (v in userVars.values) {
             if (v.spec.isStatic && !v.spec.isConst && !v.spec.isGlobal && !v.def.isCharacterData) {
                 v.setDefault()
@@ -2939,14 +3694,151 @@ class VariableStore(
     /** 丢弃所有局部变量实例（换文件时）。spec: VariableData.cs:3377-3383 */
     fun clearLocalValues() {
         localsByFunc.clear()
+        floatLocalsByFunc.clear()
     }
 
-    /** RESETDATA：局部 + 全局 + 清空角色。spec: VariableEvaluator.cs:1336-1346 */
+    /**
+     * RESETDATA：局部 + 全局 + 清空角色 + 串表压实。spec: VariableEvaluator.cs:1336-1346
+     *
+     * 前三步是原版逐句的移植；第四步 [compactStringPool] 是本层存储形态带来的**额外**一步，
+     * 它对脚本层零可观测差异（理由与不变式见那里的 KDoc），对应原版「角色 Dispose +
+     * 各串列清空后，被清空的 `string` 引用自然归还 GC」这一半 —— 本层槽里是池下标，
+     * 清空不会让串变便宜，必须显式收池才拿得到同一份内存。
+     */
     fun resetData() {
         resetLocalValues()
         resetValues()
         deleteAllCharacters()
+        compactStringPool()
     }
+
+    /**
+     * [compactStringPool] 的一个载体：[ids] 的 `[from, until)` 区间里存的是 [StringTable] 下标。
+     * 区间化只为了角色表那种「数组比可达行数大」的列（复位后 `count = 0` ⇒ 整列不可达）。
+     */
+    private class StrIdRange(val ids: IntArray, val from: Int, val until: Int)
+
+    /**
+     * 复位链的串表半边：收集「复位后仍然可达的池下标」→ 压实 [pool] → **就地**改写这些载体。
+     *
+     * ## 为什么只能这么做（清池 [StringTable.clear] 为什么进不了复位链）
+     * 原版 `VariableData.SetDefaultValue` 对字符串列 `case 5: continue;`（**GLOBALS 跨复位存活**，
+     * spec: `reference/emuera-cs/MinorShift.Emuera.GameData.Variable/VariableData.cs:3417-3418`，
+     * 移植侧 [resetValues] 的同名 `continue`），且 `ResetData` 不调 `SetDefaultGlobalValue`
+     * （spec: `VariableEvaluator.cs:1336-1346` 只有 LocalValue/DefaultValue/DelAllCharacter 三句 ⇒
+     * 移植侧 [resetData] 也不调 [resetGlobalValues]）；用户 `GLOBAL` 与非 static 私有串变量同样
+     * 不在复位表里（spec: `VariableData.cs:3365-3375`，见 [resetLocalValues] 的 KDoc）。
+     * 原版这些槽持有的是 `string` 引用，怎么清别的表都不影响它们；本层槽里是 **Int 下标**，
+     * 直接清池会把它们打成悬空（`lookup` 抛 CodeEE）或错别名（同下标指向另一条串，静默读错）。
+     * 所以这条路只能是「按存活集重建 + 就地改写」，语义逐字不变。
+     *
+     * ## 持有者清单（[strIdCarriers] 的枚举面；逐条都在复位后仍可达）
+     * | 载体 | 复位后是否存活 | 出处 |
+     * |---|---|---|
+     * | 系统 1 维串列 `gStr1[*]`（含 GLOBALS(5) / STR / RESULTS…） | GLOBALS **存活**（[resetValues] 跳过），其余被 `fill(0)` ⇒ 只剩 0 | 本文件 :2831-2834；spec: VariableData.cs:3417-3418 |
+     * | 系统 0 维串 `gStr0[0]` | 被清 ⇒ 不存活（登记一次只为「只剩 0」） | :2835 |
+     * | 函数局部 `Local1D.strs`（LOCAL/LOCALS/ARG/ARGS 实例） | 数组**对象**存活（`localsByFunc` 不被复位清掉），内容被 `fill(0)` ⇒ 只剩 0 | [resetLocalValues] :2931-2936；spec: VariableData.cs:3365-3375 |
+     * | 用户串变量：`StaticStrUserVar.data` + **`defaults` 初值下标缓存** | GLOBAL / const / static 各自的处置见 [resetLocalValues] 与 [resetGlobalValues]；`defaults` 永远跨复位存活（它只由 [StringTable.intern] 现算一次） | UserVariables.kt:1617-1653、:1626-1630 |
+     * | 私有动态串：`DynamicStrUserVar.data` + `stack`（作用域栈上未丢弃的实例） | 非 static 私有**不**由复位链 `setDefault` ⇒ 数组与内容整体存活 | UserVariables.kt:1686-1714；spec: VariableData.cs:3365-3375 |
+     * | REF：`RefUserVar.targetStr` + `saved` 栈里的串目标 | 绑定关系跨复位存活（复位链不 unbind）；目标数组本体另由上面各面登记 | UserVariables.kt:1733-1846；spec: ReferenceToken.cs:125-128 |
+     * | CHARADATA 串列（系统 `str0`/`str1` + 用户 `#DIM CHARADATA` 追加列） | **不存活**：`deleteAllCharacters` → `CharacterTable.clear` 把 `count` 打到 0，可达行数为 0 ⇒ 存活集为空 | :1541、CharacterTable.kt:191-200；spec: VariableEvaluator.cs:1275-1285 + CharacterData.cs:756-770（Dispose 归还） |
+     * | 装载面串表（erbc 的 `ConstantPool` / 各段局部串表） | 与本池**无关**：那是编译期串表，下标由 `Vm` 按 `program.stringCount` 判界（Vm.kt:1929/:1947），不经 [StringTable] | code/ErbcFormat.kt:691、loader/MappedErbc.kt:662 |
+     * | 存档（`CharaFileIO` / `SaveFormat`） | 写档瞬间就 `lookup` 成**真串**再落盘（CharaFileIO.kt:223-225、SaveFormat.kt:1187），档里没有池下标；读档经 `writeStr` 现 `intern` ⇒ 压实对档零影响 | specs/save-format.yaml（口径同上两处） |
+     * | `store.aux` 的 XML/MAP/DT/图形池、角色模板 | 持的是**真串**（`template.name` 一类）或整数（G_ID），不含池下标 | host/RuntimeAux.kt:20-22、:1388-1391 |
+     *
+     * **不在清单里、也不该加的**：形状/尺寸数组（`RefUserVar.targetDims`、`VarDef.dims`）与
+     * 句柄缓存（[internHandle] 的 `handleEntries`/`handleSlots`）—— 它们存的不是池下标，
+     * 就地改写会把多维 REF 的形状或句柄乘平。
+     *
+     * ## 不变式与成本
+     * 每个**可达**的格子都在这一趟里被读进存活集、又被就地改写一次，于是
+     * 「复位后 `readStr` 读回的串」与复位前**逐字相同**（[StringTable.compact] 第 1 条）；
+     * 载体数组对象身份不变 ⇒ REF 别名照旧（[resetValues] 的惰性列口径同源：
+     * spec: ReferenceToken.cs:125-128）。漏登记某处的话，读到的是**越界**（第 3 条把死下标
+     * 映到 -1），会立刻响在测试里而不是静默错串。
+     * 成本 O(全部串列格数 + 池条数)，无 IO、无两两比较：复位链本来就已经对每张串列做
+     * 整列 `fill`（[resetValues] :2831-2834），这一趟与它同量级。
+     */
+    private fun compactStringPool() {
+        val oldSize = pool.distinctCount
+        if (oldSize <= 1) return // 只有空串：没有可回收的条目
+        val carriers = strIdCarriers()
+        val live = pool.newLiveMask()
+        for (c in carriers) {
+            val a = c.ids
+            val end = c.until.coerceAtMost(a.size)
+            var i = c.from.coerceIn(0, end)
+            while (i < end) {
+                val id = a[i]
+                if (id in 1 until oldSize) live[id] = true
+                i++
+            }
+        }
+        val remap = pool.compact(live)
+        // 就地改写：不换数组对象（REF 绑的就是对象本体）。remap 的长度是**压实前**的条数，
+        // 载体里若已存在越界下标（跨 store 复用这类内部错误），一并映到 -1 保持「读到时响」。
+        for (c in carriers) {
+            val a = c.ids
+            val end = c.until.coerceAtMost(a.size)
+            var i = c.from.coerceIn(0, end)
+            while (i < end) {
+                val id = a[i]
+                a[i] = if (id in remap.indices) remap[id] else -1
+                i++
+            }
+        }
+    }
+
+    /**
+     * 枚举「复位后可能还持有 [StringTable] 下标」的**全部**载体（清单与逐条判定见
+     * [compactStringPool] 的表）。按**对象身份**去重：同一张数组可能既是变量本体又是
+     * 某个 REF 的目标，改写只能对每格做一次，做两次会把下标映射到错的第三格。
+     *
+     * 新增任何「把池下标存进长命对象」的面，必须同时在这里登记 —— 漏登记的那一处
+     * 在复位后读到的是 -1（CodeEE），这是刻意的失败方向（[StringTable.compact] 第 3 条）。
+     */
+    private fun strIdCarriers(): ArrayList<StrIdRange> {
+        val out = ArrayList<StrIdRange>()
+        val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<IntArray, Boolean>())
+
+        fun add(ids: IntArray, from: Int, until: Int) {
+            if (until <= from) return
+            if (!seen.add(ids)) return
+            out.add(StrIdRange(ids, from, until))
+        }
+
+        fun sink(ids: IntArray) = add(ids, 0, ids.size)
+
+        // ① 系统串列：整列都在可达面内（复位后只有 GLOBALS 会留下非 0 值）。
+        for (col in gStr1) sink(col)
+        sink(gStr0)
+        // ② 函数局部实例（数组对象跨复位存活，内容已被 resetLocalValues 清成 0）。
+        for (st in localsByFunc.values) {
+            for (lv in st.locals.values) lv.strs?.let { sink(it) }
+        }
+        // ③ 用户变量（全局 + 私有；globalUserVars/savedUserVars 是 userVars 的子集，
+        //    同一批实例，靠身份去重不会重复计）。
+        for (v in userVars.values) v.visitStrIds { sink(it) }
+        for (map in privateVars.values) {
+            for (v in map.values) v.visitStrIds { sink(it) }
+        }
+        // ④ 角色表串列：只有 [0, count) 行可达（`checkElement`/`requireIndex` 都按 count 判界，
+        //    spec: VariableData.cs:81-100 / CharaVariableToken.cs:56-70），尾部属不可达区。
+        //    复位链里走到这里时 count 恒为 0 ⇒ 整列不贡献存活项。
+        val rows = characters.count
+        if (rows > 0) {
+            for (col in characters.str0) add(col.data, 0, reachableCells(col.data.size, rows, col.blockSize))
+            for (col in characters.str1) add(col.data, 0, reachableCells(col.data.size, rows, col.blockSize))
+        }
+        return out
+    }
+
+    /** 角色列里「前 [rows] 行」占用的格子数（Long 预乘防溢出，再夹到数组实际长度）。 */
+    private fun reachableCells(dataSize: Int, rows: Int, blockSize: Int): Int {
+        val cells = rows.toLong() * blockSize.toLong()
+        return if (cells >= dataSize) dataSize else cells.toInt()
+    }
+
 
     /** 读入 ITEM.CSV 的第三列（常量数组）。spec: ConstantData.cs:1803-1813 */
     fun loadItemPrice(values: LongArray) {
@@ -2993,7 +3885,11 @@ class VariableStore(
             if (subKey != null) return null
             return VarInfo(
                 name = v.def.name,
-                operandType = if (v.def.type == VarType.INT) OperandType.INT else OperandType.STR,
+                operandType = when (v.def.type) {
+                    VarType.INT -> OperandType.INT
+                    VarType.STR -> OperandType.STR
+                    VarType.FLOAT -> OperandType.FLOAT
+                },
                 dimension = v.def.dimension,
                 isCharacterData = v.def.isCharacterData,
                 isConst = v.spec.isConst,
@@ -3011,15 +3907,71 @@ class VariableStore(
      * 观测用：全局整数列总字节数（1D+2D+3D）。
      *
      * 列改成按需分配后这里按**声明尺寸**算（与改前的实际分配总量同值）：它是「这一列有多大」
-     * 的口径，不是「现在占了多少堆」——后者由堆探针自己量（`perf/HeapCompositionProbeTest` §5）。
+     * 的口径，不是「现在占了多少堆」——后者由堆探针自己量（`perf/HeapCompositionProbeTest` §5），
+     * 账面侧由 [globalIntResidentBytes] 给（同一批列的**实际长度**求和）。
      */
     fun estimateGlobalIntBytes(): Long =
         (sizes.int1D.sumOf { it.toLong() } + gInt2Len.sumOf { it.toLong() } + gInt3Len.sumOf { it.toLong() }) * 8L
 
-    /** 观测用：单个角色占用的整数字节数（系统 84 列 + 用户列）。 */
+    /**
+     * 观测用：全局整数列**实际已分配**的字节数（1D+2D+3D 三张 `Array<LongArray?>` 里非 null 列的
+     * `length` 求和 × 8 B）。
+     *
+     * 为什么需要它（EP3/L10 census 对账）：[estimateGlobalIntBytes] 是**声明尺寸**，而列是按需
+     * 分配的（类头「全局列」节：null = 这一列还没人写过）⇒ 两者之差就是「没付的那部分」。
+     * O(列数)：三张表的格子总数（`sizes.int1D/int2D/int3D` 的 size，真产物百余列），
+     * **只读引用与 `length`，不碰元素、不分配、不建列** ⇒ 与角色数/语句数无关，诊断热路径可取
+     * （`LiveSetCensus` 类头「只读、禁物化」第 2 条的第二种形态）。
+     * 并发：VM 线程可能正在 [intCol] 里写槽位。JVM 引用赋值不撕裂，最坏读到分配前（少计一列）
+     * 或分配后（多计一列）的某一个瞬间 ⇒ 读数是**近似**（诊断口径，同 `GraphicsPool` 的原子读）；
+     * 本函数**不会**把 null 列现分配成非 null（那是语义改动）。
+     */
+    fun globalIntResidentBytes(): Long {
+        var elements = 0L
+        for (col in gInt1) if (col != null) elements += col.size.toLong()
+        for (col in gInt2) if (col != null) elements += col.size.toLong()
+        for (col in gInt3) if (col != null) elements += col.size.toLong()
+        return elements * 8L
+    }
+
+    /**
+     * 观测用：单个角色占用的整数字节数（系统 84 列 + 用户列）——**每行宽**，不是总量。
+     *
+     * 总量口径见 [characterIntResidentBytes]（EP3/L10：`LiveSetCensus` 曾把本读数当总量入账，
+     * 少乘了行数 ⇒ 账面少报整簇；字段 KDoc 里那条「少乘少报」就是这一枚）。
+     */
     fun estimateBytesPerCharacter(): Long =
         (characters.int0 + characters.int1 + characters.int2).sumOf { it.blockSize.toLong() } * 8L
+
+    /**
+     * 观测用：角色整数列**实际驻留**字节（int0/int1/int2 逐列 `data.size × 8 B`）。
+     *
+     * 这是 EP3/L10 修 `charaIntBytes` 少乘少报时选的**最终口径**：读数组自己的长度，而不是
+     * 「每行宽 × 某个行数」的公式 —— `CharacterTable.LongCol.data` 是按
+     * `columnElements(capacity, blockSize)` 分配的（`CharacterTable.kt:75`，扩容 `:78-82` 同形），
+     * 所以本读数与 `estimateBytesPerCharacter() × characters.allocatedCapacity` **逐字相等**
+     * （`LiveSetCensusTest` 把这条等式钉住），而与乘 `count` **不相等**（差 `(capacity − count)` 行，
+     * 本臂 25 行 ≈ 5 MiB）⇒ 「乘容量」由结构与实际数组长度双重证实，不是选边猜出来的。
+     *
+     * 成本：O(列数)（百余列），只读 `size`，不分配、不搬列。
+     */
+    fun characterIntResidentBytes(): Long {
+        var elements = 0L
+        for (col in characters.int0) elements += col.data.size.toLong()
+        for (col in characters.int1) elements += col.data.size.toLong()
+        for (col in characters.int2) elements += col.data.size.toLong()
+        return elements * 8L
+    }
 }
+
+/**
+ * [VariableStore.upperNames] 名字归一记忆的条目硬上限（fix-varcapacity）。
+ *
+ * 全量语料的变量名约 2 万余（`upperNames` 属性 KDoc 登记的实测规模），取 3 倍余量：
+ * 生产档位逐不出（命中率不受影响），只在「运行期动态拼名字」这类非原版路径上兜住无界增长。
+ * 纯缓存论据（逐出=重算、结果恒等）写在该属性的 KDoc 里，用例钉在 `UpperNamesBoundTest`。
+ */
+internal const val MAX_UPPER_NAMES: Int = 65536
 
 /**
  * 变量写观察口（DBG4 P3 log 事件流；挂点见 [VariableStore.writeProbe]）。
@@ -3027,14 +3979,17 @@ class VariableStore(
  * - [watches] 是热路径守卫的名单判定：写路径百万级/秒，实现必须 O(1) 且 **miss 零分配**
  *   （`name.uppercase()` 在 miss 路径会分配，禁用；建议装配期把每个监视名的原形与其
  *   大写形同时入集，判定只做一次 [Set.contains]）。
- * - [onWriteInt] / [onWriteStr] 在写入**入口、校验前**回调（VariableStore.writeInt 的
- *   守卫位）：校验失败的写入也发事件，`value` = 请求值；old→new 由实现方自行回读
+ * - [onWriteInt] / [onWriteStr] / [onWriteFloat] 在写入**入口、校验前**回调
+ *   （VariableStore.writeInt / writeStr / writeFloat 的守卫位）：校验失败的写入也发事件，
+ *   `value` = 请求值；old→new 由实现方自行回读
  *   （命令层持有 store 引用，在回调里读旧值，本接口不搬运）。
+ * - 三个通道都是**默认空体**：加一个不影响既有实现方（4.981 的浮点面就是按这条加的
+ *   [onWriteFloat]，app / vmdbg 侧不改一行照常编译，想要浮点事件自行覆写）。
  * - 实现不得阻塞、不得抛（探针异常由 store 的 runCatching 吞口吞弃，不反噬写入语义）。
  */
 interface VarWriteProbe {
 
-    /** 名单判定：true 才回调 [onWriteInt] / [onWriteStr]。 */
+    /** 名单判定：true 才回调三个 `onWrite*`。 */
     fun watches(name: String): Boolean
 
     /** 整数变量写入事件（[VariableStore.writeInt] 入口）。 */
@@ -3042,4 +3997,12 @@ interface VarWriteProbe {
 
     /** 字符串变量写入事件（[VariableStore.writeStr] 入口）。 */
     fun onWriteStr(name: String, indices: LongArray, value: String) {}
+
+    /**
+     * 浮点变量写入事件（[VariableStore.writeFloat] 入口）。4.981 fork 的第三型。
+     *
+     * `LOCALF`/`ARGF`/`RESULTF` 与用户 `#DIMF` 变量都从这里出；`+=` / `++` 这类复合赋值
+     * 走的是同一条写通道（`plusFloat` → `writeFloatEntry`），因此同样发事件。
+     */
+    fun onWriteFloat(name: String, indices: LongArray, value: Double) {}
 }

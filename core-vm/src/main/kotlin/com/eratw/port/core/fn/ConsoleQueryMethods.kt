@@ -152,7 +152,7 @@ internal fun registerConsoleQuery(r: BuiltinRegistry) {
     // 同时删掉旧的「当前字体名自证式回退」（installedFonts == null 时答 1）—— 原版从来没有
     // 这条：它答 1 是因为那个名字确实在两张表里，而不是因为"正在用它显示"。
     r.register(BuiltinMethod("CHKFONT", I, 1, 1) { c, a ->
-        val name = sv(a[0]!!)
+        val name = requiredStrArg(a, 0, "CHKFONT")
         Value.IntV(if (PortFonts.isAvailable(name, c.host.installedFonts)) 1L else 0L)
     })
 }

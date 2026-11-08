@@ -35,22 +35,21 @@ sealed class HtmlSegment(val run: TextRun) {
      * @property width 可选 `width`（MixedNum 数值，`:1203-1206`；`px` 后缀见 [widthIsPx]，
      *   Utils.cs:342-362）
      * @property height 可选 `height`（`:1199-1202`）
-     * @property yPos 可选 `ypos`（`:1209-1213`）
+     * @property yPos 可选 `ypos` 的**原始数值**（`:1209-1213`）；像素口径见 [yPosIsPx]
      * @property widthIsPx `width` 带 px 后缀（原版 isPx 语义，Utils.cs:347-354）
      * @property heightIsPx 同上，作用于 `height`
+     * @property yPosIsPx 同上，作用于 `ypos`（R-F1，2026-10-28 W4 车道补齐）——
+     *   原版 ypos 与宽高分同两路、各自带 isPixel 标志：
+     *   `ConsoleImagePart.cs:81` 的 `raw_ypos.isPx ? raw_ypos.num : raw_ypos.num * Config.FontSize / 100`
+     *   表明 `'40px'`（40 像素）与 `'40'`（40% 字号，默认 18 号下 = 7px）**必须可区分**；
+     *   解析侧 [MiniHtml] 的 mixedNum 同一形态落进本字段（对照直印路
+     *   `adapter/HtmlRunFlatten.kt` 的 `Mixed.isPx`，:612-616 的三目分支）。
      *
      * **数值怎么变成像素**（上层取图时用得上，`ConsoleImagePart.cs:66-81`）：
      * `null` 或 0 都按「未给」处理 —— 高落到 `Config.FontSize`（`:66`），
      * 宽落到按立绘宽高比推出的等比值（`:67-71`）；给了值则 `isPx` 为真取原值、
      * 为假按字号百分比 `FontSize * num / 100`（宽 `:72-79`、高同式在 `:66`、
-     * ypos 同式在 `:81`）。
-     *
-     * TODO(verify) 口径缺口：[yPos] 丢掉了 `px` 标志 —— 解析侧
-     * `MiniHtml.kt:402-405` 只取 `mixedNum(value).first`，而原版 ypos 与宽高分同两路
-     * （`ConsoleImagePart.cs:81` 的 `isPx ? num : num * FontSize / 100`）。
-     * 卡点：补齐 `yPosIsPx` 要动 `MiniHtml.kt`（本 lane 只独占本文件），
-     * 已写进交付报告的「需组长接线」；在此之前本字段只能当**未归一原始值**用，
-     * 不得直接当像素偏移参与摆位。
+     * ypos 同式在 `:81`）。ypos 未给时 `top` 恒 0（`:81` 的三元式外层 `: 0`）。
      *
      * TODO(verify) 绑定时机：原版在**建段时**就把名字解析成 sprite 引用
      * （`ConsoleImagePart.cs:60` 的 `AppContents.GetSprite(ResourceName)`，`srcb`/`srcm`
@@ -69,6 +68,7 @@ sealed class HtmlSegment(val run: TextRun) {
         val yPos: Int?,
         val widthIsPx: Boolean,
         val heightIsPx: Boolean,
+        val yPosIsPx: Boolean,
         run: TextRun,
     ) : HtmlSegment(run)
 }
@@ -161,7 +161,7 @@ data class MiniHtmlDoc(
     private fun brSentinel(line: HtmlLine): TextRun {
         val style = line.runs.firstOrNull()
         return if (style == null) {
-            TextRun(BR_MARK, MiniHtml.FORE_DEFAULT, MiniHtml.BACK_DEFAULT, 0, MiniHtml.FONT_DEFAULT, RunKind.HTML)
+            TextRun(BR_MARK, MiniHtml.FORE_DEFAULT, null, 0, MiniHtml.FONT_DEFAULT, RunKind.HTML)
         } else {
             TextRun(BR_MARK, style.fore, style.back, style.styleMask, style.fontName, RunKind.HTML)
         }

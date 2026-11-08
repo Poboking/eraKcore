@@ -99,6 +99,34 @@ object VariableCode {
     const val TSTR = 286064646
     const val SAVEDATA_TEXT = 17039360
 
+    // ---- 4.981 fork 新增：浮点变量（spec: fork-src VariableCode.cs:99-101, :124）----
+    //
+    // 三个 code **都不带类型位**：原版靠 `VariableDescriptorTable` 的显式登记把 Kind 定成
+    // Float（spec: fork-src VariableDescriptor.cs:108,154-155），而不是像 1.824 那样用
+    // `__INTEGER__` / `__STRING__` 位（fork-src VariableCode.cs:9-10 之间没有 `__FLOAT__` 位）。
+    // ⇒ 本层的 [isInteger] / [isString] 对这三个恒为 false，浮点判定只认 [SystemLayout] 的
+    // 浮点清单（[isFloat]）。
+    //
+    // 1.824 参考树（reference/emuera-cs）整份没有浮点变量面 ⇒ 本段**无 1.824 对拍**，
+    // 逐条以 fork-src 48494165 为据；语料侧的唯一消费者见 [SystemLayout] 浮点段的备注。
+    /** 函数局部浮点数组：低 16 位 0 = `VariableFloatArrayLength` 的第 0 槽。spec: fork-src VariableCode.cs:99 */
+    const val LOCALF = 50921472          // 0x0309_0000 = 0x00 | ARRAY_1D | LOCAL | EXTENDED | CAN_FORBID
+
+    /** 函数形参浮点数组：低 16 位 1 = `VariableFloatArrayLength` 的第 1 槽。spec: fork-src VariableCode.cs:100 */
+    const val ARGF = 50921473            // 0x0309_0001 = 0x01 | ARRAY_1D | LOCAL | EXTENDED | CAN_FORBID
+
+    /**
+     * 0 维浮点结果寄存器：`dataFloat[1]` 的包装。spec: fork-src VariableCode.cs:124
+     * （`0x01 | __EXTENDED__`）、`VariableDescriptor.cs:108`（Kind=Float / Scalar / Extended）。
+     */
+    const val RESULTF = 16777217         // 0x0100_0001 = 0x01 | EXTENDED
+
+    /**
+     * 系统浮点 1 维数组的槽数（fork-src `__COUNT_FLOAT_ARRAY__ = 0x02`，VariableCode.cs:101），
+     * 即 LOCALF(0) 与 ARGF(1)；出厂长度各 10（spec: fork-src ConstantData.cs:211-217）。
+     */
+    const val FLOAT_ARRAY_COUNT = 2
+
     // ---- 角色 0 维 (VariableCode.cs:103-106) ----
     const val ISASSI = 1179648
     const val NO_VAR = 1179649
@@ -232,6 +260,16 @@ object VariableCode {
     fun isInteger(code: Int): Boolean = (code and INTEGER) == INTEGER
 
     fun isString(code: Int): Boolean = (code and STRING) == STRING
+
+    /**
+     * 是否 4.981 fork 的系统浮点变量。
+     *
+     * 判据是**枚举这三个 code**而不是某个标志位：fork 的浮点属性来自
+     * `VariableDescriptorTable` 的名字登记表（spec: fork-src VariableDescriptor.cs:108,154-155），
+     * code 本身没有任何浮点位可查（spec: fork-src VariableCode.cs:99-101,124 三条都不带类型位）。
+     * 用户 `#DIMF` 变量不在此列 —— 它们由 [DimSpec.isFloat] 判定，不占系统 code。
+     */
+    fun isFloat(code: Int): Boolean = code == LOCALF || code == ARGF || code == RESULTF
 
     fun isCharacterData(code: Int): Boolean = (code and CHARACTER_DATA) == CHARACTER_DATA
 

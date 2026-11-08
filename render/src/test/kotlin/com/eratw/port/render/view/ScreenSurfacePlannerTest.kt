@@ -31,9 +31,21 @@ class ScreenSurfacePlannerTest {
         fingerprint: Int = fp,
         graphic: Boolean = false,
         background: Boolean = false,
+        bgArgb: Int = ScreenScene.DEFAULT_BACKGROUND,
         forced: Boolean = false,
         minRow: Int = 100,
-    ) = p.plan(minRow, s, s.size, fingerprint, graphic, background, forced)
+    ) = p.plan(minRow, s, s.size, fingerprint, graphic, background, bgArgb, forced)
+
+    @Test
+    fun `换整屏底色必然整幅（SETBGCOLOR 活值）`() {
+        val p = warmed()
+        plan(p, sigs(), bgArgb = 0xFF123456.toInt())
+        assertTrue(p.full, "graph.Clear 的清屏色换了，留在面上的旧底色没人替它擦")
+        plan(p, sigs(), bgArgb = 0xFF123456.toInt())
+        assertFalse(p.full, "同底色稳态帧仍走增量")
+        plan(p, sigs())
+        assertTrue(p.full, "RESETBGCOLOR 回默认色同样整幅")
+    }
 
     /**
      * 先喂两帧打底：第 1 帧必然整幅（surface 是脏的），第 2 帧内容没变 ⇒ 落到增量口径。

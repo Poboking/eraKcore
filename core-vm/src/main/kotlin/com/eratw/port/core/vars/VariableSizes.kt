@@ -63,6 +63,13 @@ data class VarConfig(
  *   （:608-641）、CDFLAG↔CDFLAGNAME1/2 专例（:642-668）。只在 [changed] 集合内判定；
  *   两边都改且不等时取 max 并告警，只改一边时同步另一边。
  * - [changed] 即 C# 的 `changedCode`（ConstantData.cs:547-550），重复定义靠它识别。
+ * - 4.981 fork 的**浮点档**（本类新增，1.824 无此面 ⇒ 只能按 fork-src 取证）：
+ *   [float1D] 承载 `VariableFloatArrayLength`（fork-src ConstantData.cs:106,211-217），
+ *   [applySize] 的浮点支对应 fork-src ConstantData.cs:532-533。**浮点不参与**
+ *   [decideActualArraySize]：原版 :583-670 的 23 条联动 + PALAM/JUEL + CDFLAG 专例
+ *   全部只读 `VariableIntArrayLength` / `VariableStrArrayLength` / 角色两张表，
+ *   整段 `grep Float` 零命中（fork-src ConstantData.cs 的 Float 只出现在 :106-110 声明、
+ *   :211-217 出厂值与 :493-533 写入 switch）⇒ LOCALF/ARGF 改完就是终值，不与任何名字表联动。
  *
  * 与 C# 的区别（仅告警/异常形态，数据结果一致）：
  * - 0 长度与"非 CanForbid 的负数"由装载层按原版两条告警拒绝（ConstantData.cs:342-351）；
@@ -90,6 +97,25 @@ class VariableSizes {
 
     /** 角色 2 维整数尺寸（1 组，CDFLAG）。 */
     val charaInt2D: Array<IntArray> = arrayOf(intArrayOf(1, 1))
+
+    /**
+     * 1 维浮点数组长度，下标 = code 低 16 位（0 = LOCALF，1 = ARGF）。
+     *
+     * 对应原版 `VariableFloatArrayLength`（spec: fork-src ConstantData.cs:106），出厂值
+     * **各 10**（spec: fork-src ConstantData.cs:211-217 的循环 `VariableFloatArrayLength[i] = 10`），
+     * 与整数侧的 1000 / 字符串侧的 100 不同档。消费点 = 每函数 LOCALF/ARGF 实例的默认长度
+     * （spec: fork-src VariableData.cs:376-379）。
+     *
+     * 原版还有 4 张浮点尺寸表 —— `VariableFloatArray2DLength` / `VariableFloatArray3DLength` /
+     * `CharacterFloatArrayLength` / `CharacterFloatArray2DLength`（spec: fork-src
+     * ConstantData.cs:107-110）—— 但它们在 fork 里被初始化成**空数组**
+     * （spec: fork-src ConstantData.cs:212-215 的 `= []`），计数常量同为 0
+     * （spec: fork-src VariableCode.cs:137-138,166-167,186），而名字表里没有任何
+     * 2/3 维或角色浮点变量 ⇒ 写入 switch 的那四条 `IsFloat` 分支
+     * （ConstantData.cs:493-494 / :502-503 / :513-514 / :523-524）在原版不可达。
+     * 本层因此**不建那四张表**，改尺寸时对它们明说（见 [applySize]）。
+     */
+    val float1D: IntArray = IntArray(VariableCode.FLOAT_ARRAY_COUNT) { FLOAT_DEFAULT_SIZE }
 
     /** CSV 名字表长度（29 组）。spec: ConstantData.cs:88,173-201 */
     val maxDataList: IntArray = intArrayOf(
@@ -137,6 +163,15 @@ class VariableSizes {
     /** 是否角色变量（C# IsCharacterData）。 */
     fun isCharacter(code: Int): Boolean = VariableCode.isCharacterData(code)
 
+    /**
+     * 是否浮点变量（C# `VariableIdentifier.IsFloat`，spec: fork-src VariableIdentifier.cs:69-75
+     * 读的是 `VariableDescriptor.Kind == VariableKind.Float`）。
+     *
+     * 移植侧没有 descriptor 表，判据落在 code 枚举上（见 [VariableCode.isFloat] 的 KDoc：
+     * fork 的浮点变量不带任何类型位）；两者的外延相同 —— 只有 LOCALF / ARGF / RESULTF。
+     */
+    fun isFloat(code: Int): Boolean = VariableCode.isFloat(code)
+
     /** code → 注册名（告警文案用；未知 code 回退十六进制）。 */
     fun codeName(code: Int): String =
         nameByCode[code] ?: "0x" + code.toUInt().toString(16)
@@ -163,6 +198,20 @@ class VariableSizes {
     }
 
     /**
+     * VARSIZE.CSV：按名字改 1 维**浮点**数组长度（LOCALF / ARGF）。
+     *
+     * 与 [setInt1D] / [setStr1D] 同形，只是落到 [float1D]；`RANDDATA` 那类特例在浮点面
+     * 没有对应物（浮点只有两个名字，都不是计算变量、也不是 CSV 名字表）。
+     * spec: fork-src ConstantData.cs:530-533 的 `else if (id.IsFloat)` 分支。
+     */
+    fun setFloat1D(name: String, size: Int) {
+        verifySize(size)
+        val code = SystemLayout.localFloat.firstOrNull { it.first == name }?.second
+            ?: throw CodeEE("未知的 1 维浮点变量 $name")
+        applySize(code, intArrayOf(size))
+    }
+
+    /**
      * 写入一条已由装载层校验过的尺寸（ConstantData.cs:449-546 的写入 switch）。
      *
      * @return false 表示该 code 此前已改过（C# VarSizeAlreadyDefined，ConstantData.cs:547-550）
@@ -185,6 +234,13 @@ class VariableSizes {
             throw CodeEE("数组长度必须为正数（${dims.joinToString(" x ")}）")
         }
         when {
+            // 浮点支（ConstantData.cs:530-533 的 `else if (id.IsFloat)` → :533 的
+            // `VariableFloatArrayLength[id.CodeInt] = length`）。
+            // 到这里 `dims.size == dimension(code) == 1` 已由上面的维度校验兜住：
+            // 三个浮点 code 里只有 LOCALF/ARGF 是数组（fork-src VariableCode.cs:99-100），
+            // RESULTF 是 0 维（:124）已在维度校验处拒绝；2/3 维与角色浮点在原版是**空表**、
+            // 那四条 IsFloat 分支不可达（见 [float1D] 的 KDoc），本层没有对应的 code 可传。
+            isFloat(code) -> float1D[low] = dims[0]
             // ITEMPRICE 与 ITEMNAME 是同一份数据的两个名字（ConstantData.cs:451-455）
             code == VariableCode.ITEMPRICE || code == VariableCode.ITEMNAME -> {
                 int1D[60] = dims[0]
@@ -364,6 +420,8 @@ class VariableSizes {
         addAll(SystemLayout.charaInt2D)
         addAll(SystemLayout.localInt)
         addAll(SystemLayout.localStr)
+        addAll(SystemLayout.localFloat)
+        addAll(SystemLayout.floatScalar)
         addAll(SystemLayout.csvConsts)
         for ((n, c, _) in SystemLayout.pseudo) add(n to c)
         addAll(SystemLayout.gameBaseStr)
@@ -384,6 +442,14 @@ class VariableSizes {
     private data class Coupling(val main: Int, val name: Int, val kind: Kind)
 
     companion object {
+        /**
+         * 浮点 1 维数组的出厂长度（LOCALF / ARGF 各 10）。
+         *
+         * spec: fork-src ConstantData.cs:216-217（`for (...) VariableFloatArrayLength[i] = 10`）。
+         * 与整数侧 1000（:218-219）、字符串侧 100（:225-226）分档。
+         */
+        const val FLOAT_DEFAULT_SIZE = 10
+
         /** C# decideActualArraySize 的 23 条联动调用，顺序照抄 ConstantData.cs:585-607。 */
         private val COUPLINGS: List<Coupling> = listOf(
             Coupling(VariableCode.ABL, VariableCode.ABLNAME, Kind.CHARA_INT1D),

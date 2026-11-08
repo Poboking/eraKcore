@@ -1,45 +1,87 @@
 # 随包像素字体包 —— 复现凭据（build_font_pack.py 生成，勿手改）
 # fonttools 4.67.0
-# required-codepoints.txt sha256 249b31702d49afeda0a7fd2336a0ce4126b6d58829ca11c3a28ab35da10aca25
+# required-codepoints.txt sha256 0e43b8600be0ec168c70d6192b7d1ae997fdf43342537d24b40b932b0040c8d9
+
+[sarasa]
+family = Sarasa Mono SC
+source = npm @be5invis/sarasa-gothic-sc 0.36.0 → package/sarasa-mono-sc-regular.ttf（OFL-1.1）
+source-sha256 = 00c49d6963436952332c69fee313495851f3579f2346769b049947220dba36d7
+unitsPerEm = 1000
+coverage = 7880/7956 (99.04%), miss 76
+subset = sarasa-mono-sc-subset.ttf
+subset-sha256 = 445e30d81cd8611e33bada8d541807041910e2261d763809e2ad6f04784c0ffe
+subset-bytes = 4229868
+sidecar = sarasa-mono-sc-advance.txt
+sidecar-sha256 = 761ba7899bd1ffd3dcba4e97c6aefa8394e3d3605d0fb90153c39872aaa572ec
+occurrence-coverage = 99.999% (108463733/108464789 次), miss 1056
+advance-top = [(1000, 7163), (500, 631), (0, 91)]
+
+[lxgw]
+family = Eratw WenKai Mono
+source = github lxgw/LxgwWenKai v1.530 LXGWWenKaiMono-Regular.ttf（OFL-1.1，有 RFN ⇒ 子集改名）
+source-sha256 = 895ce1d2fa00d5ca3bec0329d38e3190454f4b5fa7b4733f491c419faf9753a1
+unitsPerEm = 1000
+coverage = 7651/7956 (96.17%), miss 305
+subset = lxgw-wenkai-mono-subset.ttf
+subset-sha256 = 03deccd7ba072ae8377f76bd457f4098a7a13aab39f2d98a30368f2c3fd7a5da
+subset-bytes = 3700556
+sidecar = lxgw-wenkai-mono-advance.txt
+sidecar-sha256 = df0f11024916ac782698871481a56d2b6e6c5315579422383c3a48c2ef0c0eb1
+occurrence-coverage = 99.961% (108422435/108464789 次), miss 42354
+advance-top = [(1000, 7291), (500, 310), (0, 54)]
+
+[maple]
+family = Maple Mono CN
+source = npm maple-mono-cn 7.0.0 → package/MapleMono-CN-Regular.ttf（OFL-1.1）
+source-sha256 = ad24fc730bf427c7419356103edaabbe8a56ee56fb1a090ef6f5edcd34d234ff
+unitsPerEm = 1000
+coverage = 7213/7956 (90.66%), miss 743
+subset = maple-mono-cn-subset.ttf
+subset-sha256 = 8d845ee92c61821c1e64e9e6c33aea0b67ebdf8dc885dd2a2635aa0838049320
+subset-bytes = 4663636
+sidecar = maple-mono-cn-advance.txt
+sidecar-sha256 = cd5801d3e06e59ea672f4acdb8156af01a99673e896e552591e869328e4fba30
+occurrence-coverage = 99.182% (107577261/108464789 次), miss 887528
+advance-top = [(1200, 6856), (600, 357)]
 
 [fusion]
 family = Fusion Pixel 12px
 source = npm @fontpkg/fusion-pixel 20220405.0.0 → package/fusion-pixel.ttf（OFL-1.1）
 source-sha256 = d358eb41c1df2bc8bb517cad8e7cec8216ee0ec6939a742e046899f56f2b0a32
 unitsPerEm = 1200
-coverage = 7262/8076 (89.92%), miss 814
+coverage = 7136/7956 (89.69%), miss 820
 subset = fusion-pixel-12px-subset.ttf
-subset-sha256 = a92112d0546ce6b842b77f358e67795d632f5f4fe6d3ec83fce23bccef1a4e96
-subset-bytes = 1378016
+subset-sha256 = a13170fb6311c4ba1aeb73d453aa7c0202d38b71d04129ba92bb7d25ee0f5f16
+subset-bytes = 1350248
 sidecar = fusion-pixel-12px-advance.txt
-sidecar-sha256 = 0f0e04e281b06cc4902f87dbdc22b684c0611a422001b55830e90c9da1ae4e15
-occurrence-coverage = 99.916% (95756818/95837334 次), miss 80516
-advance-top = [(1200, 6974), (600, 283), (1800, 2), (900, 1), (400, 1), (300, 1)]
+sidecar-sha256 = fbf6f5a8e4ebdb839cd3c8979ca6e42d9119ac9792d26dddbc5c2961485ef201
+occurrence-coverage = 99.917% (108374797/108464789 次), miss 89992
+advance-top = [(1200, 6851), (600, 281), (1800, 2), (900, 1), (400, 1), (300, 1)]
 
 [ark]
 family = Ark Pixel 12px
 source = 仓内 app/src/main/res/font/ark_pixel.ttf（OFL-1.1，TakWolf/ark-pixel-font）
 source-sha256 = 56e82b4fa83e9e7bc586da288a7eb0481f8bc1f1fa8ecc6ad952781c8c0e366a
 unitsPerEm = 1200
-coverage = 7252/8076 (89.80%), miss 824
+coverage = 7146/7956 (89.82%), miss 810
 subset = ark-pixel-12px-subset.ttf
-subset-sha256 = 86083a10b0949965263ed7c51b4f130b9b53f8389e683154d03de89ba0747029
-subset-bytes = 1349524
+subset-sha256 = 9c963c4b177483f3903ab3880a0eeecd548dab6fe81d59dcec1806a44d60a5a4
+subset-bytes = 1376540
 sidecar = ark-pixel-12px-advance.txt
-sidecar-sha256 = 0bfa2649a83faf2b7fd9304c9318a752560c5bb81c88af3b9e2e5e3cbe91dd44
-occurrence-coverage = 99.522% (95379666/95837334 次), miss 457668
-advance-top = [(1200, 6791), (600, 458), (0, 2), (3000, 1)]
+sidecar-sha256 = 832c12aa7eaec3290b01165abdb8956466e4e7e23674d3600176dc0ea3ed67ed
+occurrence-coverage = 99.515% (107938751/108464789 次), miss 526038
+advance-top = [(1200, 6686), (600, 457), (0, 2), (3000, 1)]
 
 [unifont]
 family = Unifont
 source = npm @fontpkg/unifont 15.0.1 → package/unifont-15.0.01.ttf（OFL-1.1 / GPLv2+FE）
 source-sha256 = 299459bc34e915b1c18dd38677739f41d0b2a6d79b93f480cd157ef24da675ab
 unitsPerEm = 1024
-coverage = 8034/8076 (99.48%), miss 42
+coverage = 7909/7956 (99.41%), miss 47
 subset = unifont-subset.ttf
-subset-sha256 = 3ac59527b628a6224e55f8e71e9af33053dfe1bc05ae412bd556e2cca31b155e
-subset-bytes = 1870140
+subset-sha256 = 8fe7d8c602ccd93386319c0e9c0bb204df3a90758d0f48b988221f2fc61b5633
+subset-bytes = 1835464
 sidecar = unifont-advance.txt
-sidecar-sha256 = 6a6ccef53aa9ae47f8ef9865c83ee51fadc2982aa49e29e74975f869c443336e
-occurrence-coverage = 100.000% (95837250/95837334 次), miss 84
-advance-top = [(1024, 7254), (512, 696), (0, 91)]
+sidecar-sha256 = c9588c235d9f9b05e67b6dc4dea5bcbfc91b401e101469834ebdc208c1018e9a
+occurrence-coverage = 100.000% (108464294/108464789 次), miss 495
+advance-top = [(1024, 7131), (512, 694), (0, 91)]

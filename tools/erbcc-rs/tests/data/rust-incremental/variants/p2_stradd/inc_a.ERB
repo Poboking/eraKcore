@@ -1,0 +1,6 @@
+; 探针语料 A（变体 p2_stradd：给 CALL 多加一个字面量实参 —— 语句数不变、全局串池 +1）
+@IFA_ONE(ARG, ARG:1, ARGS)
+	PRINTFORML A1-STR {ARG} {ARG:1} %ARGS%
+@IFA_TWO
+	PRINTFORML A2-STR
+	CALL IFA_ONE, 1, 2, "A-CALL-LIT", "A-EXTRA-STR"

@@ -36,6 +36,16 @@ class ErrorTextRenderTest {
 
     private val placeholder = Regex("\\{(\\d+)}")
 
+    /**
+     * 官方英译漏占位符的三条（ADR-005 照抄、不修译）。`eng` 模板缺 `{0}` 时该语种渲染不出
+     * 实参（zhs/ja 同键带占位符），对拍只要求这三条的 eng 占位符是 ja 的子集。
+     */
+    private val engMissingPlaceholder = setOf(
+        LangKey.UnexpectedFullWidthSpace,
+        LangKey.InvalidCharacterAfterInstruction1,
+        LangKey.LoaddataArgIsNegative,
+    )
+
     @Test
     fun `每个键的占位符个数与 argCount 一致`() {
         for (key in LangKey.entries) {
@@ -51,6 +61,12 @@ class ErrorTextRenderTest {
                 (indices.maxOrNull() ?: -1) + 1,
                 "${key.name} 的 argCount=${key.argCount}，模板里的最大占位符是 ${indices.maxOrNull()}",
             )
+            if (key !in engMissingPlaceholder) {
+                val indicesEn = placeholder.findAll(key.templateEn)
+                    .map { it.groupValues[1].toInt() }
+                    .toSet()
+                assertEquals(indices, indicesEn, "${key.name} 的 ja/eng 占位符下标必须同形")
+            }
         }
     }
 
@@ -70,6 +86,8 @@ class ErrorTextRenderTest {
         )
         // 0 参键不受额外实参影响 —— 但多给实参属于调用点写错，见下一条。
         assertEquals("缺少参数", LangKey.MissingArg.render())
+        // 降级桩文案（2026-11-08 并回册内官方原文；ADR-005 照抄）
+        assertEquals("调用了一个加载时解析失败的函数", LangKey.CalledFailedFunc.renderZhs())
         // 空的 [[]] 里没有占位符，不能被当成 {0}
         assertTrue(LangKey.EmptyTwoSBrackets.render() == "空的[[]]")
     }
@@ -79,6 +97,19 @@ class ErrorTextRenderTest {
         assertFailsWith<IllegalArgumentException> { LangKey.MissingArg.render("多余") }
         assertFailsWith<IllegalArgumentException> { LangKey.CanNotRecognizeArg.render() }
         assertFailsWith<IllegalArgumentException> { LangKey.InstructionNotClosed.render("A", "B") }
+    }
+
+    @Test
+    fun `英文档取 eng 译文`() {
+        assertEquals("Missing argument", LangKey.MissingArg.renderEn())
+        assertEquals(
+            "Found an unexpected character '&' during lexical analysis",
+            LangKey.UnexpectedCharacter.renderEn('&'),
+        )
+        assertEquals(
+            "Attempted to use instruction outside the branch of SELECTCASE syntax 'PRINTL'",
+            LangKey.OutsideSelectcase.renderEn("PRINTL"),
+        )
     }
 
     @Test
@@ -158,9 +189,11 @@ class ErrorTextRenderTest {
             val row = rows.getValue(key.name)
             assertEquals(key.templateJa, row.ja, "${key.name}.ja 与 Lang.cs:${key.langCsLine} 不一致")
             assertEquals(key.templateZhs, row.zhs, "${key.name}.zhs 与 zhs xml:${key.zhsXmlLine} 不一致")
+            assertEquals(key.templateEn, row.en, "${key.name}.en 与 eng xml:${key.engXmlLine} 不一致")
             assertEquals(key.argCount, row.args, "${key.name}.args")
             assertEquals(key.langCsLine, row.langCs, "${key.name}.lang_cs")
             assertEquals(key.zhsXmlLine, row.zhsXml, "${key.name}.zhs_xml")
+            assertEquals(key.engXmlLine, row.engXml, "${key.name}.eng_xml")
             assertTrue(row.status == "wired" || row.status == "registered", "${key.name}.status=${row.status}")
         }
     }
@@ -168,9 +201,11 @@ class ErrorTextRenderTest {
     private data class SpecRow(
         val ja: String,
         val zhs: String,
+        val en: String,
         val args: Int,
         val langCs: Int,
         val zhsXml: Int,
+        val engXml: Int,
         val status: String,
     )
 
@@ -223,9 +258,11 @@ class ErrorTextRenderTest {
             m.getValue("id") to SpecRow(
                 ja = m.getValue("ja"),
                 zhs = m.getValue("zhs"),
+                en = m.getValue("en"),
                 args = m.getValue("args").toInt(),
                 langCs = m.getValue("lang_cs").toInt(),
                 zhsXml = m.getValue("zhs_xml").toInt(),
+                engXml = m.getValue("eng_xml").toInt(),
                 status = m.getValue("status"),
             )
         }
@@ -282,6 +319,25 @@ class ErrorTextRenderTest {
             assertTrue(!msg.contains("spec"), "屏上文案不许出现工程线索 spec：$msg")
             assertTrue(!msg.contains("{0}") && !msg.contains("{1}"), "占位符必须已展开：$msg")
         }
+    }
+
+    /**
+     * P16（W7-judge 收口）：赋值行 `A == 1` 的 level 0 提示（spec: LogicalLineParser.cs:548-554
+     * `ParserMediator.Warn(Use2EqualToAssign, position, 0)`，提示后照常按 `=` 执行）原先是
+     * 自造句「赋值请使用 '=' 而不是 '=='」；现取册内官方 zhs 原文（`Lang.cs:2890` /
+     * zhs:677，注意引号是 U+201D 对）。
+     */
+    @Test
+    fun `赋值行双等号告警取册内官方文案且语句照常成立`() {
+        val p = parser()
+        val stmt = p.parseLogicalLine(LogicalLine(LineKind.CODE, "eq.erb", 3, "A == 1"))
+        assertTrue(stmt is com.eratw.port.core.stmt.Statement, "`==` 提示后按 `=` 继续执行（LogicalLineParser.cs:553）")
+        assertEquals(
+            listOf("使用”==”作为赋值运算符"),
+            p.warnings.map { it.message },
+        )
+        assertEquals("使用”==”作为赋值运算符", LangKey.Use2EqualToAssign.renderZhs())
+        assertEquals("代入演算子に\"==\"が使われています", LangKey.Use2EqualToAssign.renderJa())
     }
 
     // ------------------------------------------------------------------

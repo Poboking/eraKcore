@@ -78,8 +78,9 @@ class ExprErrorStampTest {
     fun `表达式错误盖章为带位置的 CodeEE`() {
         val rt = runtime()
         val e = assertFailsWith<CodeEE> { rt.executeStatement(badPrintForm(357), Env(357)) }
-        // 文案 = Expr.kt 的原版复刻（MultStrInt 的 MultiplyNegativeToStr）
-        assertEquals("负数(-3)不能与字符串相乘", e.message)
+        // 文案 = 官方 Error.MultiplyNegativeToStr 逐字（Lang.cs:1318 / 语料根 emuera.zhs.xml:486 /
+        // reference 表 :284；抛出点 OperatorMethodManager.cs:99 MultStrInt），真源在 OperatorErrorText.kt
+        assertEquals("字符串无法与负值(-3)进行相乘运算", e.message)
         // 盖章三件套：函数名 + 源码行 + pc（失败屏 scriptLocation 读的就是这几个字段）
         assertEquals("UPDATE_MAIN_DRAWLINE_SECTION", e.funcName)
         assertEquals(357, e.line)

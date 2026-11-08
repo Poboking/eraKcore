@@ -3,6 +3,7 @@ package com.eratw.port.core.save
 import com.eratw.port.core.data.save.SaveData
 import com.eratw.port.core.data.save.SaveEntry
 import com.eratw.port.core.data.save.SaveFormat
+import com.eratw.port.core.data.save.SaveFormatException
 import com.eratw.port.core.fn.EraDataState
 import com.eratw.port.core.fn.SaveFileKind
 import com.eratw.port.core.rand.Sfmt19937
@@ -13,6 +14,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlin.test.assertFalse
@@ -55,6 +57,48 @@ class SaveAudit2Test {
         } finally {
             Files.deleteIfExists(dir.resolve("VarExtAudit.csv"))
             Files.deleteIfExists(dir)
+        }
+    }
+
+    /**
+     * 打开/解码失败 ⇒ 放弃**全部剩余文件**，不是跳过这一个。
+     * spec: ConstantData.cs:1320-1326（`if (!eraStreamReader.Open(path)) { PrintError; break; }`）
+     * + EraStreamReader.cs:50-59（`Open` 的 false 来自 `EncodingHandler.DetectEncoding` 严格解码失败）。
+     * 「跳过继续读」的形态会在移植侧多收后续文件的容器名 ⇒ SAVE/SAVEGLOBAL 写出
+     * 原版不写的扩展段，破逐字节幂等。
+     */
+    @Test
+    fun `VarExt 解码失败放弃全部剩余文件`() {
+        val dir = Files.createTempDirectory("varext-abort")
+        try {
+            // parse 按文件名排序收集：坏文件必须排在好文件之前才构成判据
+            Files.write(dir.resolve("VarExtA_bad.csv"), byteArrayOf(0x82.toByte()))
+            Files.write(
+                dir.resolve("VarExtB_good.csv"),
+                "SAVE_MAPS,M_SHOULD_NOT_APPEAR\n".toByteArray(Charsets.UTF_8),
+            )
+            val sets = EmSaveSets.parse(dir)
+            assertFalse(
+                sets.save.maps.any { it.contains("SHOULD_NOT_APPEAR") },
+                "解码失败后不得继续收后续文件：${sets.save}",
+            )
+            assertTrue(sets.save.maps.isEmpty(), "两份文件都应被放弃：${sets.save}")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    /** 对照：没有坏文件时，两份 VarExt 照常合并收集（反空转——上一条的 `break` 不能写成早退全部）。 */
+    @Test
+    fun `VarExt 全部可解码时逐文件收集`() {
+        val dir = Files.createTempDirectory("varext-ok")
+        try {
+            Files.write(dir.resolve("VarExtA.csv"), "SAVE_MAPS,M_A\n".toByteArray(Charsets.UTF_8))
+            Files.write(dir.resolve("VarExtB.csv"), "SAVE_MAPS,M_B\n".toByteArray(Charsets.UTF_8))
+            val sets = EmSaveSets.parse(dir)
+            assertTrue(sets.save.maps.containsAll(listOf("M_A", "M_B")), sets.save.toString())
+        } finally {
+            dir.toFile().deleteRecursively()
         }
     }
 
@@ -180,6 +224,42 @@ class SaveAudit2Test {
         val badVersion = gz.copyOf().also { it[8] = 0x30; it[9] = 0x07 } // 容器版本 1808 → 1840
         assertFalse(SaveCodec.isBinary(badVersion), "魔数对而容器版本非 1808 ⇒ 原版当作文本再读一次")
         assertFalse(SaveCodec.isBinary(gz.copyOfRange(0, 15)), "不足 16 字节不可能是容器（:790-793）")
+    }
+
+    /**
+     * 分派只看**容器壳**（魔数 + 1808），不再为判定整份解压一遍：
+     * 壳在、正文尾部坏掉的档仍按二进制分支交给 [SaveFormat.read]，由它全量解压后抛错；
+     * 旧实现用 `isBinaryContainer` 判定，先整份解压一次再读档再解压一次（2026-10-31 性能修）。
+     */
+    @Test
+    fun `分派只看容器壳 正文损坏仍走二进制并经read拒绝`() {
+        val gz = SaveFormat.write(SaveData(SaveFileKind.NORMAL, 7153L, 0L, "t", compressed = true))
+        val badBody = gz.copyOf().also { it[it.size - 8] = (it[it.size - 8].toInt() xor 0xFF).toByte() }
+        assertTrue(SaveCodec.isBinary(badBody), "壳在即按二进制分派（CreateReader 的解压前判据）")
+        assertFailsWith<SaveFormatException>("正文坏由 read 的全量解压拒绝") {
+            SaveCodec.read(badBody, VariableStore().registry, SaveFileKind.NORMAL)
+        }
+    }
+
+    /**
+     * 列表快探测（[SaveDataProbe.checkBytes] 的 `headerOnly`）与读档前置校验的分工：
+     * 尾部损坏的档在列表里仍能显示描述，但完整探测给 `ETC_ERROR` —— 原版 `LOADDATA`
+     * 先 `CheckData` 再复位变量池（`Process.cs:1853-1856`），坏档必须在复位前被拦住。
+     */
+    @Test
+    fun `快探测给头而完整探测拒绝坏尾部`() {
+        val bytes = SaveFormat.write(SaveData(SaveFileKind.NORMAL, 7153L, 0L, "t", compressed = true))
+        val bad = bytes.copyOf().also { it[it.size - 8] = (it[it.size - 8].toInt() xor 0xFF).toByte() }
+        assertEquals(
+            EraDataState.OK,
+            SaveDataProbe.checkBytes(bad, SaveFileKind.NORMAL, gb(), headerOnly = true).state,
+            "列表只看头字段：尾部损坏不挡描述文本",
+        )
+        assertEquals(
+            EraDataState.ETC_ERROR,
+            SaveDataProbe.checkBytes(bad, SaveFileKind.NORMAL, gb()).state,
+            "完整探测（读档前置校验）仍拒绝坏尾部，避免复位变量池后才报错",
+        )
     }
 
     /** 写侧配置与读侧分派同源：二进制配置 ⇒ 容器字节；文本配置 ⇒ 非容器字节且能读回。 */

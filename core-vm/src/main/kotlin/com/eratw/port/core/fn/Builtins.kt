@@ -18,8 +18,11 @@ import com.eratw.port.core.host.GlyphMaskHost
 import com.eratw.port.core.host.GlyphMaskHostProvider
 import com.eratw.port.core.host.LineBufferConsoleSink
 import com.eratw.port.core.host.RuntimeAux
+import com.eratw.port.core.host.SPRITE_SLOT
+import com.eratw.port.core.host.SpritePool
 import com.eratw.port.core.lexer.lexerMacroNamesOf
 import com.eratw.port.core.lexer.lexerMacrosOf
+import com.eratw.port.core.sql.registerSqlMethods
 import com.eratw.port.core.vars.VariableStore
 import java.time.ZoneId
 import java.util.TreeMap
@@ -60,6 +63,21 @@ data class TextMeasureRequest(
     val styleMask: Int,
     /** 每码位附加像素；0 = 不附加。 */
     val charSpace: Long = 0L,
+)
+
+/**
+ * 一张图元的 `DestBaseSize`（目标基准尺寸，像素）—— `ASprite.DestBaseSize` 的移植形状。
+ *
+ * 原版 `ConsoleImagePart` 在「`<img>` 无 `width` 属性」时用它按**图元真实宽高比**折算段宽：
+ * `DestBaseSize.Width * 折算高 / DestBaseSize.Height`（ConsoleImagePart.cs:69-70）。
+ * 移植侧的对应物就是 [SpritePool.Sprite.width] / [SpritePool.Sprite.height]
+ * （GraphicsBuffer.kt 的 Sprite KDoc：两字段即 `DestBaseSize.Width/Height`）。
+ */
+data class ImagePixelSize(
+    /** `DestBaseSize.Width`（像素）。 */
+    val widthPx: Int,
+    /** `DestBaseSize.Height`（像素）。 */
+    val heightPx: Int,
 )
 
 /** 宿主服务注入点：时间、配置、控制台状态等 M3+ 能力由宿主提供。 */
@@ -192,6 +210,30 @@ interface BuiltinHost {
     fun measureTextRun(request: TextMeasureRequest): Long? = null
 
     /**
+     * 图元尺寸查表（IMG-A4 I1）：`(src) -> DestBaseSize`，供无 `width` 属性的 `<img>` 按
+     * **图元真实宽高比**折算段宽（`ConsoleImagePart.cs:67-71`：取到图元就写
+     * `DestBaseSize.Width * 折算高 / DestBaseSize.Height`，不再量文案）。
+     *
+     * 入参 = `<img src='…'>` 的 `src` 属性原文；大小写归一由实现方负责 —— 原版
+     * `AppContents.GetSprite` 查表前 `ToUpper(InvariantCulture)`（AppContents.cs:45），
+     * [SpritePool.find] 已做同款归一。返回 null = **该名不在表里**，与原版 GetSprite
+     * 未命中（AppContents.cs:46-48 返回 null）同形。
+     *
+     * **null 属性语义（缺省）**= 宿主未接线：消费方按「图元缺失」回落 —— `cImage == null`
+     * 的那条官方路径（ConsoleImagePart.cs:61-64 把 `Text` 钉成 AltText，:110-114 的
+     * `SetWidth` 按文本度量量宽）⇒ 无 `width` 的 `<img>` 读数与接线前**逐位一致**，
+     * 纯 JVM 测试与旧宿主零变化。
+     *
+     * **接线状态（IMG-A4）**：生产宿主不需要覆写 —— [BuiltinEvalContext] 的装饰器
+     * [AuxMacroHost] 在委托值缺省时现读 `store.aux` 的 [SPRITE_SLOT] 池（[SpritePool.find]，
+     * `AppContents.GetSprite` 的移植同构）；真机的 sprite 表（含 CSV 资源登记尺寸）在
+     * `GameHost.installGraphics` 装配期就已装进 aux（ResourceContents.load）。显式覆写只留给
+     * 要脱离 aux 的装置/测试。`BuiltinHost by delegate` 包装类若想自己供表必须显式覆写本属性
+     * （委托陷阱，同 [measureTextRun] 上方的注释）。
+     */
+    val imageSizeOf: ((String) -> ImagePixelSize?)? get() = null
+
+    /**
      * 字体大小（`Config.FontSize`）。spec: ConfigData.cs:66（默认 18）。
      *
      * 只用于 HTML 家族的宽度↔字数换算：`HTML_STRINGLEN` 的 `2*width/FontSize`
@@ -307,8 +349,10 @@ interface BuiltinHost {
      * spec: EmueraConsole.cs:232 / MainWindow.cs:726 / ConfigData.cs:56（WindowX 默认 760）。
      *
      * 生产覆写：[com.eratw.port.core.proc.ConsoleBuiltinHost] 构造注入（GFX-06）——
-     * 单位是**像素**，与 [com.eratw.port.core.host.LineBufferConsoleSink] 的
-     * clientWidth（半角格）不是同一个量；真机喂内容区像素宽，headless 缺省 760。
+     * 单位是**脚本 px**（脚本坐标系，宿主报的设备内容区宽按 `设备字号 / 配置字号` 折回），
+     * 与 [com.eratw.port.core.host.LineBufferConsoleSink] 的 clientWidth（半角格）不是同一个量；
+     * 真机读**客户区**内容宽折算（窗口宽窄于屏宽时小于物理内容区宽），headless 缺省 760
+     * （两字号都未注入时折算恒等）。
      */
     val clientWidth: Long get() = DEFAULT_CLIENT_WIDTH
 
@@ -317,8 +361,27 @@ interface BuiltinHost {
      * = Config.WindowY - Config.LineHeight（菜单条高度在公式中相互抵消）。
      * spec: EmueraConsole.cs:234 / MainWindow.cs:726 / ConfigData.cs:57（WindowY 默认 480）,
      * :67（LineHeight 默认 19）。
+     *
+     * 生产覆写的单位与折算法同 [clientWidth]（脚本 px）。
      */
     val clientHeight: Long get() = DEFAULT_CLIENT_HEIGHT
+
+    /**
+     * 交给配置回填用的**脚本 px 版面宽**（R5.1 的同源读数）。
+     *
+     * `ConfigMethods.backfillWindowWidth` 在三层链**之后**用它回填 `Config.WindowX`
+     * （原版 `MainWindow.cs:726` 的「按配置开窗、把实际客户区宽回填」语义——`WindowX`
+     * 的终值是开窗**输出**，链前播种会被文件值/裸缺省盖住）；`seedHostState` 的链前
+     * 播种仍在（未接线时的 headless 兜底）。真机 View 把实际排版用的版面宽（设备 px）
+     * 按 `CellMetrics.scriptPixels` 的同一折算比反折成脚本 px 后，经
+     * [com.eratw.port.core.proc.ConsoleBuiltinHost] 注入。0/负数 = **未接线**（headless /
+     * 既有装置 / 桌面预览）⇒ 回填层不写，`WindowX` 保持链读数，行为与改动前完全相同。
+     *
+     * 为什么不直接改 [clientWidth] 的语义：`CLIENTWIDTH()` 要的是**客户区设备像素宽**
+     * （原版 `MainPicBox.Width`，spec: `EmueraConsole.cs:232`），而 `Config.WindowX` 条目要的是
+     * **脚本 px**；真机上两者差一个「真机字号 / 脚本字号」的比例，混用就是两把尺（R5.2）。
+     */
+    val windowWidthScriptPx: Long get() = 0L
 
     /** 每行 PRINTC 数（PRINTCPERLINE）。原版语义 = Config.PrintCPerLine。
      * spec: FunctionMethodCreator.cs:3922-3934 / ConfigData.cs:63（默认 3）。 */
@@ -571,16 +634,23 @@ data class ConsoleStyleSnapshot(
  * `Alignment` → 0/1/2），不持任何状态：同一份状态在改前改后各取一次快照会得到不同结果，
  * 得到相同结果就说明有人又存了一份。
  *
- * 三个 `Config` 项（[defaultFore]/[defaultBack]/[focusColor]）走参数而不是走 sink：
- * 它们是**配置**（`RESETCOLOR`/`RESETBGCOLOR` 的落点，FunctionIdentifier.cs:1501、:1515；
- * GETCOLOR 家族读取分支 FunctionMethodCreator.cs:3662、:3677、:3695），原版由 `Config` 回答；
- * 默认值直接引用 `LineBufferConsoleSink` 里那份带 `ConfigData.cs:68-70` 出处的常量，
- * 不再抄第二张表。真机装载 emuera.config 后由调用方把这几项换成配置值。
+ * 三个 `Config` 项（[defaultFore]/[defaultBack]/[focusColor]）是**配置现值**读数
+ * （`RESETCOLOR`/`RESETBGCOLOR` 的落点，FunctionIdentifier.cs:1501、:1515；
+ * GETCOLOR 家族读取分支 FunctionMethodCreator.cs:3662、:3677、:3695），原版由 `Config`
+ * 静态属性现答。解析次序：**显式参数 > sink 注入值 > 工厂常量** —— 缺省（null）时先安全
+ * 下溯 [LineBufferConsoleSink] 读 CONFIG-WIRE U5 的注入构造参数（GameSession 按
+ * emuera.config 条目现值喂入，对应原版 EmueraConsole 构造期从 Config 取初值的同一条链，
+ * EmueraConsole.cs:200/:206-208）；下溯落空（Noop / 诊断假 sink 等不携带注入的宿主）回落
+ * 工厂常量（`ConfigData.cs:68-70` 出处的 DEFAULT 三常量），与改前行为逐字相同。
+ * 下溯而不是把缺省口挂上 [ConsoleSink] 接口：接口文件不在本波文件清单内，且「不追踪
+ * 样式」的宿主本没有注入可言；[LineBufferConsoleSink] 的三个注入属性是只读 `val`，
+ * 不引入可变耦合。
  *
  * @param sink 控制台宿主（样式活状态的唯一来源）。
- * @param defaultFore `Config.ForeColor`（ConfigData.cs:68 = 192,192,192）。
- * @param defaultBack `Config.BackColor`（ConfigData.cs:69 = 0,0,0）。
- * @param focusColor `Config.FocusColor`（ConfigData.cs:70 = 255,255,0；
+ * @param defaultFore 显式覆盖 `Config.ForeColor`；null = 先读 sink 注入值
+ *   （`LineBufferConsoleSink.defaultForeColor`），回落工厂常量（ConfigData.cs:68 = 192,192,192）。
+ * @param defaultBack 显式覆盖 `Config.BackColor`；null = 同上（ConfigData.cs:69 = 0,0,0）。
+ * @param focusColor 显式覆盖 `Config.FocusColor`；null = 同上（ConfigData.cs:70 = 255,255,0；
  *   基准取证 pc-golden-root.txt:266 `FOCUS=16776960`）。
  * @param defaultFontName `Config.FontName`（ConfigData.cs:65）——只在宿主不追踪字体名时兜底；
  *   原版 never 读到空值：`StringStyle` 构造里空字体名就归一成 `Config.FontName`
@@ -588,27 +658,39 @@ data class ConsoleStyleSnapshot(
  */
 fun consoleStyleOf(
     sink: ConsoleSink,
-    defaultFore: IntArray = LineBufferConsoleSink.DEFAULT_FORE_COLOR.toRgbComponents(),
-    defaultBack: IntArray = LineBufferConsoleSink.DEFAULT_BACK_COLOR.toRgbComponents(),
-    focusColor: IntArray = LineBufferConsoleSink.DEFAULT_FOCUS_COLOR.toRgbComponents(),
+    defaultFore: IntArray? = null,
+    defaultBack: IntArray? = null,
+    focusColor: IntArray? = null,
     defaultFontName: String = LineBufferConsoleSink.DEFAULT_FONT_NAME,
-): ConsoleStyleSnapshot = ConsoleStyleSnapshot(
-    fore = sink.foregroundColor?.toRgbComponents(),
-    back = sink.backgroundColor?.toRgbComponents(),
-    defFore = defaultFore,
-    defBack = defaultBack,
-    focus = focusColor,
-    fontStyleMask = sink.fontStyle,
-    fontName = sink.fontName ?: defaultFontName,
-    // DisplayLineAlignment.cs:3-8 的声明序（LEFT/CENTER/RIGHT = 0/1/2）；
-    // ConsoleQueryMethods.kt:99-107 按同一编号映回字符串。
-    alignment = when (sink.alignment) {
-        Alignment.LEFT -> 0
-        Alignment.CENTER -> 1
-        Alignment.RIGHT -> 2
-    },
-    redraw = sink.redraw,
-)
+): ConsoleStyleSnapshot {
+    // 安全下溯取 U5 注入值：生产装配链（GameSession 构造 LineBufferConsoleSink 喂三色 →
+    // ConsoleBuiltinHost.console）恒是本类型；假 sink / Noop 下溯落空，回落工厂常量
+    // —— 既有出厂行为逐字不变（pc-golden-root.txt:266/:269 读数不漂移）。
+    val injected = sink as? LineBufferConsoleSink
+    return ConsoleStyleSnapshot(
+        fore = sink.foregroundColor?.toRgbComponents(),
+        back = sink.backgroundColor?.toRgbComponents(),
+        defFore = defaultFore
+            ?: injected?.defaultForeColor?.toRgbComponents()
+            ?: LineBufferConsoleSink.DEFAULT_FORE_COLOR.toRgbComponents(),
+        defBack = defaultBack
+            ?: injected?.defaultBackColor?.toRgbComponents()
+            ?: LineBufferConsoleSink.DEFAULT_BACK_COLOR.toRgbComponents(),
+        focus = focusColor
+            ?: injected?.focusColor?.toRgbComponents()
+            ?: LineBufferConsoleSink.DEFAULT_FOCUS_COLOR.toRgbComponents(),
+        fontStyleMask = sink.fontStyle,
+        fontName = sink.fontName ?: defaultFontName,
+        // DisplayLineAlignment.cs:3-8 的声明序（LEFT/CENTER/RIGHT = 0/1/2）；
+        // ConsoleQueryMethods.kt:99-107 按同一编号映回字符串。
+        alignment = when (sink.alignment) {
+            Alignment.LEFT -> 0
+            Alignment.CENTER -> 1
+            Alignment.RIGHT -> 2
+        },
+        redraw = sink.redraw,
+    )
+}
 
 /**
  * `0xRRGGBB` → `[r, g, b]`（与 ConsoleQueryMethods.kt:35-38 的 `encodeRgb` 互逆；
@@ -682,10 +764,40 @@ enum class EraDataState(val code: Long) {
 data class SaveDataCheck(val state: EraDataState, val mes: String)
 
 /**
+ * 成对变参组的装载期签名（编译相位用，原版 `ArgTypeList.MatchVariadicGroup`）。
+ *
+ * 原版 `FunctionMethod.cs:186-193`：某形态声明 `MatchVariadicGroup` 且尾部变参组存在时，
+ * 固定前缀 [fixedPrefix] 之后的实参必须按 [groupSize] 成组出现，否则报
+ * `Lang.Error.ArgsNotFitExpr`（`Lang.cs:3958`「引数の数が 前置+n ではありません」）。
+ * [exactFormArgs] 是同一函数的**第二份** `ArgTypeList`（数组形态）的精确实参数：
+ * `CheckArgumentTypeEx` 对 argumentTypeArrayEx 逐形态判定，某形态通过即 `array[i]==null`
+ * 并 `return null`（`FunctionMethod.cs:177` 循环、`:261-263` 成功返回；单形态快路 :286-289），
+ * 所以恰好命中数组形态时不能再按奇数判红（DT_ROW_ADD 的 4 参、DT_ROW_SET 的 5 参，
+ * 见 FunctionMethodCreator.cs:2141-2199）。[minGroupArgs] 是该形态的个数下界
+ * （`OmitStart >= 0` 时取 `OmitStart`，否则取 `ArgTypes.Count`，FunctionMethod.cs:183）；
+ * 低于它的个数属个数闸（ArgsCountNotMatches / NotEnoughArgs）职责，不在本组判。
+ *
+ * 本字段是**装载期校验的单一声明源**：`tools/erbcc` 的装载期检查读它，
+ * 不再另维护一份方法名白名单（漏登记即漏保护，2026-11-06 审查报告判词③）。
+ */
+data class VariadicGroup(
+    val fixedPrefix: Int,
+    val groupSize: Int,
+    val exactFormArgs: Int,
+    val minGroupArgs: Int,
+) {
+    /** 实参数 [n] 是否违反成对约束（true = 应上屏告警）。spec: FunctionMethod.cs:186-193 */
+    fun violates(n: Int): Boolean =
+        n != exactFormArgs && n >= minGroupArgs && (n - fixedPrefix) % groupSize != 0
+}
+
+/**
  * 单个内建方法的描述。
  *
  * [minArgs]/[maxArgs] 为参数个数边界（maxArgs = -1 表示可变参数，对应原版
  * ArgType.Variadic）；被调用时由桥统一检查（对应原版 CheckArgumentType 的个数分支）。
+ *
+ * [variadicGroup] 非空时声明装载期成对变参组校验（见 [VariadicGroup]）。
  *
  * [omitStart] 对应原版 `ArgTypeList.OmitStart`（spec: FunctionMethod.cs:129-132）：
  * -1 = 该形态没有省略位（走 [minArgs]/[maxArgs] 的旧文案）；>= 0 时 **[omitStart] 就是
@@ -705,11 +817,22 @@ class BuiltinMethod(
     val minArgs: Int = 0,
     val maxArgs: Int = 0,
     val omitStart: Int = -1,
+    val variadicGroup: VariadicGroup? = null,
     // 注意：eval 必须是最后一个参数——注册处大量使用尾随 lambda（如 BUILTIN(...) { ctx, args ->
     // ... }），Kotlin 尾随 lambda 绑定到最后一个参数；evalRef 由 VarMethods 用具名参数传入。
     val evalRef: ((BuiltinContext, List<Expr?>) -> Value)? = null,
     val eval: ((BuiltinContext, List<Value?>) -> Value)? = null,
 ) {
+    init {
+        // 成对变参组是装载期校验（FunctionMethod.cs:186-193），只有语句位保持裸 Expr
+        // 实参（evalRef → needsExprArgs → lowerPoolInstruction 不降级）才谈得上「成对」：
+        // 漏声明 evalRef 会把方法降成前导 _CALL，装载期看得见、运行期实参却已被提前求值。
+        // 这条不变量把「装载期成对声明」与「语句位惰性求值声明」钉在同一处，杜绝漏声明即漏保护。
+        require(variadicGroup == null || evalRef != null) {
+            "内建函数 $name 声明了成对变参组却未声明 evalRef（needsExprArgs 漏保护）"
+        }
+    }
+
     /** 调用路径上的个数检查。spec: FunctionMethod.cs:174-293（CheckArgumentTypeEx 的个数/省略位分支） */
     fun checkArity(args: Int) {
         if (omitStart >= 0) {
@@ -730,7 +853,7 @@ class BuiltinMethod(
 
 /**
  * 内建函数注册表。名字匹配 OrdinalIgnoreCase（对应 `Dictionary<string, FunctionMethod>(Config.StrComper)`，
- * spec: FunctionMethodCreator.cs:9042）。
+ * spec: FunctionMethodCreator.cs:9040）。
  */
 class BuiltinRegistry {
     // String.CASE_INSENSITIVE_ORDER 是逐字符大小写折叠，与 C# OrdinalIgnoreCase 等价（ASCII 域）
@@ -793,6 +916,17 @@ class BuiltinRegistry {
     /** 解析期用：函数返回类型；null = 不是内建函数（供 IdentifierResolver 委托）。 */
     fun returnType(name: String): OperandType? = map[name]?.retType
 
+    /**
+     * 该内建是否声明了 [BuiltinMethod.evalRef]（= 需要**未求值**的 [Expr] 实参）。
+     *
+     * 编译期用它判别「语句位内建方法」的参数层能否降级：原版 `METHOD_Instruction`
+     * 求值整个 `FunctionMethodTerm`，方法体拿到的是 `AExpression` 列表、由自己按序
+     * 求值（`FunctionMethodCreator.cs:2568-2619` 的 `DataTableCellSetMethod` 只在
+     * 行/列命中后才碰第 4 实参）。这类方法一旦在编译期被降成前导 `_CALL`，短路语义
+     * 就消失了。见 `ErbProgramCompiler.lowerPoolInstruction`。
+     */
+    fun needsExprArgs(name: String): Boolean = map[name]?.evalRef != null
+
     fun size(): Int = map.size
 
     fun names(): Set<String> = map.keys
@@ -819,6 +953,10 @@ object Builtins {
         registerMapMethods(r)
         registerDataTableMethods(r)
         registerGraphicsMethods(r)
+        // ---- 4.981 fork 新增：SPRITEANIMEFRAME（动画精灵帧数，废弃 GET_GIF_* 四条的替代）----
+        // 读侧单独成文件（`SpriteAnimeFrameMethod.kt`）：SPRITEANIMECREATE/ADDFRAME 的写侧在
+        // GraphicsMethods.kt，那份文件另有并行改动，帧数查询不必挤进同一个文件改。
+        registerSpriteAnimeFrameMethod(r)
         registerInputMethods(r)
         // MOUSE 族（MOUSEX/MOUSEY/MOUSEB/MOUSESKIP/FLOWINPUT/FLOWINPUTS）自 M4-I i-mouse 起
         // 由 MouseMethods 持有真相：MOUSEY 减 ClientHeight（EmueraConsole.cs:2264）、
@@ -846,6 +984,8 @@ object Builtins {
         // （函数口径回 Lang.cs 原文、CHKDATA 吃 SaveWiring 的 UseSaveFolder）。放在末尾：
         // 先让占位/旧注册铺好，真实现后注册覆盖；claimable 让路闸保证重复接线安全。
         registerSaveMethods(r)
+        // ---- W2-SQL：上游 fork 自加的 SQL 窄子集（原版 Emuera 无此族，占位名单里也没有）----
+        registerSqlMethods(r)
         return r
     }
 }
@@ -883,6 +1023,17 @@ private open class AuxMacroHost(
      */
     override val glyphMaskHost: GlyphMaskHost?
         get() = (delegate as? GlyphMaskHostProvider)?.glyphMaskHost
+
+    /**
+     * IMG-A4 I1：图元尺寸查表的**每 VM 装配** —— 委托显式给的优先（同 [macros] 的口径），
+     * 缺省时现读 `store.aux` 的 [SPRITE_SLOT] 池（`AppContents.GetSprite` 的移植同构，
+     * [SpritePool.find] 查表前归一大写）。池不在（headless / 纯 JVM 装置）= 宿主未接线，
+     * 消费方按「图元缺失」回落量 AltText，读数与接线前逐位一致（见 [BuiltinHost.imageSizeOf]）。
+     */
+    override val imageSizeOf: ((String) -> ImagePixelSize?)?
+        get() = delegate.imageSizeOf ?: aux.peek<SpritePool>(SPRITE_SLOT)?.let { pool ->
+            { name: String -> pool.find(name)?.let { ImagePixelSize(it.width, it.height) } }
+        }
 }
 
 /**
@@ -968,15 +1119,75 @@ open class BuiltinEvalContext(
         if (userFunctionTypes.isEmpty()) Builtins.registry.returnType(name)
         else userFunctionTypes[userFuncKey(name)] ?: Builtins.registry.returnType(name)
 
-    override fun callFunction(name: String, args: List<Value?>): Value {
+    /**
+     * 按名派发结果（PERF 2026-10-30）。优先级固定：用户 #FUNCTION 遮蔽同名内建
+     * （spec: IdentifierDictionary.cs:548-586）。[Undefined] 不是终态错误，只是
+     * 记忆化的「查无此函数」——在调用点抛「未定义的函数 $name」，文案与记忆化
+     * 之前逐字一致（不重复查表≠不报错）。
+     */
+    private sealed class FnDispatch {
+        class UserFn(val fn: (List<Value?>) -> Value) : FnDispatch()
+        class BuiltinFn(val m: BuiltinMethod) : FnDispatch()
+        object Undefined : FnDispatch()
+    }
+
+    /**
+     * 派发记忆（PERF 2026-10-30）：把每次函数调用要走的三次查找——
+     * ①名字归一（[userFuncKey]，ART 上 uppercase 逐字符分配）②用户函数表
+     * 命中 ③内建注册表命中——合并成按名一次的 HashMap 命中。名字集合有限
+     * （编译产物里出现过的调用点），表只增不减，稳态零分配。
+     *
+     * 失效前提（KDoc 契约，与 [userFuncKeys] 记忆同一姿势）：[userFunctions]
+     * 是构造期注入的只读表；[Builtins.registry] 只在类初始化（buildRegistry）
+     * 期间写入、运行期只读；VM 单线程（ADR-003），同一进程的 EvalContext 只被
+     * 同一线程触碰。若未来引入运行期注销/重注册内建或按调用更换用户函数表，
+     * 必须先失效本表。
+     */
+    private val dispatchMemo = HashMap<String, FnDispatch>(32)
+
+    private fun dispatchFor(name: String): FnDispatch {
+        val hit = dispatchMemo[name]
+        if (hit != null) return hit
         // 用户 #FUNCTION 覆盖同名内建。spec: IdentifierDictionary.cs:548-586
-        if (userFunctions.isNotEmpty()) userFunctions[userFuncKey(name)]?.let { return it(args) }
-        val m = Builtins.registry[name]
-            ?: throw CodeEE("未定义的函数 $name")
-        m.checkArity(args.size)
-        m.eval?.let { return it(this, args) }
-        // 走到这说明该函数需要引用参数（evalRef），但调用方没有走引用路径
-        throw CodeEE("函数 $name 的第 1 个参数必须是变量引用")
+        val resolved: FnDispatch =
+            if (userFunctions.isNotEmpty()) {
+                userFunctions[userFuncKey(name)]?.let { FnDispatch.UserFn(it) }
+                    ?: Builtins.registry[name]?.let { FnDispatch.BuiltinFn(it) }
+                    ?: FnDispatch.Undefined
+            } else {
+                // 空用户表：绝大多数语料走这条，名字归一与用户表查找整个跳过
+                Builtins.registry[name]?.let { FnDispatch.BuiltinFn(it) } ?: FnDispatch.Undefined
+            }
+        dispatchMemo[name] = resolved
+        return resolved
+    }
+
+    /**
+     * 实参求值（PERF 2026-10-30）：替换 `argExprs.map { e -> e?.toValue(this) }`——
+     * `map` 走集合函数路径（每次调用新建 ArrayList + 函数对象，超容量还会扩容
+     * 复制）；这里预分配恰好容量逐个填入。求值顺序保持从左到右，与 `map` 一致。
+     * 空实参共享不可变空表（全库核对过：没有任何内建/用户函数会改动传入的
+     * 实参列表，调用方全部只读）。
+     */
+    private fun evalArgs(argExprs: List<Expr?>): List<Value?> {
+        if (argExprs.isEmpty()) return emptyList()
+        val out = ArrayList<Value?>(argExprs.size)
+        for (e in argExprs) out.add(e?.toValue(this))
+        return out
+    }
+
+    override fun callFunction(name: String, args: List<Value?>): Value {
+        when (val d = dispatchFor(name)) {
+            is FnDispatch.UserFn -> return d.fn(args)
+            is FnDispatch.BuiltinFn -> {
+                val m = d.m
+                m.checkArity(args.size)
+                m.eval?.let { return it(this, args) }
+                // 走到这说明该函数需要引用参数（evalRef），但调用方没有走引用路径
+                throw CodeEE("函数 $name 的第 1 个参数必须是变量引用")
+            }
+            FnDispatch.Undefined -> throw CodeEE("未定义的函数 $name")
+        }
     }
 
     /**
@@ -985,15 +1196,16 @@ open class BuiltinEvalContext(
      * 其余回落值求值。
      */
     open override fun callFunctionRef(name: String, argExprs: List<Expr?>): Value {
-        if (userFunctions.isNotEmpty()) userFunctions[userFuncKey(name)]?.let {
-            return it(argExprs.map { e -> e?.toValue(this) })
-        }
-        val m = Builtins.registry[name] ?: throw CodeEE("未定义的函数 $name")
-        m.checkArity(argExprs.size)
-        m.evalRef?.let { return it(this, argExprs) }
-        return m.eval.let { fn ->
-            fn ?: throw CodeEE("未定义的函数 $name")
-            fn(this, argExprs.map { e -> e?.toValue(this) })
+        when (val d = dispatchFor(name)) {
+            is FnDispatch.UserFn -> return d.fn(evalArgs(argExprs))
+            is FnDispatch.BuiltinFn -> {
+                val m = d.m
+                m.checkArity(argExprs.size)
+                m.evalRef?.let { return it(this, argExprs) }
+                val fn = m.eval ?: throw CodeEE("未定义的函数 $name")
+                return fn(this, evalArgs(argExprs))
+            }
+            FnDispatch.Undefined -> throw CodeEE("未定义的函数 $name")
         }
     }
 }

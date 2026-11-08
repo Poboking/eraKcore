@@ -1,0 +1,27 @@
+# erbc compile manifest —— 确定性构建清单（同一语料两次编译逐字节相同）
+manifest-format 2
+format-version 2
+container-magic ERBC
+container-version 2
+erbcc 0.1.0-SNAPSHOT
+compiler-digest 8185fdd6f2db2c2611f634a745c710a9dedd7d9c8eb58be417d6f5549347d382
+compiler-sources 204
+build-mode full
+corpus-root C:\DSH\eratw-安卓移植计划\eratw-android\tools\erbcc-rs\tests\data\rust-manifest\corpus
+source-files 3
+binary-skipped 0
+source 00_const.ERH 39 d2c3dd2ee38cce51fdf28f02e913f8eb1bbb4a014a9ea070eeb0c76f7fc38bd7
+source 01_main.ERB 64 82009f58dc417df8bd7b1472aa25b35a04f4efd8ee91f7e79a4da0b9eeab3a89
+source 02_util.ERB 22 dd37ba567eb52cb6791cf83a2e93f72ffa694f4d1925f5de9b9e91aa1fe2880b
+artifacts 3
+artifact erbc.v1/program.erbc 950 152f8d4430ce5a5b0e2ead87696608a603ff1cc0f4396fb7c54949439a4db9e3
+artifact erbc.v1/program.meta 680 4a0a02a801aa3d53f32420784b2e30d9a8d39d74a6183799c922048b2388a01b
+artifact erbc.v1/program.stmt.idx 48 7f1575abc2b0242ba476b19db48681ef4c443eb8aea080a3c78c374e94d95827
+program instructions 8
+program statements 6
+program functions 2
+program strings 0
+program constants 0
+program expressions 0
+program global-slots 0
+program entry-function 0

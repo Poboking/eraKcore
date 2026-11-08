@@ -10,6 +10,7 @@ import com.eratw.port.core.expr.StrLiteral
 import com.eratw.port.core.expr.VarRef
 import com.eratw.port.core.loader.ProgramLoader
 import org.junit.jupiter.api.Assumptions
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import java.nio.file.Files
 import java.nio.file.Path
@@ -37,6 +38,8 @@ import java.nio.file.Path
  * 堆口径：走 [ProgramLoader.loadMapped]（真机同款惰性分段解码）。整池 1,716,636 条
  * 在 3g test worker 内实测可容纳（本装置首次跑通即 30 s 量级）。
  */
+// realArtifacts 家标记（realarttag 路 2026-11-06）：产物门控钉，供 gateRealArtifacts 圈定；判定逻辑一字不动。
+@Tag("realArtifacts")
 class RedOProductInspectTest {
 
     /** 与 `StmtOffsetSidecarTest` / `LoadTimingProbe` 同一套产物查找顺序。 */

@@ -34,7 +34,6 @@ from array import array
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_FONTS = [
     r"C:/Windows/Fonts/simhei.ttf",
-    r"D:/DSH/eratw-安卓移植计划/eratw-画蛇添足版eratw4.980/font/Saitamaar.ttf",
     r"C:/Windows/Fonts/msgothic.ttc",
 ]
 # 口径判定用的取样码点：每类一个代表，覆盖 Kernel.Grid.isFullWidth 的争议区。

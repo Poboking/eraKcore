@@ -77,7 +77,7 @@ class AssignExecutionTest {
         val env = SemTestEnv()
         env.run(parseLine("DAY = 10"))
         val e = kotlin.runCatching { env.run(parseLine("DAY /= 0")) }.exceptionOrNull()
-        assertEquals("除数为 0", e?.message, "整式求值与普通表达式同源（OperatorMethodManager.cs:121-157）")
+        assertEquals("除数为0的除法运算", e?.message, "整式求值与普通表达式同源（OperatorMethodManager.cs:121-157）")
     }
 
     @Test

@@ -41,7 +41,7 @@ import com.eratw.port.core.vars.DimParseConfig
 import com.eratw.port.core.vars.DimParser
 import com.eratw.port.core.vars.DimSpec
 import com.eratw.port.erbcc.LabelDef
-import com.eratw.port.erbcc.SymbolTable
+import com.eratw.port.erbcc.LabelTable
 import com.eratw.port.erbcc.Symbols
 import com.erbcc.bridge.buildExprCallTable
 import com.erbcc.bridge.buildFuncDims
@@ -200,8 +200,8 @@ object RealCorpusCompile {
             allFiles
         }
 
-        // 1) 全量符号表（装载序 = SymbolTable.loadOrder；含 ERH 宏/常量）
-        val symbolTable = SymbolTable.build(corpus.root)
+        // 1) 全量符号表（装载序 = LabelTable.loadOrder；含 ERH 宏/常量）
+        val symbolTable = LabelTable.build(corpus.root, sizeConsts = ::sizeConsts)
         val allDefs = symbolTable.nameKeys.flatMap { symbolTable.defsOf(it) }.sortedBy { it.defIndex }
         val stats0 = runCatching { symbolTable.stats() }.getOrNull()
         val eventNames = symbolTable.nameKeys.count { k ->
@@ -391,11 +391,35 @@ object RealCorpusCompile {
                 (gameDataForFold?.registry?.systemKeywordTables() ?: emptyMap())
         // 数据面**只有一份**：快照用上面这份表（含 CMP-59 的 ERD 第二跳），不另建一份 ——
         // 否则 ERD 表在这条路上失效，装置与侧车的 GETNUM 折叠面再次分叉。
-        val foldSnapshot = DimFoldSnapshot.load(
-            csvDir,
-            keywordTables = keywordTables,
-            consoleWidth = DimFoldSnapshot.PC_CONSOLE_WIDTH_CELLS,
-        )
+        // 折叠快照并入用户全局声明（mergedVarSizes 不动点，与 erbcc mergeGlobalUserDimSizes /
+        // GameSession 重解析链同源同参）：「#DIM C_List, VARSIZE("DLC_Toggle")」一类
+        // 用户全局 → 用户全局的引用只吃系统快照折不出，声明被静默丢后运行期报
+        // 「未定义的变量 C_List」——6db9b14d 只并了 erbcc 与 GameSession 两条腿，
+        // 本装置这条腿漏并，OptionPatchPageProbeTest 实测踩中。
+        val foldSnapshot = run {
+            val systemFold = DimFoldSnapshot.load(
+                csvDir,
+                keywordTables = keywordTables,
+                consoleWidth = DimFoldSnapshot.PC_CONSOLE_WIDTH_CELLS,
+            )
+            DimFoldSnapshot(
+                SystemVariableBootstrap.mergedVarSizes(
+                    base = systemFold.varSizes,
+                    declarations = globalDimDecls.map {
+                        SystemVariableBootstrap.RawDeclaration(it.raw, it.file, it.line)
+                    },
+                    config = DimParseConfig(
+                        macros = symbolTable.config.macros,
+                        intConstants = consts,
+                        systemSaveInBinary = systemSaveInBinary,
+                    ),
+                    keywordTables = keywordTables,
+                    consoleWidth = DimFoldSnapshot.PC_CONSOLE_WIDTH_CELLS,
+                ),
+                keywordTables,
+                DimFoldSnapshot.PC_CONSOLE_WIDTH_CELLS,
+            )
+        }
         val dimCfg = DimParseConfig(
             macros = symbolTable.config.macros,
             intConstants = consts,
@@ -454,7 +478,9 @@ object RealCorpusCompile {
         var entrySeq = allDefs.size + 10_000
 
         fun compileOne(sigKey: String, def: LabelDef, body: List<Statement>, params: List<String>, paramRefs: List<String> = params) {
-            val returnsStr = pre.funcTypes[def.key.uppercase()] == OperandType.STR
+            val funcType = pre.funcTypes[def.key.uppercase()]
+            val returnsStr = funcType == OperandType.STR
+            val returnsFloat = funcType == OperandType.FLOAT
             val arity = if (params.isNotEmpty()) params.size else maxOf(def.argCount, def.argIntCount + def.argStrCount)
             val (argInt, argStr) = argCounts(params, def)
             fun meta(index: Int) = FuncMeta(
@@ -463,15 +489,17 @@ object RealCorpusCompile {
                 isOnly = def.isOnly, isPri = def.isPri, isLater = def.isLater, isSingle = def.isSingle,
                 argIntCount = argInt, argStrCount = argStr,
                 returnsStr = returnsStr,
+                returnsFloat = returnsFloat,
                 localSize = def.localSize, localsSize = def.localsSize,
+                floatLocalSize = def.floatLocalSize,
                 defIndex = def.defIndex, position = "${def.file}:${def.lineNo}",
             )
             val fb = try {
-                compiler.compileFunction(FuncSig(sigKey, arity, def.isMethod, returnsStr, paramRefs), body, known, exprCalls)
+                compiler.compileFunction(FuncSig(sigKey, arity, def.isMethod, returnsStr, paramRefs, returnsFloat = returnsFloat), body, known, exprCalls)
             } catch (e: CompileException) {
                 compileFailures.add("$sigKey [${def.file}:${def.lineNo}] ${e.message}")
                 try {
-                    compiler.compileFunction(FuncSig(sigKey, arity, def.isMethod, returnsStr, paramRefs), emptyList(), known, exprCalls)
+                    compiler.compileFunction(FuncSig(sigKey, arity, def.isMethod, returnsStr, paramRefs, returnsFloat = returnsFloat), emptyList(), known, exprCalls)
                 } catch (e2: Exception) {
                     compileFailures.add("$sigKey 空体桩也失败: ${e2::class.simpleName}: ${e2.message}")
                     return

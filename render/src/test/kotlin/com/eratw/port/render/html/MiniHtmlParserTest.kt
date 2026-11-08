@@ -72,7 +72,9 @@ class MiniHtmlParserTest {
         val runs = m.toRuns("<font color='#FF0000'>A</font>B")
         assertEquals(0xFF0000, runs[0].fore)
         assertEquals(MiniHtml.FORE_DEFAULT, runs[1].fore)
-        assertEquals(MiniHtml.BACK_DEFAULT, runs[0].back)
+        // 原版 HTML 段不带背景：背景是控制台级活值 bgColor（EmueraConsole.cs:1816 整屏清色），
+        // run 的 back 只承载 div 染整行矩形，HTML_PRINT 展平段恒 null（2026-11 时停背景修复）。
+        assertEquals(null, runs[0].back)
     }
 
     /** 嵌套 font 缺省属性继承外层（:1651-1667）。 */
@@ -262,6 +264,55 @@ class MiniHtmlParserTest {
         expect(MiniHtmlErrorKind.ATTRIBUTE_ON_STYLE_TAG, "<b x='1'>A</b>")
         expect(MiniHtmlErrorKind.ATTRIBUTE_ON_STYLE_TAG, "<br x='1'>")
         expect(MiniHtmlErrorKind.ATTRIBUTE_ON_STYLE_TAG, "<nobr x='1'>A</nobr>")
+    }
+
+    /**
+     * 样式位自闭合（R-F4）：原版标签名读到 `/` 就截（`_searchValues` 含 '/'，
+     * LexicalAnalyzer.cs:28、ReadSingleIdentifierROS :315-329 ⇒ 名是 "br"），游标停在
+     * '/' ≠ '>' ⇒ 进 Analyse（HtmlManager.cs:1047-1050）；'/' 被收成
+     * `OperatorWord(Div)` 装进属性集（LexicalAnalyzer.cs:780 算符支、:791 ret.Add、
+     * ReadOperator 的 '/' → Div 在 :425-426 且不吞 '>'）⇒ 属性集**非空** ⇒
+     * AttributeSetToTag（br :1082-1084、b/i/u/s :1071-1073、nobr :1088-1091）。
+     * 本层修正前把 "br/" 当整体名、错抛 TAG_ERROR，这组用例钉回原类别。
+     *
+     * TODO(verify) 与波次裁定的分歧（登记，不按裁定改）：裁定预期「裸 `<br/>` 照原版
+     * 成功路径」。本地 1.824 反编译读不出成功 —— :1083 的判据是 `wordCollection != null`
+     * 而非「含真属性」，裸 '/' 产出的词元集照样非空 ⇒ 原版此处必抛。
+     * 卡点：无新版反编译、也无 PC 实跑读数可比（语料 0 处 `<br/>`/`<div/>`，
+     * 2026-10-28 grep 实测）。若新版确在 Analyse 前吃裸 '/'，改本用例两条裸支即可，
+     * 其余（属性路 AttributeSetToTag、属性消费标签 TAG_ERROR）不受影响。
+     */
+    @Test
+    fun `样式位自闭合归 AttributeSetToTag 不是标签名错误`() {
+        expect(MiniHtmlErrorKind.ATTRIBUTE_ON_STYLE_TAG, "<br/>")
+        expect(MiniHtmlErrorKind.ATTRIBUTE_ON_STYLE_TAG, "<br />")
+        expect(MiniHtmlErrorKind.ATTRIBUTE_ON_STYLE_TAG, "<br x='1'/>")
+        expect(MiniHtmlErrorKind.ATTRIBUTE_ON_STYLE_TAG, "<b/>A</b>")
+        expect(MiniHtmlErrorKind.ATTRIBUTE_ON_STYLE_TAG, "<i/>")
+        expect(MiniHtmlErrorKind.ATTRIBUTE_ON_STYLE_TAG, "<nobr/>")
+        // 名字识别本身随截断修正归位：div 落 UNSUPPORTED_TAG（原错为 TAG_ERROR）、
+        // 未知名两侧同抛 HtmlTagError（HtmlManager.cs:1677，switch 穿透）
+        expect(MiniHtmlErrorKind.UNSUPPORTED_TAG, "<div/>")
+        expect(MiniHtmlErrorKind.TAG_ERROR, "<hr/>")
+        // 普通 br 成功路径不受影响
+        assertEquals(1, m.parse("<br>").lines.size)
+    }
+
+    /**
+     * 属性消费标签的自闭合（R-F4 另一半）：三元组走查撞上 '/' 词元后 null-cast 断链
+     * （p :1123-1129 的合取判据、font :1618-1621、img :1170-1173），switch 的 break
+     * 直落 :1677 HtmlTagError —— 类别是 TAG_ERROR，不是「缺属性」也不是「未知属性名」。
+     */
+    @Test
+    fun `属性标签自闭合走查断链落 HtmlTagError`() {
+        expect(MiniHtmlErrorKind.TAG_ERROR, "<p/>")
+        expect(MiniHtmlErrorKind.TAG_ERROR, "<p align='center'/>")
+        expect(MiniHtmlErrorKind.TAG_ERROR, "<font/>")
+        expect(MiniHtmlErrorKind.TAG_ERROR, "<font color='red'/>")
+        expect(MiniHtmlErrorKind.TAG_ERROR, "<img/>")
+        expect(MiniHtmlErrorKind.TAG_ERROR, "<img src='a'/>")
+        // 属性在前、'/' 在后的非法色仍先在 color 支抛（走查按词元序，:1624+ 的 switch）
+        expect(MiniHtmlErrorKind.ATTRIBUTE_NOT_NUMBER, "<img src='a' width='big'/>")
     }
 
     // ---------------------------------------------------------------- img

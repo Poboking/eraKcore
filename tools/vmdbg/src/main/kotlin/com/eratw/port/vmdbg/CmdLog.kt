@@ -71,7 +71,7 @@ object CmdLog {
         } else {
             prefixRaw
         }
-        val assembled = Assembler.assemble(Args.parse(assembleArgs))
+        val assembled = Assembler.assemble(Args.parse(assembleArgs), out = out)
 
         val outPath = Path.of(prefix.valueOr("--out", defaultLogPath(prefix))).toAbsolutePath().normalize()
         Files.createDirectories(outPath.parent)

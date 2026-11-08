@@ -31,6 +31,22 @@ sealed class Token {
         override val text get() = value.toString()
     }
 
+    /**
+     * 小数/科学计数法字面量（`0.7`、`1.0`、`1.5e-3`）。
+     *
+     * [raw] 保留源码拼写（供报错定位与调试；数值语义只认 [value]）。
+     * 与 `TokenType.INTEGER` 的分界见 ErbLexer.readNumberToken 的判据。
+     */
+    data class Float(
+        val value: Double,
+        val raw: String,
+        override val line: Int,
+        override val col: Int,
+    ) : Token() {
+        override val type get() = TokenType.FLOAT
+        override val text get() = raw
+    }
+
     /** LiteralStringWord */
     data class StringLiteral(
         val value: String,

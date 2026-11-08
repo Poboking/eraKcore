@@ -144,6 +144,20 @@ class BootMetadataTest {
                         defaultsInt = longArrayOf(1L, -2L),
                     ),
                 ),
+                // 4.981 fork 的 `#DIMF`（浮点私有变量）；v2 起随侧车往返。
+                // v3 起带浮点初值 `defaultsFloat`（单值广播，见 DimSpec 的 KDoc）。
+                BootMetadata.PrivateDim(
+                    "RATE_UPDATE",
+                    DimSpec(
+                        name = "倍率",
+                        isStr = false,
+                        dims = intArrayOf(1),
+                        isFloat = true,
+                        isStatic = false,
+                        isPrivate = true,
+                        defaultsFloat = 0.25,
+                    ),
+                ),
             ),
             functions = listOf(
                 FuncMeta(
@@ -154,6 +168,8 @@ class BootMetadataTest {
                     index = 7, key = "EVENTFIRST#3", name = "EVENTFIRST",
                     isEvent = true, isOnly = true, isSingle = true, returnsStr = true,
                     argIntCount = 1, argStrCount = 2, localSize = 10, localsSize = 5,
+                    // v3 可选原子：`#LOCALFSIZE 16`（>0 才写出，见 FORMAT_VERSION 的 KDoc）。
+                    floatLocalSize = 16,
                     defIndex = 3, position = "COMMON.ERB:900",
                 ),
                 FuncMeta(
@@ -167,6 +183,13 @@ class BootMetadataTest {
                     index = 11, key = "EVENTTRAIN#5", name = "EVENTTRAIN",
                     isEvent = true, isPri = true, isLater = true,
                     defIndex = 21, position = "COMMON.ERB:901",
+                ),
+                // 4.981 `#FUNCTIONF`（第三种 MethodType）：floatLocalSize = 0 ⇒ 侧车写
+                // `0 1` 成对原子（见 FORMAT_VERSION 的 KDoc），读侧据此无歧义还原。
+                FuncMeta(
+                    index = 12, key = "FLT_METHOD", name = "FLT_METHOD",
+                    isMethod = true, returnsFloat = true,
+                    defIndex = 31, position = "COMMON.ERB:902",
                 ),
             ),
             fileByKey = mapOf(
@@ -222,6 +245,8 @@ class BootMetadataTest {
             assertEquals(p.spec.isCharaData, d.spec.isCharaData, "私有 #DIM[$i] isCharaData")
             assertEquals(p.spec.isStatic, d.spec.isStatic, "私有 #DIM[$i] isStatic")
             assertEquals(p.spec.isPrivate, d.spec.isPrivate, "私有 #DIM[$i] isPrivate")
+            assertEquals(p.spec.isFloat, d.spec.isFloat, "私有 #DIM[$i] isFloat（#DIMF）")
+            assertEquals(p.spec.defaultsFloat, d.spec.defaultsFloat, "私有 #DIM[$i] defaultsFloat（#DIMF 初值）")
             assertEquals(p.spec.dims.toList(), d.spec.dims.toList(), "私有 #DIM[$i] dims")
             assertEquals(p.spec.defaultsInt?.toList(), d.spec.defaultsInt?.toList(), "私有 #DIM[$i] defaultsInt")
             assertEquals(p.spec.defaultsStr, d.spec.defaultsStr, "私有 #DIM[$i] defaultsStr")
@@ -327,6 +352,90 @@ class BootMetadataTest {
         val comboBack = BootMetadata.parse(sample().encodeText()).functions.single { it.key == "EVENTTRAIN#5" }
         assertTrue(combo.isPri && combo.isLater, "夹具自检：样例必须含 isPri+isLater 真值")
         assertEquals(combo, comboBack, "isPri+isLater 组合往返")
+    }
+
+    // ------------------------------------------------------------------
+    // v3：`#DIMF` 初值（defaultsFloat）与 `#LOCALFSIZE`（floatLocalSize）
+    // ------------------------------------------------------------------
+
+    /**
+     * v3 两个可选原子：`private-dim` 行尾的浮点初值、`function` 行 `localsSize` 之后的
+     * `floatLocalSize`。
+     *
+     * 写侧「非默认才写」：样例里 `倍率 = 0.25` 与 `#LOCALFSIZE 16` 各产生一个原子，
+     * 其余行与 v2 逐字节相同（真语料全部是后者，产物字节不受影响）。
+     */
+    @Test
+    fun `v3 浮点初值与 LOCALFSIZE 原子写出并逐字段读回`() {
+        val original = sample()
+        val text = original.encodeText()
+        assertTrue(text.contains("format-version 3\n"), "格式版本必须升到 3: $text")
+        assertTrue(
+            text.contains("private-dim \"RATE_UPDATE\" \"倍率\" 0 0 0 0 0 0 0 1 1 1 - - 0.25\n"),
+            "浮点初值必须以裸浮点写在 private-dim 行尾: $text",
+        )
+        assertTrue(
+            text.contains("function 7 3 \"EVENTFIRST#3\" \"EVENTFIRST\" 101 1 2 10 5 16 \"COMMON.ERB:900\"\n"),
+            "floatLocalSize 必须写在 localsSize 之后、position 之前: $text",
+        )
+        // 没有浮点初值 / #LOCALFSIZE 的声明：行尾与 v2 相同（不写 `-` 占位）
+        assertTrue(
+            text.contains("private-dim \"SYSTEM_TITLE\" \"LOC_OK\" 0 0 0 0 0 0 1 0 0 1 - -\n"),
+            "无浮点初值的声明不得多出原子: $text",
+        )
+
+        val decoded = BootMetadata.parse(text)
+        assertEquals(0.25, decoded.privateDims.single { it.spec.name == "倍率" }.spec.defaultsFloat, "float 初值往返")
+        assertEquals(
+            null,
+            decoded.privateDims.single { it.spec.name == "LOC_OK" }.spec.defaultsFloat,
+            "没写初值必须读回 null",
+        )
+        assertEquals(16, decoded.functions.single { it.key == "EVENTFIRST#3" }.floatLocalSize, "floatLocalSize 往返")
+        assertEquals(0, decoded.functions.single { it.key == "SYSTEM_TITLE" }.floatLocalSize, "未声明 #LOCALFSIZE = 0")
+        assertEquals(original.functions, decoded.functions, "函数元数据全字段往返（含 floatLocalSize）")
+        assertEquals(text, decoded.encodeText(), "v3 二次编码逐字节闭环")
+    }
+
+    /**
+     * 旧侧车（v2）与「v3 头但没写新原子」（erbcc 尚未接线的形态）都必须可读：
+     * 浮点初值读成 null、`floatLocalSize` 读成 0，其余字段照旧。
+     */
+    @Test
+    fun `v2 侧车与缺省原子的 v3 侧车按零值读入`() {
+        // 手写的最小 v2 侧车：function 行没有 floatLocalSize，private-dim 行尾只有 defaultsStr。
+        val v2 = """
+            |format-version 2
+            |engine "erbcc test"
+            |program-sha256 -
+            |labels 0
+            |files 0
+            |data-sections 0
+            |functions 1
+            |function 7 3 "EVENTFIRST" "EVENTFIRST" 1 1 2 10 5 "COMMON.ERB:900"
+            |global-dims 0
+            |private-dims 1
+            |private-dim "F" "RATE" 0 0 0 0 0 0 0 1 1 4 - -
+            |dim-config 1
+            |macros 0
+            |constants 0
+            |str-constants 0
+            |end
+            |
+        """.trimMargin()
+        val old = BootMetadata.parse(v2)
+        assertEquals(0, old.functions.single().floatLocalSize, "v2 function 行无 floatLocalSize ⇒ 0")
+        val oldSpec = old.privateDims.single().spec
+        assertTrue(oldSpec.isFloat, "v2 的 isFloat 位仍要读")
+        assertEquals(null, oldSpec.defaultsFloat, "v2 private-dim 无浮点初值 ⇒ null")
+        assertEquals(listOf(4), oldSpec.dims.toList(), "dims 不受新原子影响")
+
+        // 同一个文件只把版本号改成 3：v3 头 + 缺省原子（erbcc 接线前的真实产物形态）。
+        val v3NoAtoms = v2.replaceFirst("format-version 2", "format-version 3")
+        val next = BootMetadata.parse(v3NoAtoms)
+        assertEquals(0, next.functions.single().floatLocalSize, "v3 缺省 floatLocalSize ⇒ 0")
+        assertEquals(null, next.privateDims.single().spec.defaultsFloat, "v3 缺省浮点初值 ⇒ null")
+        assertEquals(next.functions, BootMetadata.parse(next.encodeText()).functions, "读出后再编码仍闭环")
     }
 
     @Test
@@ -456,7 +565,10 @@ class BootMetadataTest {
 
     @Test
     fun `更高版本被拒绝`() {
-        val text = sample().encodeText().replaceFirst("format-version 1", "format-version 2")
+        val text = sample().encodeText().replaceFirst(
+            "format-version ${BootMetadata.FORMAT_VERSION}",
+            "format-version ${BootMetadata.FORMAT_VERSION + 1}",
+        )
         val e = assertFailsWith<BootMetaFormatException> { BootMetadata.parse(text) }
         assertTrue(e.message!!.contains("格式版本"), "错误消息应说明版本: ${e.message}")
     }
@@ -509,5 +621,99 @@ class BootMetadataTest {
         val text = meta.encodeText()
         assertTrue(text.contains("program-sha256 -\n"), "缺省头应为 -: $text")
         assertNull(BootMetadata.parse(text).programSha256, "读回应为 null")
+    }
+
+    // ------------------------------------------------------------------
+    // v3 function 行可选原子：floatLocalSize / returnsFloat
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `浮点方法 returnsFloat 往返且非浮点行字节不变`() {
+        val original = BootMetadata(
+            functions = listOf(
+                // 非浮点、无 #LOCALFSIZE：行必须与 v2 逐字节相同（position 紧跟 localsSize）。
+                FuncMeta(index = 0, key = "PLAIN", name = "PLAIN", defIndex = 1, position = "A.ERB:1"),
+                // 浮点方法、floatLocalSize = 0：成对写 `0 1`。
+                FuncMeta(
+                    index = 1, key = "FLT", name = "FLT", isMethod = true, returnsFloat = true,
+                    defIndex = 2, position = "A.ERB:2",
+                ),
+                // 浮点方法 + #LOCALFSIZE 12：`12 1`。
+                FuncMeta(
+                    index = 2, key = "FLT_LOCAL", name = "FLT_LOCAL", isMethod = true,
+                    returnsFloat = true, floatLocalSize = 12, defIndex = 3, position = "A.ERB:3",
+                ),
+            ),
+        )
+        val text = original.encodeText()
+        assertTrue(
+            text.contains("function 0 1 \"PLAIN\" \"PLAIN\" 0 0 0 0 0 \"A.ERB:1\"\n"),
+            "非浮点行必须与 v2 相同（无可选原子）: $text",
+        )
+        assertTrue(text.contains("function 1 2 \"FLT\" \"FLT\" 2 0 0 0 0 0 1 \"A.ERB:2\"\n"), "成对原子 0 1: $text")
+        assertTrue(
+            text.contains("function 2 3 \"FLT_LOCAL\" \"FLT_LOCAL\" 2 0 0 0 0 12 1 \"A.ERB:3\"\n"),
+            "floatLocalSize 与 returnsFloat 成对写: $text",
+        )
+        val decoded = BootMetadata.parse(text)
+        assertEquals(original.functions, decoded.functions, "三行都必须逐字段往返")
+        assertTrue(decoded.functions[1].returnsFloat && !decoded.functions[1].returnsStr)
+        assertEquals(12, decoded.functions[2].floatLocalSize)
+        assertTrue(decoded.functions[2].returnsFloat)
+        assertEquals(text, decoded.encodeText(), "模型 → 文本 → 模型 → 文本 逐字节闭环")
+    }
+
+    @Test
+    fun `v1v2 侧车无浮点原子 读回默认值`() {
+        // 真 v2 行没有 function 可选原子：用只含普通函数的模型编码，再把版本头改成 2。
+        val v2Model = BootMetadata(
+            functions = listOf(
+                FuncMeta(index = 0, key = "PLAIN", name = "PLAIN", defIndex = 1, position = "A.ERB:1"),
+            ),
+        )
+        val v2 = v2Model.encodeText()
+            .lineSequence()
+            .map { if (it.startsWith("format-version ")) "format-version 2" else it }
+            .joinToString("\n")
+        val decoded = BootMetadata.parse(v2)
+        assertEquals(v2Model.functions, decoded.functions, "v2 无该原子 ⇒ 两者默认值")
+        assertTrue(decoded.functions.none { it.returnsFloat })
+        assertEquals(0, decoded.functions.single().floatLocalSize)
+    }
+
+    @Test
+    fun `v3 旧侧车单个裸整数仍按 floatLocalSize 读`() {
+        // 旧 v3 写出端只产 floatLocalSize（没有 returnsFloat）；读侧必须兼容单原子形态。
+        val oldV3 = BootMetadata(
+            functions = listOf(
+                FuncMeta(
+                    index = 0, key = "BIG_LOCAL", name = "BIG_LOCAL", isMethod = true,
+                    floatLocalSize = 16, defIndex = 1, position = "A.ERB:1",
+                ),
+            ),
+        ).encodeText()
+        assertTrue(
+            oldV3.contains("function 0 1 \"BIG_LOCAL\" \"BIG_LOCAL\" 2 0 0 0 0 16 \"A.ERB:1\"\n"),
+            "单原子形态: $oldV3",
+        )
+        val decoded = BootMetadata.parse(oldV3).functions.single()
+        assertEquals(16, decoded.floatLocalSize, "单裸整数 = floatLocalSize")
+        assertTrue(!decoded.returnsFloat, "只有一个裸整数时不得把 16 误读成 returnsFloat")
+    }
+
+    @Test
+    fun `非方法带 returnsFloat 位被拒绝`() {
+        // 写出侧不拦（FuncMeta 是公开构造面），读侧按原版语义严卡：MethodType 只存在于方法。
+        val text = BootMetadata(
+            functions = listOf(
+                FuncMeta(index = 0, key = "NOT_METHOD", name = "NOT_METHOD", returnsFloat = true, position = "A.ERB:1"),
+            ),
+        ).encodeText()
+        assertTrue(
+            text.contains("function 0 0 \"NOT_METHOD\" \"NOT_METHOD\" 0 0 0 0 0 0 1 \"A.ERB:1\"\n"),
+            "成对原子 0 1: $text",
+        )
+        val e = assertFailsWith<BootMetaFormatException> { BootMetadata.parse(text) }
+        assertTrue(e.message!!.contains("returnsFloat"), "错误消息: ${e.message}")
     }
 }

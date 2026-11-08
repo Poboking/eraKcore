@@ -33,6 +33,22 @@ interface VariableReader {
     fun readStr(name: String, indices: LongArray): String
 
     /**
+     * 浮点变量读出（4.981 fork 新增的第三型；1.824 参考实现只有 long/string 两条通道，
+     * `AExpression` 只有 GetIntValue/GetStrValue，spec: AExpression.cs:23-40）。
+     *
+     * 存在理由：`OperandType.FLOAT` 的 [VarRef] 必须有**独立**的读通道。缺省实现
+     * [Expr.getFloatValue] 是「整型通道宽化」（`getIntValue().toDouble()`），浮点变量若走
+     * 那条路，落到存储层就是按整数读 —— 1.25 会变成 1.0，`LOCALF += A * 0.01` 这类
+     * 累加静默错值（编译过、执行错，正是本波要修的那一段）。
+     *
+     * 缺省实现**报错而不是兜底返回 0.0**：本接口的非浮点实现方（只读快照、测试假体）
+     * 没有浮点列，静默给 0.0 会把「读不到」伪装成「读到了零」。真实实现方
+     * （[com.eratw.port.core.vars.VariableStore]）覆写后，非浮点变量的报错文案由存储层给出。
+     */
+    fun readFloat(name: String, indices: LongArray): Double =
+        throw com.eratw.port.core.err.CodeEE("变量池不提供浮点读取：$name")
+
+    /**
      * 当前**私有变量作用域**的身份（T2-61 的装期绑定用），没有作用域概念时返回 null。
      *
      * `VarRef` 把「名字 → 句柄」的解析结果缓存在自己的字段里，缓存键就是
@@ -55,6 +71,14 @@ interface VariableReader {
      * OperatorMethodManager.cs:601-655
      */
     fun plusInt(name: String, indices: LongArray, delta: Long): Long
+
+    /**
+     * [plusInt] 的浮点侧（`LOCALF += 1.5` 一类在解析期**不折常量**时由语句层调用）。
+     *
+     * 口径与整数侧一致：加完返回新值。缺省同样报错，不兜底 0.0，理由见 [readFloat]。
+     */
+    fun plusFloat(name: String, indices: LongArray, delta: Double): Double =
+        throw com.eratw.port.core.err.CodeEE("变量池不提供浮点增量写入：$name")
 
     /**
      * 字符串关键字下标 → 整数下标（如 `ITEM:药` 按 Item.csv 表转编号）。
@@ -88,6 +112,14 @@ interface VariableWriter {
     fun writeInt(name: String, indices: LongArray, value: Long)
 
     fun writeStr(name: String, indices: LongArray, value: String)
+
+    /**
+     * 浮点写通道（4.981 fork 的第三型）。缺省报错而不是空实现：
+     * 空实现会让「写进了一个没有浮点列的池」静默丢值，比报错更难查。
+     * 真实实现见 [com.eratw.port.core.vars.VariableStore.writeFloat]。
+     */
+    fun writeFloat(name: String, indices: LongArray, value: Double): Unit =
+        throw com.eratw.port.core.err.CodeEE("变量池不提供浮点写入：$name")
 }
 
 /**
@@ -180,6 +212,14 @@ interface VariableHandles {
 sealed class Value {
     data class IntV(val v: Long) : Value()
     data class StrV(val v: String) : Value()
+    /**
+     * 浮点结果（4.981 升版）。
+     *
+     * 1.824 参考实现只有 long/string 两种值（`AExpression` 的 GetIntValue/GetStrValue 双通道，
+     * spec: AExpression.cs:23-40），浮点是 4.981 新语义 ⇒ 本类的引入无 C# 证据，见 `expr/Expr.kt`
+     * 中 `OperandType.FLOAT` / `FloatLiteral` 的 KDoc 与 TODO(verify)。
+     */
+    data class FloatV(val v: Double) : Value()
 
     companion object {
         /**

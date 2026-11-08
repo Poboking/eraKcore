@@ -1,5 +1,7 @@
 package com.eratw.port.render.grid
 
+import com.eratw.port.core.host.FontDisplayWidth
+import com.eratw.port.core.host.StaticFontDisplayWidth
 import com.eratw.port.render.DisplayRow
 import com.eratw.port.render.Grid
 import com.eratw.port.render.RenderLine
@@ -108,6 +110,15 @@ class LineFolder(
     val clientWidth: Int,
     private val buttonWrap: Boolean = DEFAULT_BUTTON_WRAP,
     private val compatiLinefeedAs1739: Boolean = DEFAULT_COMPATI_LINEFEED_AS_1739,
+    /**
+     * 字体感知宽度尺（[FontDisplayWidth]）：缺省静态网格，逐值等价于接线前的
+     * [Grid.cells]。真机装配点由 `ConsoleScreen` 传入，必须与 core 层
+     * `LineBufferConsoleSink`、[com.eratw.port.render.displaylist.DisplayList]、
+     * [com.eratw.port.render.button.ButtonLayer]、[com.eratw.port.render.adapter.ConsoleAdapter]
+     * 是**同一只实例** —— 二次折行若还按静态表，核心层已按真实宽放行的一行会在这里被
+     * 重新劈开（老虎机 82 个 `▂` 静态表给 164 格，横屏 136 列必折）。
+     */
+    private val fontWidth: FontDisplayWidth = StaticFontDisplayWidth,
 ) {
 
     init {
@@ -178,7 +189,14 @@ class LineFolder(
     private fun group(runs: List<TextRun>): ArrayList<FoldSegment> {
         val out = ArrayList<FoldSegment>()
         for (run in runs) {
-            val piece = FoldPiece(skeleton = run.copy(text = ""), text = Grid.expandTabs(run.text))
+            // 零复制帧路（2026-10-31 OOM 报告：发布期栈顶 TextRun.copy → FoldPiece.toRun）：
+            // skeleton 直接复用入参 run —— FoldPiece 从不读 skeleton.text（文本一律由本件
+            // 的 text 持有），原样传等于把「样式来源」与「文本来源」彻底分家，一处 copy 都省了。
+            val piece = FoldPiece(
+                skeleton = run,
+                text = Grid.expandTabs(run.text),
+                fontWidth = fontWidth,
+            )
             val isButton = run.kind == RunKind.BUTTON
             val last = if (out.isEmpty()) null else out[out.size - 1]
             if (isButton || last == null || last.isButton) {
@@ -255,7 +273,10 @@ class LineFolder(
         var used = 0
         var index = 0
         while (index < s.length) {
-            val w = pieceCellsAt(s, index)
+            // 前缀宽度与段宽必须同一把尺：改为按码位问 [fontWidth]，而不是逐码元查
+            // `Grid.cellWidth`。静态实现下逐值相等（合法代理对 4 格 / 孤立代理半 2 格），
+            // 字体感知实现下则让 `SETFONT` 段的折行切点跟着真实 advance 走。
+            val w = piece.cellsAt(index)
             if (used + w > remaining) {
                 break
             }
@@ -344,12 +365,17 @@ class LineFolder(
  * 负载的图形件走 `ConsoleImagePart` / `ConsoleShapePart`（不可拆，
  * `ConsoleImagePart.cs:35`、`ConsoleShapePart.cs:8-10`），判定见 [canDivide]。
  *
- * [skeleton] 只携带除文本以外的样式与按钮信息（其 `text` 恒为空串），真正的文本由 [text]
- * 持有并在拆段时原地缩短 —— 与 `ConsoleStyledString.DivideAt`（`ConsoleStyledString.cs:54-73`）
+ * [skeleton] 是样式与按钮信息的来源（group 直传入参 run 原样复用，不再 copy 出空文本
+ * 副本）；**它自身的 text 不再作为文本来源读**，真正的文本由 [text] 持有并在拆段时原地
+ * 缩短 —— 与 `ConsoleStyledString.DivideAt`（`ConsoleStyledString.cs:54-73`）
  * 「左半原地截断、右半新建同样式实例」一致：右半继承 Font、Color、ButtonColor、StringStyle，
  * 图形件还继承 `graphic` 负载（这正是不可拆的原因：拆一次就多画一张图）。
  */
-private class FoldPiece(val skeleton: TextRun, var text: String) {
+private class FoldPiece(
+    val skeleton: TextRun,
+    var text: String,
+    private val fontWidth: FontDisplayWidth,
+) {
 
     /**
      * 本件占的半角格数。
@@ -365,9 +391,32 @@ private class FoldPiece(val skeleton: TextRun, var text: String) {
      * 也把行宽扣回一张图的量 —— 两者必须同时成立，否则居中平移算错。
      *
      * 正值图形件两种数法逐值相同（`emitGraphicRun` 就按 `widthCells` 铺空格），所以本条只改
-     * 负 space 一支；文本件仍走 [Grid.cellsExpanded]（TAB 已在 [LineFolder] 的 `group` 里展开）。
+     * 负 space 一支；**文本件走 [fontWidth] 的整串入口**（TAB 已在 [LineFolder] 的 `group`
+     * 里展开），缺省静态实现与旧 [Grid.cellsExpanded] 逐值相同。
      */
-    var cells: Int = skeleton.graphic?.widthCells ?: Grid.cellsExpanded(text)
+    var cells: Int = skeleton.graphic?.widthCells ?: fontWidth.cells(text, skeleton.fontName)
+
+    /**
+     * 前缀扫描用的单码点宽度：与 [cells] 同一把尺。
+     *
+     * 按**码位**问 [FontDisplayWidth.codePointCells]（合法代理对合成一个码位），
+     * 索引步进仍由 [LineFolder.step] 给的 `Char` 数决定。静态实现下：
+     * 合法代理对 `cp > 0xFFFF` → 4 格、孤立代理项半 → 2 格，与 companion 的
+     * [LineFolder.pieceCellsAt]（逐码元 2 + 2 / 2）逐值相等，故既有折行切点不变。
+     */
+    fun cellsAt(index: Int): Int {
+        val s = text
+        val first = s[index]
+        val codePoint = if (
+            Character.isHighSurrogate(first) && index + 1 < s.length &&
+            Character.isLowSurrogate(s[index + 1])
+        ) {
+            Character.toCodePoint(first, s[index + 1])
+        } else {
+            first.code
+        }
+        return fontWidth.codePointCells(codePoint, skeleton.fontName)
+    }
 
     /**
      * 图形段（M10-GFX 的 [InlineGraphic] 负载，经 `adapter/HtmlRunFlatten` 展平而来）不可拆，
@@ -400,14 +449,21 @@ private class FoldPiece(val skeleton: TextRun, var text: String) {
 
     /** 拆出后半件（本件只留前缀），对应 `ConsoleStyledString.DivideAt(index)`。 */
     fun splitAt(charCount: Int): FoldPiece {
-        val rest = FoldPiece(skeleton = skeleton, text = text.substring(charCount))
+        val rest = FoldPiece(skeleton = skeleton, text = text.substring(charCount), fontWidth = fontWidth)
         text = text.substring(0, charCount)
-        cells = Grid.cells(text)
+        // 与 group / maxPrefixChars 同一把尺：拆出来的左半宽度按本段字体重算。
+        cells = fontWidth.cells(text, skeleton.fontName)
         return rest
     }
 
-    /** 落到显示行上的 run：样式与 `buttonValue` 原样继承，只换文本。 */
-    fun toRun(): TextRun = skeleton.copy(text = text)
+    /**
+     * 落到显示行上的 run：文本未与 [skeleton] 脱钩（本件从未被 [splitAt]、TAB 展开也没改写
+     * 文本 —— 两者都会把 `text` 换成新串实例）时**整只复用** skeleton 免分配；否则样式
+     * 原样继承、只换文本。判据用引用相等：快照的 run 是不可变 data class，同行多处复用
+     * 同一实例与旧语义（每件一个新 copy）逐字段全等，只少了分配（2026-10-31 OOM 报告里
+     * 发布帧路的 TextRun.copy 正是栈顶分配点，而未拆分件占绝大多数）。
+     */
+    fun toRun(): TextRun = if (text === skeleton.text) skeleton else skeleton.copy(text = text)
 
     override fun toString(): String = text
 }

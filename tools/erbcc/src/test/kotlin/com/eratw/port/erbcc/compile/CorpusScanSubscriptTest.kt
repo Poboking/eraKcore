@@ -15,6 +15,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -129,10 +131,11 @@ class CorpusScanSubscriptTest {
 
     @Test
     fun 语料实况_裸字符串表不登记氷精() {
-        // 语料门同款环境变量；缺省时跳过（与其它语料依赖用例口径一致）
-        val corpus = System.getenv("ERATW_CORPUS") ?: return
+        // 语料门同款环境变量；缺省 = 显式 skip（不许裸 return 落成静默 PASS），设了缺文件 = 判红（照 resourcexml 范式）。
+        val corpus = System.getenv("ERATW_CORPUS")
+        assumeTrue(corpus != null, "未设置 ERATW_CORPUS：语料实况门无判定对象，显式 skip")
         val f = Path.of(corpus, "魔改内容", "AnonTW搬运口上函数库.ERB")
-        if (!Files.isRegularFile(f)) return
+        assertTrue(Files.isRegularFile(f), "语料实况门的门文件不在场：$f（ERATW_CORPUS=$corpus）——语料根缺文件是事件，不许静默空转")
         val scan = CorpusScan.scan(listOf(f))
         assertNull(scan.global.resolveVariable("氷精", null), "151 行的裸字符串表被误登记成全局变量")
     }

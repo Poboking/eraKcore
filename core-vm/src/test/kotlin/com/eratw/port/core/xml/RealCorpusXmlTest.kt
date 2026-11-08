@@ -11,7 +11,6 @@ import com.eratw.port.core.expr.VariableReader
 import com.eratw.port.core.fn.BuiltinEvalContext
 import com.eratw.port.core.vars.DimSpec
 import com.eratw.port.core.vars.VariableStore
-import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
@@ -34,12 +33,24 @@ import kotlin.test.assertTrue
 /**
  * 真实语料 XML 回归闸：移植解析器 vs JDK `DocumentBuilderFactory`（仅测试内 oracle）。
  *
- * 语料规模（`ERATW_CORPUS` 指向的已发布游戏目录，外部读数）：
- * - 93 个 XML / 2,804,124 字节；
- * - 26,178 个元素 / 75,791 个属性；
- * - 全部 UTF-8、带 XML 声明（单引号 + `encoding='utf_8'`），无 CDATA / DOCTYPE / 实体 /
- *   制表符 / 回车，正文只有元素与缩进空白。下一个 boot 阶段 `ResourceManager.ERB`
- *   正是用 `XML_DOCUMENT` + `XML_GET_BYNAME` 遍历这些文件。
+ * **按根取列**（xmlcorpus 波，2026-11-06）：本类不再钉单一版本读数。语料根只认
+ * `ERATW_GAMEDIR`（闸配方 AGENTS.md §5），版本档由 [com.eratw.port.boot.CorpusProfile.detect]
+ * 从 `ERB/DIM.ERH` 的 `NOW_VERSION` 判出，两列读数集中在 [XmlCorpusFacts]：
+ * 4.980 = `eratw-画蛇添足版eratw4.980`、4.981 = `eraTW4.981-261017-EAGLOV3`。
+ *
+ * 语料规模（两根实读）：
+ * - 4.980：98 个 XML —— `resources` 下 93 个精灵表 + `lang/emuera.zhs.xml` +
+ *   `plugins` 下 4 个；3,263,831 字节 / 48,518 元素 / 76,902 属性；
+ * - 4.981：4 个（全在 `plugins/`；`resources` 下精灵表在该版已改成 CSV ⇒ 0 个 XML），
+ *   609,494 字节 / 35,271 元素 / 46 属性
+ *   （.NET 8 DOM 口径：xmlns 声明也是 XmlAttribute；dotnet 8.0.425 对 schema.xml 实测
+ *   elems=20 / attrs=46，根上 id、xmlns、xmlns:xs、xmlns:msdata 全计入）；
+ * - 带 BOM 的三份：tw_csv_chs / tw_taste_chs / schema；bbas_dataset 不带（两根同值，实读）。
+ *   schema 声明写 encoding="utf-16" 实际是 UTF-8 —— LoadXml(string) 不校验声明编码（.NET 8 实测）。
+ * - BOM 口径：.NET 8 `LoadXml(string)` 对 U+FEFF 开头的串直接抛 XmlException，移植
+ *   XmlParser.parse 则剥掉继续解析 —— 该语义分歧已按 `C-XML-DIVERGENCE@2` 方向乙（OD-1
+ *   2026-11-02）登记为**已知有意分歧**（真实链路 LOADTEXT 走 File.ReadAllText 已剥 BOM ⇒ 不可达）；
+ *   对拍两边统一喂剥 BOM 文本。
  *
  * oracle 口径：
  * - 用字符流 `InputSource(StringReader(text))` 喂 JDK（等价 C# `LoadXml(string)`）。
@@ -50,46 +61,39 @@ import kotlin.test.assertTrue
  * - 文本比较：JDK DOM 里纯空白文本节点先按 .NET `PreserveWhitespace=false` 丢弃，
  *   其余文本逐字比较（比折叠空白更严；语料正文本来就是空文本）。
  *
- * 语料缺失（未设 `ERATW_CORPUS` / 找不到 resources 目录）时 assume-skip；
- * 路径一律从环境变量推，不写死主机目录。
+ * 语料缺失（未设 `ERATW_GAMEDIR` / 目录不是语料根 / `plugins` 下缺 xml）**判红不跳过**：
+ * 旧实现在这里挂 `Assumptions.assumeTrue`，环境变量一缺用例就静默通过 —— 那是假闸，
+ * 与 `core/config/ConfigChainTest` 的口径对齐后改成本类的红线。
  */
 
-private const val CORPUS_ENV = "ERATW_CORPUS"
-
-/** 从 `ERATW_CORPUS` 向上找含 resources 子目录的游戏根；`.../ERB` 与游戏根两种形态都接受。 */
-private fun corpusResourcesRoot(): Path? {
-    val raw = System.getenv(CORPUS_ENV)?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-    val start = runCatching { Paths.get(raw).toAbsolutePath().normalize() }.getOrNull() ?: return null
-    if (!Files.isDirectory(start)) return null
-    var cur: Path? = start
-    var depth = 0
-    while (cur != null && depth < 8) {
-        if (Files.isDirectory(cur.resolve("resources"))) return cur
-        cur = cur.parent
-        depth++
-    }
-    return null
-}
-
-/** resources 目录下递归的全部 xml，按路径排序；没有文件时返回 null（走 assume-skip）。 */
-private fun realXmlFiles(): List<Path>? {
-    val root = corpusResourcesRoot() ?: return null
-    val files = Files.walk(root.resolve("resources")).use { stream ->
+/** 游戏根下递归的全部 xml，按路径排序；一个都没有 ⇒ 语料根不完整，判红。 */
+private fun realXmlFiles(facts: XmlCorpusFacts): List<Path> {
+    val files = Files.walk(facts.root).use { stream ->
         stream.filter { Files.isRegularFile(it) }
             .filter { it.fileName.toString().lowercase(Locale.ROOT).endsWith(".xml") }
             .sorted(compareBy { it.toString() })
             .toList()
     }
-    return files.ifEmpty { null }
+    if (files.isEmpty()) {
+        throw AssertionError(
+            "${facts.root}（${facts.profile}）下递归不到任何 xml：语料根形态不符 eraTW 规约",
+        )
+    }
+    return files
 }
 
 private fun readUtf8(file: Path): String = Files.readString(file, StandardCharsets.UTF_8)
 
-private fun resourceFile(root: Path, vararg parts: String): Path {
-    var p = root.resolve("resources")
-    for (part in parts) p = p.resolve(part)
-    return p
-}
+/**
+ * 剥掉串首 U+FEFF。.NET 8 `LoadXml(string)` 对带 BOM 字符的串直接抛 XmlException
+ * （dotnet 8.0.425 实测："Data at the root level is invalid. Line 1, position 1."），
+ * 移植 XmlParser.parse 则剥掉继续解析 —— 该分歧已按 `C-XML-DIVERGENCE@2` 方向乙登记为
+ * **已知有意分歧**，不在本测试里钉成绿；对拍口径两边统一取剥 BOM 文本。真实链路上
+ * LOADTEXT 走 File.ReadAllText，BOM 由 StreamReader 消费（FunctionMethodCreator.cs:8082），
+ * 本就不把 BOM 带进 LoadXml。
+ */
+private fun withoutBomChar(text: String): String =
+    if (text.startsWith("\uFEFF")) text.substring(1) else text
 
 // ---------------------------------------------------------------------------
 // JDK oracle 与结构签名
@@ -259,40 +263,32 @@ class RealCorpusXmlTest {
 
     companion object {
         /**
-         * 参数化源：每个真实 xml 一个用例；语料缺失时给一个空哨兵，
-         * 让用例走 `Assumptions.assumeTrue` 跳过而不是零用例报错。
+         * 参数化源：每个真实 xml 一个用例。语料根缺失 / 形态不符 ⇒ [XmlCorpusFacts.detect]
+         * 抛 AssertionError（**不再**退回空哨兵走 assume-skip：跳过等于把这道闸关掉）。
          */
         @JvmStatic
         fun xmlFiles(): List<Arguments> {
-            val files = realXmlFiles() ?: return listOf(Arguments.of("", 0L))
-            return files.map { Arguments.of(it.toAbsolutePath().toString(), Files.size(it)) }
+            val facts = XmlCorpusFacts.detect()
+            return realXmlFiles(facts).map { Arguments.of(it.toAbsolutePath().toString(), Files.size(it)) }
         }
     }
 
     @ParameterizedTest(name = "[{index}] {0}")
     @MethodSource("xmlFiles")
     fun `真实语料 XML 结构与 JDK DOM 对拍`(filePath: String, byteSize: Long) {
-        val root = corpusResourcesRoot()
-        Assumptions.assumeTrue(
-            root != null && filePath.isNotEmpty(),
-            "未设置 $CORPUS_ENV 或找不到 resources 目录，跳过真实 XML 对拍",
-        )
+        val facts = XmlCorpusFacts.detect()
         val file = Paths.get(filePath)
         assertEquals(byteSize, Files.size(file), "文件字节数与发现时不一致：$filePath")
-        val text = readUtf8(file)
-        val relative = root!!.relativize(file).toString()
+        val text = readUtf8(file).let(::withoutBomChar)
+        val relative = facts.root.relativize(file).toString()
         assertSameSignature(relative, signatureOf(XmlParser.parse(text)), signatureOf(oracleParse(text)))
     }
 
-    /** 语料规模 + 解析读数：任一回退说明语料/入口/解析器变了，先查这里。 */
+    /** 语料规模 + 解析读数（按根取列）：任一回退说明语料/入口/解析器变了，先查这里。 */
     @Test
     fun `语料规模与解析读数`() {
-        val files = realXmlFiles()
-        Assumptions.assumeTrue(
-            files != null,
-            "未设置 $CORPUS_ENV 或找不到 resources 目录，跳过真实 XML 对拍",
-        )
-        val list = files!!
+        val facts = XmlCorpusFacts.detect()
+        val list = realXmlFiles(facts)
         val totalBytes = list.sumOf { Files.size(it) }
         var elements = 0
         var attributes = 0
@@ -306,12 +302,21 @@ class RealCorpusXmlTest {
             }
             count(root)
         }
-        assertEquals(93, list.size, "语料 XML 文件数")
-        assertEquals(2_804_124L, totalBytes, "语料 XML 总字节")
-        assertEquals(26_178, elements, "元素总数")
-        assertEquals(75_791, attributes, "属性总数")
+        assertEquals(
+            facts.xmlFiles,
+            list.size,
+            "语料 XML 文件数（按根取列：4.980 含 resources 下 93 个精灵表 + lang 下 1 个；" +
+                "4.981 全在 plugins/）",
+        )
+        assertEquals(facts.xmlBytes, totalBytes, "语料 XML 总字节（按根取列）")
+        assertEquals(facts.xmlElements, elements, "元素总数（按根取列）")
+        assertEquals(
+            facts.xmlAttributes,
+            attributes,
+            "属性总数（按根取列；.NET 8 DOM 口径：xmlns 声明也计入；.NET 实测 schema.xml 根 4 属性、全档 46）",
+        )
         println(
-            "RealCorpusXmlTest 对拍规模：${list.size} 个 XML / $totalBytes 字节 / " +
+            "RealCorpusXmlTest 对拍规模（${facts.profile}）：${list.size} 个 XML / $totalBytes 字节 / " +
                 "$elements 元素 / $attributes 属性",
         )
     }
@@ -340,127 +345,146 @@ class RealCorpusXmlTest {
         assertEquals("<r>a\r\nb</r>", raw.outerXml())
     }
 
-    /** `XmlPath` 每种路径形式 + `XmlPool` 池语义，全部用真实文件。 */
+    /**
+     * `XmlPath` 每种路径形式 + `XmlPool` 池语义，全部用真实文件。
+     *
+     * 4.981 的 anime.xml / kagerou.xml / Resource.xml 都已随 resources 精灵表移除
+     * （4.980 的对拍锚点见 git 历史），换 plugins 下在位的等价锚点（两根都在位）：
+     * `tw_csv_chs.xml`（`<map><p><k>…</k><v>…</v></p>`，4.980 = 4400 个 p / 4.981 = 7804 个）、
+     * `bbas_dataset.xml`（`<DocumentElement><bbas_dataset>…`，4.980 = 160 条 / 4.981 = 167 条，
+     * 含条件谓词目标）、`schema.xml`（根通配步 + 属性步目标；带前缀的名字步在 .NET SelectNodes
+     * 没有 XmlNamespaceManager 时直接抛 XPathException，移植同口径，锚点不能用前缀）。
+     */
     @Test
     fun `XmlPath 与 XmlPool 在真实文件上的查询`() {
-        val root = corpusResourcesRoot()
-        Assumptions.assumeTrue(
-            root != null,
-            "未设置 $CORPUS_ENV 或找不到 resources 目录，跳过真实 XML 查询",
-        )
-        val anime = XmlParser.parse(readUtf8(resourceFile(root!!, "As06MARK-IV", "anime", "anime.xml")))
-        val kagerou = XmlParser.parse(readUtf8(resourceFile(root, "AI arts", "kagerou.xml")))
-        val resource = XmlParser.parse(readUtf8(resourceFile(root, "EN_IMG", "327", "Resource.xml")))
-        val as06 = XmlParser.parse(readUtf8(resourceFile(root, "As06MARK-IV", "As06MARK-IV.xml")))
+        val facts = XmlCorpusFacts.detect()
+        val map = XmlParser.parse(readUtf8(facts.root.resolve("plugins/tw_csv_chs.xml")))
+        val bbas = XmlParser.parse(readUtf8(facts.root.resolve("plugins/bbas_dataset.xml")))
+        val schema = XmlParser.parse(readUtf8(facts.root.resolve("plugins/schema.xml")))
 
-        // 子轴 / 通配 / 位置谓词 / 属性步
-        assertEquals(8, XmlPath.select(anime, "/sprites/*").size)
-        assertEquals(8, XmlPath.select(anime, "/sprites/a").size)
-        assertEquals(1, XmlPath.select(anime, "/sprites/a[1]").size)
-        assertEquals(1, XmlPath.select(anime, "/sprites/a[last()]").size)
-        assertEquals("500", XmlPath.select(anime, "/sprites/a[1]/@width").single().value)
-        assertEquals("300", XmlPath.select(anime, "/sprites/a[last()]/@height").single().value)
-        assertEquals(121, XmlPath.select(anime, "/sprites/a[1]/f").size)
-        assertEquals(84, XmlPath.select(anime, "/sprites/a[last()]/f").size)
-        // 后代轴 / 属性存在谓词
-        assertEquals(740, XmlPath.select(anime, "//f").size)
-        assertEquals(8, XmlPath.select(anime, "/sprites/a[@name]").size)
-        // 文档节点 / 属性通配 / 子元素文本谓词 / 自身文本谓词（语料正文为空串）
-        assertEquals("#document", XmlPath.select(anime, "/").single().name)
-        val firstAttrs = XmlPath.select(anime, "/sprites/a[1]/@*")
-        assertEquals(listOf("name", "width", "height"), firstAttrs.map { it.name })
-        assertEquals("500", firstAttrs[1].value)
-        assertEquals(8, XmlPath.select(anime, "/sprites/a[f='']").size)
-        // 逐文本段口径（dotnet 8.0.31 实测此文件同值 0）：`<a>` 只有 `<f>` 子元素、无直接文本
-        // 子节点 ⇒ `[text()='']` 恒 0（旧 InnerText 口径把 `<a>` 的 InnerText 当空串命中 8，是
-        // FN-10 第二条近似；本行随 [XmlPath] 修复改为原版的 0）。`[f='']` 走子元素字符串值不变。
-        assertEquals(0, XmlPath.select(anime, "/sprites/a[text()='']").size)
-
-        // 属性相等谓词的两种写法（ASCII 值，避免测试源码里的中文）
-        assertEquals(153, XmlPath.select(kagerou, "/sprites/i").size)
-        assertEquals(153, XmlPath.select(kagerou, "//i").size)
-        assertEquals(1, XmlPath.select(kagerou, "/sprites/i[@param='980,720,180,270']").size)
+        // 子轴 / 通配 / 位置谓词 / 文本步
+        assertEquals(facts.mapEntries, XmlPath.select(map, "/map/p").size)
+        assertEquals(facts.mapEntries, XmlPath.select(map, "/map/*").size)
+        assertEquals(1, XmlPath.select(map, "/map/p[1]").size)
+        assertEquals(1, XmlPath.select(map, "/map/p[last()]").size)
+        // 首个有正文的条目按根取列：4.980 = p[3]（p[1] 是纯空格行、p[2] 是空行）、4.981 = p[1]
         assertEquals(
-            "AI arts/63_rectangular.webp",
-            XmlPath.select(kagerou, "/sprites/i[@param='980,720,180,270']/@src").single().value,
+            facts.textEntryK,
+            XmlPath.select(map, "/map/p[${facts.textEntry}]/k/text()").single().value,
         )
-        assertEquals(27, XmlPath.select(resource, "/sprites/i[@src='EN_IMG/327/51_alt_Face.webp']").size)
-        assertEquals(5, XmlPath.select(resource, "/sprites/i[@param='0,0,180,180']").size)
-        assertEquals(216, XmlPath.select(as06, "/sprites/i").size)
+        assertEquals(facts.lastEntryK, XmlPath.select(map, "/map/p[last()]/k/text()").single().value)
+        assertEquals(
+            facts.bbasFirstRecordChildren,
+            XmlPath.select(bbas, "/DocumentElement/bbas_dataset[1]/*").size,
+            facts.bbasFirstRecordChildrenNote,
+        )
+        // 后代轴 / 子元素文本谓词
+        assertEquals(facts.mapEntries, XmlPath.select(map, "//k").size)
+        assertEquals(facts.bbasRecords, XmlPath.select(bbas, "//id").size)
+        assertEquals(1, XmlPath.select(map, "/map/p[k='${facts.uniqueEntryK}']").size)
+        assertEquals(1, XmlPath.select(bbas, "//bbas_dataset[id='3']/name").size)
+        // 两根同值，实读：id=3 的 name = 卡娜
+        assertEquals("卡娜", XmlPath.select(bbas, "//bbas_dataset[id='3']/name").single().innerText)
+        // 文档节点 / 属性步（属性在 schema 上）/ 子元素文本谓词（语料正文为空串）
+        // schema 根元素名带 xs: 前缀，但带前缀的名字步在 .NET SelectNodes 没有 XmlNamespaceManager
+        // 时直接抛 XPathException（.NET 8 实测消息与本移植 XmlPathException 逐字一致），故用根通配步。
+        assertEquals("#document", XmlPath.select(map, "/").single().name)
+        // NewDataSet 两根同值，实读
+        assertEquals("NewDataSet", XmlPath.select(schema, "/*/@id").single().value)
+        assertEquals(
+            facts.schemaAttributeWildcard,
+            XmlPath.select(schema, "/*/*/@*").size,
+            "根的子元素（xs:element）属性全被通配命中（两根同值 5，实读）。原注释登记的根级 xmlns " +
+                "分歧已由 XML-FIVE X5（2026-11-06）翻案复刻：移植属性步现在与 .NET 同口径过滤 " +
+                "xmlns/xmlns:p 声明，根级步不再踩分歧（见下方根级锚点）",
+        )
+        // XML-FIVE X5 的真语料锚点：schema.xml 根上带 id/xmlns/xmlns:xs/xmlns:msdata 四个属性
+        // （.NET 8 DOM 口径 xmlns 声明也是 XmlAttribute，attrs=46 计入），属性步过滤声明后
+        // 根级通配只剩 id 一个 —— dotnet 8.0.425 SelectNodes 对同一文档实测 `/@*` 形态 = 1，
+        // 移植（旧实现把声明当属性节点返回 4）已翻案对齐。
+        assertEquals(1, XmlPath.select(schema, "/*/@*").size, "根级属性通配过滤 xmlns 声明后只剩 id")
+        assertEquals(0, XmlPath.select(map, "/map/p[text()='']").size, "p 只有元素子节点、无直接文本 ⇒ 0")
 
         // ResourceManager.ERB 的 style=3 往返：元素 OuterXml 再喂回解析器，走相对路径
-        val aOuter = XmlPath.select(anime, "/sprites/a[1]").single().outerXml()
-        val reparsed = XmlParser.parse(aOuter)
-        assertEquals("a", XmlPath.select(reparsed, "/*").single().name)
-        assertEquals(121, XmlPath.select(reparsed, "*/f").size)
-        assertEquals("500", XmlPath.select(reparsed, "*/@width").single().value)
+        val pOuter = XmlPath.select(map, "/map/p[${facts.textEntry}]").single().outerXml()
+        val reparsed = XmlParser.parse(pOuter)
+        assertEquals("p", XmlPath.select(reparsed, "/*").single().name)
+        assertEquals(2, XmlPath.select(reparsed, "*/k").size + XmlPath.select(reparsed, "*/v").size)
+        assertEquals(facts.textEntryK, XmlPath.select(reparsed, "*/k/text()").single().value)
 
         // XmlPool：真实文档进池、按名取、释放
         val pool = XmlPool()
-        assertTrue(pool.create("anime", anime))
-        assertTrue(pool.create("kagerou", kagerou))
-        assertTrue(pool.create("as06", as06))
+        assertTrue(pool.create("map", map))
+        assertTrue(pool.create("bbas", bbas))
+        assertTrue(pool.create("schema", schema))
         assertEquals(3, pool.size)
-        assertEquals(8, XmlPath.select(assertNotNull(pool["anime"]), "/sprites/*").size)
-        assertEquals(153, XmlPath.select(assertNotNull(pool["kagerou"]), "/sprites/i").size)
-        assertEquals(216, XmlPath.select(assertNotNull(pool["as06"]), "/sprites/i").size)
-        assertTrue(pool.release("anime"))
+        assertEquals(facts.mapEntries, XmlPath.select(assertNotNull(pool["map"]), "/map/p").size)
+        assertEquals(facts.bbasRecords, XmlPath.select(assertNotNull(pool["bbas"]), "//id").size)
+        assertEquals("NewDataSet", XmlPath.select(assertNotNull(pool["schema"]), "/*/@id").single().value)
+        assertTrue(pool.release("map"))
         assertEquals(2, pool.size)
-        assertNull(pool["anime"])
-        assertEquals(false, pool.release("anime"))
+        assertNull(pool["map"])
+        assertEquals(false, pool.release("map"))
     }
 
     /**
      * `XML_DOCUMENT` / `XML_EXIST` / `XML_GET` / `XML_GET_BYNAME` / `XML_TOSTR` 直接喂
-     * 真实文件文本与真实片段（整文件 3 个 + 元素 OuterXml + 单行 i 片段）。
+     * 真实文件文本与真实片段（两根在位文件都是 3 个：词典 / bbas / schema + 单行 p 片段）。
+     *
+     * 按根取列的点只有三处：`<p>` 条目数、bbas 记录数与末条 id、第 1 条 `<p>` 的 `<k>` 文本
+     * （4.980 第 1 条是纯空格行 ⇒ 文本为空串；4.981 第 1 条是 `营养`）。
      */
     @Test
     fun `XML 内建家族喂真实语料片段`() {
-        val root = corpusResourcesRoot()
-        Assumptions.assumeTrue(
-            root != null,
-            "未设置 $CORPUS_ENV 或找不到 resources 目录，跳过真实 XML 内建调用",
-        )
-        val animeText = readUtf8(resourceFile(root!!, "As06MARK-IV", "anime", "anime.xml"))
-        val kagerouText = readUtf8(resourceFile(root, "AI arts", "kagerou.xml"))
-        val resourceText = readUtf8(resourceFile(root, "EN_IMG", "327", "Resource.xml"))
+        val facts = XmlCorpusFacts.detect()
+        val mapText = readUtf8(facts.root.resolve("plugins/tw_csv_chs.xml"))
+        val bbasText = readUtf8(facts.root.resolve("plugins/bbas_dataset.xml"))
+        val schemaText = readUtf8(facts.root.resolve("plugins/schema.xml"))
         val (ctx, store) = xmlEnv()
         val buf = refS("XBUF")
 
-        // 1) 整文件：/sprites/* 命中 8 个 a，取第 1 个的 OuterXml 再走相对路径
-        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 101L, animeText))
+        // 1) 整文件：/map/p 命中全部条目，取第 1 个的 OuterXml 再走相对路径
+        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 101L, mapText))
         assertEquals(1L, xiv(ctx, "XML_EXIST", 101L))
-        assertEquals(8L, xiv(ctx, "XML_GET_BYNAME", 101L, "/sprites/*"))
-        assertEquals(1L, xiv(ctx, "XML_GET_BYNAME", 101L, "/sprites/a[1]", buf, 3L))
-        val aOuter = strAt(store, "XBUF", 0)
-        assertTrue(aOuter.startsWith("<a "), "style=3 应返回元素 OuterXml：${aOuter.take(40)}")
-        assertEquals(121L, xiv(ctx, "XML_GET", aOuter, "*/f"))
-        assertEquals(1L, xiv(ctx, "XML_GET", aOuter, "*/@width", buf))
-        assertEquals("500", strAt(store, "XBUF", 0))
+        assertEquals(facts.mapEntries.toLong(), xiv(ctx, "XML_GET_BYNAME", 101L, "/map/p"))
+        assertEquals(1L, xiv(ctx, "XML_GET_BYNAME", 101L, "/map/p[1]", buf, 3L))
+        val pOuter = strAt(store, "XBUF", 0)
+        assertTrue(pOuter.startsWith("<p>"), "style=3 应返回元素 OuterXml：${pOuter.take(40)}")
+        assertEquals(1L, xiv(ctx, "XML_GET", pOuter, "*/k"))
+        // style 省略 = 0：.NET OutPutNode 落到 node.Value（FunctionMethodCreator.cs:135-157、:195），
+        // 元素节点的 Value 恒为 null ⇒ 写空串；文本要显式传 style=1（InnerText）。
+        assertEquals(1L, xiv(ctx, "XML_GET", pOuter, "*/k", buf))
+        assertEquals("", strAt(store, "XBUF", 0))
+        assertEquals(1L, xiv(ctx, "XML_GET", pOuter, "*/k", buf, 1L))
+        assertEquals(facts.firstEntryK, strAt(store, "XBUF", 0))
 
         // 2) 整文件 + 字符串键：声明被规范化为双引号（PC LoadXml 口径）
-        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", "KDOC", kagerouText))
-        assertEquals(153L, xiv(ctx, "XML_GET_BYNAME", "KDOC", "/sprites/i"))
-        assertEquals(1L, xiv(ctx, "XML_GET_BYNAME", "KDOC", "/sprites/i[last()]/@src", buf))
-        assertEquals("AI arts/63_rectangular.webp", strAt(store, "XBUF", 0))
-        val toString = xsv(ctx, "XML_TOSTR", "KDOC")
+        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", "BDOC", bbasText))
+        assertEquals(facts.bbasRecords.toLong(), xiv(ctx, "XML_GET_BYNAME", "BDOC", "/DocumentElement/bbas_dataset"))
+        // id 是元素节点：style 省略 = 0 → node.Value 恒 null ⇒ 空串；文本要显式 style=1（InnerText）
+        assertEquals(1L, xiv(ctx, "XML_GET_BYNAME", "BDOC", "/DocumentElement/bbas_dataset[last()]/id", buf, 1L))
+        assertEquals(facts.bbasLastId, strAt(store, "XBUF", 0))
+        val toString = xsv(ctx, "XML_TOSTR", "BDOC")
         assertTrue(
-            toString.startsWith("<?xml version=\"1.0\" encoding=\"utf_8\"?><sprites>"),
+            toString.startsWith("<?xml version=\"1.0\" encoding=\"utf-8\"?><DocumentElement>"),
             "XML_TOSTR 声明未按 .NET 规范化：${toString.take(80)}",
         )
-        assertTrue(toString.contains("AI arts/63_rectangular.webp"))
+        // 首条记录名「靈夢」两根都在（实读）
+        assertTrue(toString.contains("靈夢"))
 
-        // 3) 整文件的属性相等谓词
-        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 102L, resourceText))
+        // 3) 整文件的属性相等谓词（schema 的属性在 xs:element 上；前缀步不合法，用全后代属性谓词）
+        assertEquals(1L, xiv(ctx, "XML_DOCUMENT", 102L, schemaText))
         assertEquals(
-            27L,
-            xiv(ctx, "XML_GET", 102L, "/sprites/i[@src='EN_IMG/327/51_alt_Face.webp']"),
+            1L,
+            xiv(ctx, "XML_GET", 102L, "//*[@name='bbas_dataset']"),
         )
+        assertEquals(1L, xiv(ctx, "XML_GET", 102L, "/*/@id", buf))
+        assertEquals("NewDataSet", strAt(store, "XBUF", 0))
 
-        // 4) 单元素真实片段（Resource.xml 的第一条 i 行）
-        val fragment = resourceText.lineSequence().first { it.trimStart().startsWith("<i ") }.trim()
-        assertEquals(1L, xiv(ctx, "XML_GET", fragment, "*/@param", buf))
-        assertEquals("0,0,180,180", strAt(store, "XBUF", 0))
+        // 4) 单元素真实片段（tw_csv_chs.xml 的第一条 p 行；语料 p 全部无属性，锚 "<p>"）
+        val fragment = mapText.lineSequence().first { it.trimStart().startsWith("<p>") }.trim()
+        assertEquals(1L, xiv(ctx, "XML_GET", fragment, "*/k", buf, 1L))
+        assertEquals(facts.firstEntryK, strAt(store, "XBUF", 0))
 
         // 释放后 XML_EXIST 归零
         assertEquals(1L, xiv(ctx, "XML_RELEASE", 101L))

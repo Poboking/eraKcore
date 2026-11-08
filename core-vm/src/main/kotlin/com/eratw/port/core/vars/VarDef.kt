@@ -8,8 +8,21 @@ package com.eratw.port.core.vars
  */
 typealias CodeEE = com.eratw.port.core.err.CodeEE
 
-/** 变量静态类型。spec: VariableToken.cs:67（typeof(long) / typeof(string)）。 */
-enum class VarType { INT, STR }
+/**
+ * 变量静态类型：整数 / 字符串 / 浮点。
+ *
+ * INT/STR 两种对应 1.824 `VariableToken.cs:67`（typeof(long) / typeof(string)）。
+ * FLOAT 是 4.981 fork 新增的第三型（`double`）：存储四件套
+ * `dataFloat` / `dataFloatArray` / `dataFloatArray2D` / `dataFloatArray3D`
+ * （spec: variables.yaml 的 float_vars、fork-src VariableData.cs:26/29/32/35）。
+ *
+ * 运行期浮点存储已移植：`VariableStore` 的 `floatScalars`（`RESULTF` 占 slot1）、
+ * 每函数一份的 `LOCALF`/`ARGF` 实例、`StaticFloatUserVar`/`DynamicFloatUserVar`，
+ * 以及二进制存档 0x04-0x07 四型与侧车 `#DIMF` 标记（`BootMetadata` v2）。
+ * 尚未收口的仍是声明面细节（`#DIMF` 初值 `DimSpec.defaultsFloat`、`#LOCALFSIZE`
+ * 生效长度），见 spec variables.yaml 的 `float_vars.dimf_default_value`。
+ */
+enum class VarType { INT, STR, FLOAT }
 
 /** 变量在存储层的归属与形状（把 C# 的一串 private token 子类压成枚举）。 */
 enum class Storage {
@@ -48,6 +61,23 @@ enum class Storage {
 
     /** 函数局部 1 维字符串（LOCALS/ARGS） */
     L_STR,
+
+    /**
+     * 函数局部 1 维**浮点**（LOCALF/ARGF，每函数一份）。4.981 fork 新增，1.824 无此形态。
+     *
+     * spec: fork-src VariableData.cs:376-379（`localvarTokenDic.Add`，与 [L_INT]/[L_STR] 同表）；
+     * 实例长度 = `max(VARIABLESIZE.CSV 的浮点档, #LOCALFSIZE, 形参声明长)`，
+     * 见 [com.eratw.port.core.vars.VariableSizes.float1D] 与 `VariableStore.resolveFloatLocalSize`。
+     */
+    L_FLOAT,
+
+    /**
+     * 全局 0 维浮点标量（RESULTF = `dataFloat[1]`）。4.981 fork 新增。
+     *
+     * spec: fork-src VariableData.cs:182（`varTokenDic.Add("RESULTF", FloatScalarVariableToken)`）、
+     * `:155`（列长 `__COUNT_STRING__` = 2）。与 [G_STR0] 同形（0 维、单格），但落在浮点列。
+     */
+    G_FLOAT0,
 
     /** 伪变量/常量（RAND/CHARANUM/GAMEBASE_* …） */
     PSEUDO,
@@ -163,9 +193,17 @@ class VarDef(
      */
     val isForbid: Boolean = dims.isNotEmpty() && dims.any { it == 0 }
 
+    /**
+     * 指定维的长度。超维抛官方逐字串 `Error.GetSizeNonExistDim`（`Lang.cs:1634`；
+     * 原版抛出点 `UserDefinedVariableToken.cs:55`、`LocalVariableToken.cs:36`、
+     * `VariableData.cs:165/:265` —— `VARSIZE X, N` 的 N 超出变量维数，实参 = 变量名）。
+     * 旧自造串「变量 X 不存在第 N 维（维度 R）」于 2026-11-05 lane errtext6 退役，
+     * helper 出口与 REF 超维支（`VariableStore.kt` 的 getLength REF 分支）同一个
+     * [getSizeNonExistDim]，屏上不再分叉（判界 `dim < 0 || dim >= dims.size` 一字未动）。
+     */
     fun length(dim: Int): Int {
         if (dim < 0 || dim >= dims.size) {
-            throw CodeEE("变量 $name 不存在第 ${dim + 1} 维（维度 ${dims.size}）")
+            throw getSizeNonExistDim(name)
         }
         return dims[dim]
     }
@@ -180,8 +218,11 @@ class VarDef(
     /** 供 expr 层解析期使用的元信息。 */
     fun toVarInfo(): com.eratw.port.core.expr.VarInfo = com.eratw.port.core.expr.VarInfo(
         name = name,
-        operandType = if (type == VarType.INT) com.eratw.port.core.expr.OperandType.INT
-        else com.eratw.port.core.expr.OperandType.STR,
+        operandType = when (type) {
+            VarType.INT -> com.eratw.port.core.expr.OperandType.INT
+            VarType.STR -> com.eratw.port.core.expr.OperandType.STR
+            VarType.FLOAT -> com.eratw.port.core.expr.OperandType.FLOAT
+        },
         dimension = dimension,
         isCharacterData = isCharacterData,
         isConst = isConst,

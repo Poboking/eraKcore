@@ -7,6 +7,7 @@ import com.eratw.port.core.compile.FunctionBytecode
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.host.Alignment
 import com.eratw.port.core.host.CbgPool
+import com.eratw.port.core.host.GraphicsBuffer
 import com.eratw.port.core.host.GraphicsPool
 import com.eratw.port.core.host.LineBufferConsoleSink
 import com.eratw.port.core.host.SaveLoadHandoff
@@ -308,6 +309,57 @@ class GotoTitleTest {
             // 二次回标题：池已空也不能炸（peek 返回 null 的分支）
             val again = s.runtime.gotoTitle()
             assertEquals("beginTitle", again.handler)
+        } finally {
+            s.close()
+        }
+    }
+
+    /**
+     * 回标题只清 `gList`，不卸 CSV 资源表（`AppContents.cs:196-203` 的口径）。
+     *
+     * 玩家报告 `eratw-report-20261108-002637-trail.txt`（构建 9363da7，堆 511/512 MiB）
+     * 屏上「除数为0的除法运算（QOL_SPTALK 行135）」的一条成因：`UnloadGraphicList`
+     * 旧实现逐 sprite 无差别 `dispose()`，把负号段的 CSV 父图也清成「未创建」，而回标题
+     * 之后资源表不重装 ⇒ `ダミー` 等资源恒假、`SPRITEHEIGHT` 恒 0 ⇒ MOB 立绘合成链
+     * 建不出 G、`リソース登録` 失败，最后在 `Toolkits.ERB:135` 拿 0 当除数。
+     *
+     * 本用例走真 `runtime.gotoTitle()`：正号段（SpriteG）照旧被卸，负号段（SpriteF）
+     * 与它的登记读数逐字不动。
+     */
+    @Test
+    fun `gotoTitle 只卸 gList 不卸 CSV 资源父图`(@TempDir dir: Path) {
+        val s = session(fixture(countingBody), dir)
+        try {
+            drivenToTerminal(s)
+            val aux = s.store.aux
+            val gfx = aux.slot("gfx") { GraphicsPool() }
+            val sprites = aux.slot("sprite") { SpritePool() }
+
+            // SpriteG：gList 里的 GraphicsImage，官方 UnloadGraphicList 遍历的就是它。
+            val gidBase = gfx.get(7)
+            gidBase.create(4, 4)
+            sprites.put(SpritePool.Sprite("G_SPR", 4, 4, buffer = gidBase))
+
+            // SpriteF：CSV 资源父图，负号段发号与 `ResourceContents.kt:252-255` 同形。
+            val csvParent = GraphicsBuffer(-1)
+            assertTrue(
+                csvParent.createDeferredFromFile(
+                    250, 250, "resources/MISC/infoThumb/blank.webp",
+                ) { IntArray(250 * 250) },
+            )
+            sprites.putResource(SpritePool.Sprite("ダミー", 180, 180, buffer = csvParent))
+
+            s.runtime.gotoTitle()
+
+            assertFalse(gidBase.isCreated, "gList 仍要 GDispose")
+            assertFalse(sprites.find("G_SPR")!!.isCreated, "SpriteG 跟随 GDISPOSE 的既有语义不变")
+            assertTrue(csvParent.isCreated, "CSV 父图不在 gList 里，官方一个都不卸")
+            assertEquals(250, csvParent.width)
+            assertEquals(250, csvParent.height)
+            assertEquals("resources/MISC/infoThumb/blank.webp", csvParent.fileSource, "重解源不许被清掉")
+            val dummy = sprites.find("ダミー")!!
+            assertTrue(dummy.isCreated, "SPRITECREATED(ダミー) 恒 1")
+            assertEquals(180, dummy.height, "SPRITEHEIGHT(ダミー) 恒为登记尺寸")
         } finally {
             s.close()
         }

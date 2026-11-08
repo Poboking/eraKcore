@@ -44,6 +44,46 @@ internal class ConsoleBridge(
      */
     override val foregroundColor: Int? get() = delegate?.foregroundColor
 
+    // ------------------------------------------------------------------
+    // 读出侧转发（2026-11 挖虫波 H9）
+    //
+    // 与 noteInputWait / publishFrame 同型事故的补全：接口默认实现是**静默缺省**
+    // （null / 0 / LEFT），桥接器漏转发时 `ctx.console` 的读者永远拿不到真 sink 的活状态。
+    // 下面七个成员全部改真转发；delegate == null（纯求值 / erbcc / 镜像-only 装置）时
+    // 回落接口缺省，与转发前的行为逐项相同 ⇒ 既有装置零破坏。
+    // 不做 fail-fast（error 点名）的理由：`displayedLines` / `popPrintingBuffer` 的
+    // 「宿主未接线」语义**就是** null（fn 层据此抛 CodeEE，口径见 ConsoleSink 对应 KDoc），
+    // 改成 error 会把 delegate==null 的合法形态炸穿语句层，且无既有测试钉过 error 形态；
+    // 其余五项缺省值（0 / LEFT / null）同样是 ConsoleSink KDoc 声明的出厂态，读方依赖
+    // 「未设置 ⇒ 缺省」的回落链（Config.ForeColor/BackColor、SETFONT 空串），error 会掐断它。
+    // ------------------------------------------------------------------
+
+    /** 显示行缓冲快照转发（GETDISPLAYLINE / HTML_GETPRINTEDSTR 的数据源；null = 宿主未接线）。 */
+    override val displayedLines: List<LineBufferConsoleSink.DisplayLine>?
+        get() = delegate?.displayedLines
+
+    /**
+     * 打印中缓冲弹出侧转发（HTML_POPPRINTINGSTR，**读取即消费**）。
+     * 必须恰好一次触达 delegate：桥接器不得先判空再取（弹两次 = 丢一批行）。
+     */
+    override val popPrintingBuffer: List<LineBufferConsoleSink.DisplayLine>?
+        get() = delegate?.popPrintingBuffer
+
+    /** 当前背景色转发（GETBGCOLOR；null = 未显式 SETBGCOLOR，语句层回落 Config.BackColor）。 */
+    override val backgroundColor: Int? get() = delegate?.backgroundColor
+
+    /** 当前字体名转发（GETFONT）。 */
+    override val fontName: String? get() = delegate?.fontName
+
+    /** 宿主默认字体名转发（`Config.FontName`；SETFONT 空串恢复的落点）。 */
+    override val defaultFontName: String? get() = delegate?.defaultFontName
+
+    /** 当前行对齐转发（CURRENTALIGN；delegate 缺席时按出厂态 LEFT，与接口缺省一致）。 */
+    override val alignment: Alignment get() = delegate?.alignment ?: Alignment.LEFT
+
+    /** 当前重绘状态转发（CURRENTREDRAW；已折减两态；delegate 缺席时 0 = None）。 */
+    override val redraw: Int get() = delegate?.redraw ?: 0
+
     /**
      * 镜像的唯一写入口：未到 [maxMirrorChars] 上限时追加，超限后一次性停写。
      * 所有 `mirror.append` 必须收口到这里——防止某个调用点漏检把封顶打穿。
@@ -196,6 +236,15 @@ internal class ConsoleBridge(
     /** 同 [publishFrame]：让出返回后重新冻结，见 [ConsoleSink.holdFrame]。 */
     override fun holdFrame() {
         delegate?.holdFrame()
+    }
+
+    /**
+     * 页中保活转发（[ConsoleSink.publishProgressFrame] 的缺省实现是 no-op）：
+     * `ctx.console` 是桥接器，宿主检查点要触发的是背后真 sink 的冻结快照替换；
+     * 漏转发时真机画面在长链中途仍停在上一页。
+     */
+    override fun publishProgressFrame() {
+        delegate?.publishProgressFrame()
     }
 
     override fun printHtml(text: String, option: Boolean) {

@@ -2,6 +2,7 @@ package com.eratw.port.perf
 
 import com.eratw.port.e2e.GoldenNormalizer
 import com.eratw.port.e2e.GoldenPipeline
+import com.eratw.port.e2e.PcGoldenColumn
 import java.io.File
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
@@ -22,6 +23,10 @@ import kotlin.test.assertTrue
  * - **释放真的发生了**：1,000+ 条语句的 `raw` 全部为空（释放点不在测试里手动调，而在
  *   `ProcessRuntime` 构造期 —— 所以这条同时验证「生产接线」没被绕过）；
  * - **语义没变**：规范化去重是纯身份合并（结构相等），输出必须与基准一致。
+ *
+ * 基准取 `pc-golden-root.txt` 的**按根两列**（[PcGoldenColumn]）：该文件钉 4.981 读数，
+ * §5 闸的 `ERATW_GAMEDIR` 指 4.980 ⇒ 348/349/454 三行语料派生行按根取定值，
+ * 其余 607 行仍逐字严格（未跳过、未放宽）。
  */
 class PerfGoldenInternedEquivalenceTest {
 
@@ -53,11 +58,13 @@ class PerfGoldenInternedEquivalenceTest {
         val actual = GoldenNormalizer.normalize(console.capturedText())
         val target = fixtureDir.resolve("baseline").resolve(GoldenNormalizer.PC_BASELINE).toFile()
         assertTrue(target.isFile, "缺少 PC 基准：$target")
-        val expected = GoldenNormalizer.readBaseline(target)
+        // 基准按语料根两列取（[PcGoldenColumn]）：基准钉 4.981，§5 闸喂 4.980 ⇒ 三行语料
+        // 派生行按根换成定值，其余行仍逐字严格（不是跳过、不是放宽）。
+        val expected = PcGoldenColumn.forCurrentRoot(GoldenNormalizer.readBaseline(target))
         val d = GoldenNormalizer.diff(expected, actual)
         assertTrue(
             d.identical,
-            "去重+释放后输出与 PC 基准不一致（首差行 ${d.firstMismatch}）：\n${d.preview}",
+            "去重+释放后输出与 PC 基准不一致（${PcGoldenColumn.describeCurrentRoot()}；首差行 ${d.firstMismatch}）：\n${d.preview}",
         )
         assertEquals(610, actual.size, "PC 基准口径 = 610 行")
     }

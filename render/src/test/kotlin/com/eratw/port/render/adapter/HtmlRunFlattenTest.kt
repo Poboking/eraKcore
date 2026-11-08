@@ -168,7 +168,7 @@ class HtmlRunFlattenTest {
     // ③ 所以 px 支必须与百分比支同尺 —— 否则 ①的那张图只吃掉 ②预留位子的一小半，
     //    立绘下面挂出 6~7 行空白（主人报的「间距很大」）。
     //
-    // 夹具取真机 110 列档：字号 41 / 行高 43（`view/PageFitter.fit(2400, 1000, 20)` 一档）。
+    // 夹具取旧 110 列档：字号 41 / 行高 43（旧 `PageFitter.fit(2400, 1000, 20)` 一档，值保留作夹具）。
     // ==================================================================
 
     private fun deviceFlat(scriptFontPx: Int) =
@@ -255,18 +255,22 @@ class HtmlRunFlattenTest {
     }
 
     /**
-     * 真正的负宽段整段不出（[InlineGraphic.cellsFor] 对非正宽返回 0）。
+     * 负尺寸 = 原版的**翻转**形态：`ConsoleImagePart.cs:83-92` 先把 `destRect.X` 推到
+     * `-Width`、再令 `Width = -destRect.Width` ⇒ **布局占宽恒为正**（图照样出、只是镜像）。
      *
-     * 原版对负 `destRect.Width` 是「把 X 推到偏移处、宽取绝对值」（spec: `ConsoleImagePart.cs:84-88`），
-     * 本层不做那次翻转。判据：语料 52 处 `<img` 的 width/height **全部**是正数或 `0`
-     * （`ERB/BODY_INFO` 目录下的 ERB、`ERB/SHOP関連/TEST.ERB` 抽样实测），负宽没有可取证的对象；
-     * 真机若出现负宽立绘，需要按上面那 5 行补翻转。
+     * 本层的内联框模型没有翻转标记，故 [HtmlRunFlatten] 对尺寸取绝对值：占宽与落位盒
+     * 与原版一致，**镜像绘制本身不做**（语料 52 处 `<img` 的 width/height 全是正数或 `0`，
+     * `画像反転フラグ` 全库无一处传非 0 ⇒ 暂无可取证对象）。旧实现把负宽整段丢弃，
+     * 与原版「画镜像图」相比是更远的偏离，本次改为按绝对值出段。
      */
     @Test
-    fun `img 负宽整段不出`() {
+    fun `img 负宽按绝对值占位（原版翻转形态的布局侧）`() {
         val runs = flatten("甲<img src='a' width='-5px' height='10px'>乙")
-        assertEquals(listOf("甲", "乙"), runs.map { it.text })
-        assertTrue(runs.none { it.graphic != null })
+        assertEquals(listOf(RunKind.TEXT, RunKind.IMAGE, RunKind.TEXT), runs.map { it.kind })
+        val g = runs[1].graphic as InlineGraphic.Image
+        assertEquals(5, g.widthPx, "原版 Width = -destRect.Width ⇒ 绝对值")
+        assertEquals(10, g.heightPx)
+        assertTrue(g.widthCells > 0, "占格必须为正（负数会让列游标回退）")
     }
 
     // ==================================================================

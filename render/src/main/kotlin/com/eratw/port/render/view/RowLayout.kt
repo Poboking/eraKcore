@@ -55,7 +55,17 @@ import com.eratw.port.render.displaylist.InlineGraphic
  * 旧实现把「纯图片行」（该行只有 `InlineGraphic.Image`、没有文字）的行高按剩余高度等分
  * 压缩，文字行保持 [lineHeightPx] 不动，整块内容仍底对齐。`artAdvance` 那一支的算式
  * 原样搬进本类（`remain` / `fit` / `coerceIn`），四条守卫与出处见
- * [GraphicGeometry.artRowScale]，本类不重复判式。
+ * [GraphicGeometry.artRowScale]，本类不重复判式。唯一加工是压缩下限先对执行行高夹一次
+ * （`artFloorPx`）：`coerceIn` 在 minimum > maximum 时会抛，而 `plan` 的两个行高参数都是
+ * 裸浮点、没有「min ≤ lineHeight」的前置 —— 下限高于行高的档位按「不压缩」收口。
+ *
+ * **压缩只对「图本身不高于一行」的纯图行生效**（`imageHeight <= lineHeightPx`，即标题横带
+ * 那一档；判据与 [GraphicGeometry.artRowScale] 能不能缩那张图完全同源）。立绘/大地图这类
+ * 高于一行的图**不压行高**：绘制侧拒绝把高于一行的图缩进行高（`artRowScale` 的第二条守卫），
+ * 行高被压就只剩「图溢出到预留空行之外、再经越行第二趟铺墨盖住后面的文字」这一种结局
+ * （2026-11 玩家反馈的「图片遮住文字」，读数见 `compressible` 处的 KDoc）。
+ * 合并竖带块的首行（`rowSpan > 0`）同样**不压**：那一支由 `drawBandStack` 按 `heightPx`
+ * 铺满、无视行高，压了必溢出（推导见 `compressible` 的第三条）。
  *
  * 纯 JVM：不碰 Android API、不碰 `kotlin.random`、无可变静态状态；返回的 [Plan] 是
  * 一次性只读表，每帧由调用方（`CanvasConsoleView.drawScreen`）重建。
@@ -97,7 +107,8 @@ object RowLayout {
      * @param contentTop 内容区上沿（像素）
      * @param contentBottom 内容区下沿（像素）；底对齐的基准
      * @param lineHeightPx 执行行高（`Config.LineHeight` 的落地值）
-     * @param minArtRowHeightPx 纯图行压缩的下限（旧 `CanvasConsoleView.MIN_ART_ROW_HEIGHT`）
+     * @param minArtRowHeightPx 纯图行压缩的下限（旧 `CanvasConsoleView.MIN_ART_ROW_HEIGHT`）；
+     *   允许传大于 [lineHeightPx] 的值（本函数无「必须更小」的前置），那种档位按「不压缩」处理
      */
     fun plan(
         cmds: List<DrawCmd>,
@@ -113,6 +124,10 @@ object RowLayout {
         val n = windowRows
         val isText = BooleanArray(n)
         val imageHeight = FloatArray(n) { -1f }
+        // 该行是否承载「合并竖带块」的首行（`InlineGraphic.Image.rowSpan > 0`，
+        // `ImageBandMerge` 的产物）：那种块由绘制侧的 `drawBandStack` 按 `heightPx`
+        // 逐片铺满，**完全不看行高**，所以它的行不能参与压缩（见 `compressible`）。
+        val spansRows = BooleanArray(n)
         for (c in cmds) {
             // 下标即绘制口径行号（= DrawCmd.row = visibleRows() 的下标），不再平移。
             // 窗口外的命令不进表：绘制侧本来就有 `in tops.indices` 的越界闸拦着。
@@ -121,6 +136,7 @@ object RowLayout {
             val g = c.graphic
             if (g is InlineGraphic.Image) {
                 if (g.heightPx > imageHeight[i]) imageHeight[i] = g.heightPx.toFloat()
+                if (g.rowSpan > 0) spansRows[i] = true
             } else {
                 isText[i] = true
             }
@@ -129,25 +145,64 @@ object RowLayout {
         // 算 text（旧实现 :771-775）。**没有任何命令的行 = 普通文字行**（旧实现对
         // 「minRow..maxRow 区间内空行」就是这么算的，:784 的 else 支 + :797），
         // 只是现在头部/尾部的空行也在表里。
+        val artOnly = BooleanArray(n) { i -> !isText[i] && imageHeight[i] > 0f }
+        // ---- 可压缩的纯图行：**图本身不高于一行**（标题横带那一档）------------------------
+        // 这一条是 [GraphicGeometry.artRowScale] 四条守卫在布局侧的镜像，两边必须同一个判据：
+        // 绘制侧只在 `drawH <= lineHeight` 时才肯把图缩到行高（更高的一律 k = 1、按脚本尺寸
+        // 溢出，见 `artRowScale` 的第二条守卫）。所以**只有图能被缩进行高的行**才可以压行高；
+        // 行高压了而图不缩，图的实画底就跑到 `rowTop + heightPx`，比它那一行高出
+        // `heightPx - artAdvance`。
+        //
+        // 那条溢出在真机上就是玩家报的「图片会遮住文字」（2026-11 反馈）：立绘高
+        // `10 × 字号`（410px @ 41/43 档）远高于一行，`remain` 一旦为负/很小（历史攒满一屏时
+        // 必然如此），旧实现把立绘那一行压到 `MIN_ART_ROW_HEIGHT` = 6px，而脚本按
+        // `ceil(图高 / 一行の高さ)` 预留的 9 条空行仍是 9 × 43 —— 块高 `6 + 387 = 393` 比
+        // 图矮 17px，图越过自己那一块压到下一行文字上；又因 `escapesLine`（`heightPx >
+        // lineHeightPx`）把这张图归进第二趟铺墨，它被**画在文字之上**，净效果就是文字被图盖住。
+        // 读数（`RowLayoutTest` 的「高于一行的图所在行不参与压缩」与 `ArtRowOverflowTest`）：
+        // 360px 立绘 + 9 条空行 + 台词，旧口径图底 316 而台词行顶 304 ⇒ 压字 12px；真机
+        // 41/43 档实测压字 17px。同一份脚本在 PC 上不会出现：原版行距恒为
+        // `Config.LineHeight`（`EmueraConsole.cs:1855`），**从不压行高**。
+        //
+        // 高于一行的图不再参与压缩 ⇒ 它那一行保持 `lineHeightPx`，图的溢出落回脚本预留的空行
+        // 里（原版语义），整块高度 `10 × 行高 = 430` ≥ 图高 410。代价是内容比压缩时高
+        // `(行高 - artAdvance)`，底对齐后顶部多裁掉同样多 —— 与原版「内容超高就从顶上裁」同象。
+        //
+        // 第三条 `!spansRows[i]` 同样是对 [GraphicGeometry.artRowScale] 第一条守卫
+        // （`rowSpan > 0 → 1f`）的镜像，但**镜像的对象不是同一条绘制路径**：竖带块在
+        // `CanvasConsoleView.drawImage` 里由 `bandResources` 分支**先判先返回**、走
+        // `drawBandStack` 按 `image.heightPx` 逐片铺满（`:2603-2631`），压根到不了
+        // `artRowScale`；也就是说「绘制侧不缩」在那一支是**代码路径决定的**，不是守卫决定的。
+        // 若布局侧漏掉这一条，一张 ≤ 一行高的合并块（窄屏 + 少带数时 `rowsNeeded = 1`，
+        // `drawHeight` 可落到 ≤ 行高）会被压到 `artAdvance`，而它照 `drawHeight` 铺开 ⇒
+        // 越过自己那一行 `drawHeight - artAdvance`（最多 `行高 - artAdvance`）压到下一行。
+        val compressible = BooleanArray(n) { i ->
+            artOnly[i] && imageHeight[i] <= lineHeightPx && !spansRows[i]
+        }
         var textRows = 0
         var artRows = 0
-        val artOnly = BooleanArray(n) { i -> !isText[i] && imageHeight[i] > 0f }
         for (i in 0 until n) {
-            when {
-                isText[i] -> textRows++
-                imageHeight[i] > 0f -> artRows++
-                else -> textRows++
-            }
+            // 不可压的纯图行按整行高算进 textRows：它下面那些行的行顶也要照它让位。
+            if (compressible[i]) artRows++ else textRows++
         }
         val available = (contentBottom - contentTop).coerceAtLeast(0f)
         var artAdvance = lineHeightPx
         if (artRows > 0) {
             val remain = available - textRows * lineHeightPx
             val fit = if (remain > 0f) remain / artRows else minArtRowHeightPx
-            artAdvance = fit.coerceIn(minArtRowHeightPx, lineHeightPx)
+            // 下限先对上限夹一次：`coerceIn` 在 minimumValue > maximumValue 时**抛
+            // IllegalArgumentException**，而这两个参数都是裸浮点（`plan` 没有声明
+            // min ≤ lineHeight 的前置，见 @param）。压缩后的行高不可能超过执行行高，
+            // 所以 min 高过 lineHeight 的档位正确形态就是「不压缩」= 取 lineHeight。
+            // 正常档（min 6 < 行高 ≥ 8）逐值不变；lineHeight 非有限值时 coerceIn 的
+            // 比较全为 false、不抛，行高仍是原值（与本条改动前一致）。
+            val artFloorPx = minArtRowHeightPx.coerceAtMost(lineHeightPx)
+            artAdvance = fit.coerceIn(artFloorPx, lineHeightPx)
         }
         val heights = FloatArray(n) { i ->
-            if (!isText[i] && imageHeight[i] > 0f) artAdvance else lineHeightPx
+            // 只有可压的纯图行吃 artAdvance；高于一行的图（立绘 / 大地图 / 合并竖带块）
+            // 保持整行高，见 `compressible` 的推导。
+            if (compressible[i]) artAdvance else lineHeightPx
         }
         var total = 0f
         for (h in heights) total += h

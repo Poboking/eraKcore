@@ -1,7 +1,10 @@
 package com.eratw.port.render.adapter
 
 import com.eratw.port.core.host.Alignment
+import com.eratw.port.core.host.DisplayDivBlock
+import com.eratw.port.core.host.FontDisplayWidth
 import com.eratw.port.core.host.LineBufferConsoleSink
+import com.eratw.port.core.host.StaticFontDisplayWidth
 import com.eratw.port.render.DisplayRow
 import com.eratw.port.render.Grid
 import com.eratw.port.render.HitTarget
@@ -50,9 +53,11 @@ import java.util.IdentityHashMap
  * 于是 `ButtonLayer` 从 run 文本重算出的命中列是原版 `PointX` 的等价物，
  * 而命中**条数**等于原版 `ConsoleDisplayLine.buttons` 的数组长度（`ConsoleDisplayLine.cs:18,28`）。
  * TODO(verify)：切点用 [Grid.cells] 度量、段宽来自核心层自己的等宽表
- * （`LineBufferConsoleSink.kt:758-770` 的东亚宽字符区间），两表在 U+2000..U+2E7F 一类
- * 符号上结论不同（例：`※` 核心层 1 格、[Grid] 2 格）。两表必须统一为 [Grid] 一处，
- * 已由「需组长接线」提出；本波不为此再造第三套宽度函数。
+ * （`LineBufferConsoleSink.kt` 的 `segmentWidth` → `CellWidth`，CP932 字节数口径），
+ * 两表在 U+2000..U+2E7F 一类符号上结论不同（例：`※` 核心层 1 格、[Grid] 2 格）。
+ * **这是本仓剩余的唯一跨模块宽度分叉**（core 内部已收成 `CellWidth` 一把尺，见
+ * `CellWidth` 的类文档）；正解是让 [Grid.cells] 直接委托 `CellWidth`（render 依赖 core，
+ * 方向合法），但那会动全部渲染布局读数，属独立一波，登记不修正。
  * TODO(verify)：原版还有**自动按钮**这一条 —— 普通文本里的 `[123]` 会在
  * `fromCssToButton` → `createButtons` 里被 `ButtonStringCreator.SplitButton` 变成可点段
  * （spec: `PrintStringBuffer.cs:280-292`、`:326-345`，`ButtonStringCreator.cs:11,24-27,51-68`）。
@@ -171,8 +176,35 @@ object ConsoleAdapter {
      * 透传项：`isLogicalLine`（折行首段标记，spec: `PrintStringBuffer.cs:193,206`）、
      * `isLineEnd`（PRINTN 未收尾标记，spec: `EmueraConsole.cs:2948-2977`）、
      * `alignment`（ALIGNMENT 快照，spec: `Process.cs:1536-1552`）、`isTemporary`
-     * （REUSELASTLINE，spec: `EmueraConsole.cs:2891-2893`）、`backColor`（非按钮 run 逐条落到
-     * [TextRun.back]，因为 SETBGCOLOR 是控制台全局色、核心层按行快照）。
+     * （REUSELASTLINE，spec: `EmueraConsole.cs:2891-2893`）、`backColor`（逐条落到
+     * [TextRun.back]；**div 的 `color` 已不走这里**——CONTRACT-HTMLDIV-B1 D4 撤销
+     * 「染整行」近似，块底色随 [RenderLine.divBlocks] 走 [DivOverlayPlanner]；
+     * sink 对 div 不再写行底色 ⇒ 生产 run 的该槽恒 null。`SETBGCOLOR` 走控制台级活值
+     * ——经 [ConsoleFeed] 发布进 `ConsoleScreen.backgroundArgb` 整幅铺底，
+     * spec: `EmueraConsole.cs:1816` 的 `graph.Clear(bgColor)`）、
+     * `divBlocks`（零宽覆盖块全量透传，见 [RenderLine.divBlocks]）。
+     *
+     * ## div 块区间从正文剔除（CONTRACT-DIV-WIRE W1，停用过渡期内联）
+     *
+     * 块的子行文本**不再进正文 run**：sink 侧把块区间原文保留在行文本里
+     * （`LineBufferConsoleSink.splitHtmlLines` 的 KDoc），本函数按
+     * [DisplayDivBlock.sourceRange] 把区间从所在段原文里**整段切掉**
+     * （[stripDivSegments]，含 `<div ...>` 与 `</div>` 两端标签）—— 原版块是零宽节点
+     * （`ConsoleDivPart.SetWidth` 空实现，CDP :217-219；`HtmlManager.cs:646` 塞进父节点
+     * 列表当前位置），块后的文本列号不因块后移；过渡期把原文留在行里是为了让内容可见，
+     * 覆盖绘制接线后子行只走 `DivOverlayPlanner` 的内容盒落点（CDP :196-203）。
+     * 子行原文仍可经 `GETDISPLAYLINE`（sink 的 `altHeadTag` 重建）与核心层行文本回读
+     * —— 剔除只发生在本适配层，核心层的行文本一个字节不动。
+     *
+     * 块几何来自核心层的**行内像素游标**（2026-11-06 根修）：`anchorPointXPx` 是
+     * `LineBufferConsoleSink` 逐节点累加出来的脚本像素（文本 = 格 × FontSize/2、
+     * `<img>` 按显式宽或基图纵横比的**像素**、`<shape>` 像素、`<div>` 0），不再用
+     * 「可见文本格数 × 半格」—— 旧口径把 `<img>` 剥成 0 格，`<img>` 后接 `<div xpos>`
+     * 的图文并排（语料 `Toolkits.ERB:77-81`）会把台词压在立绘上。
+     * `anchorCol` 由同一趟游标给出（折行落排用），与 [Grid.cells] 只剩 TAB/增补平面
+     * 两条已登记差异（语料 div 锚行两者同值）；带 div 的行上若还有 PRINTBUTTON 段，
+     * 核心层按钮列区间含块区间可见宽（列模型未改），剔除后本层折行让后续文本左移，
+     * 按钮切点可能错位 —— 语料 40 处 div 锚行均无 PRINTBUTTON 混排，无实例可达。
      *
      * 唯一的例外是**按钮段**的 [TextRun.back]：它承载原版 `StringStyle.ButtonColor`
      * （缺省 = `Config.FocusColor`，spec: `StringStyle.cs:11,22`、`ConfigData.cs:70`），
@@ -185,8 +217,10 @@ object ConsoleAdapter {
     fun adapt(
         line: LineBufferConsoleSink.DisplayLine,
         focusColor: Int = LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
+        /** 按钮区间切分用的字体感知宽度尺；缺省静态网格，与接线前逐值相同。 */
+        fontWidth: FontDisplayWidth = StaticFontDisplayWidth,
     ): RenderLine {
-        val runs = runsOf(line, focusColor)
+        val runs = runsOf(line, focusColor, stripDivSegments(line), fontWidth)
         return RenderLine(
             // 空行补空格只对**打印缓冲**行成立（spec: `EmueraConsole.cs:3379-3382` 的
             // PrintFlush `Append(" ", Style)` + `PrintStringBuffer.cs:198-201` 的空表分支）；
@@ -200,6 +234,7 @@ object ConsoleAdapter {
             align = line.alignment,
             temporary = line.isTemporary,
             noBreak = line.noBreak,
+            divBlocks = line.divBlocks,
         )
     }
 
@@ -207,7 +242,73 @@ object ConsoleAdapter {
     fun adapt(
         lines: List<LineBufferConsoleSink.DisplayLine>,
         focusColor: Int = LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
-    ): List<RenderLine> = lines.map { adapt(it, focusColor) }
+        fontWidth: FontDisplayWidth = StaticFontDisplayWidth,
+    ): List<RenderLine> = lines.map { adapt(it, focusColor, fontWidth) }
+
+    /**
+     * div 块区间剔除后的**逐段原文**（CONTRACT-DIV-WIRE W1）；行不带块时返回 null
+     * （调用方照旧用 [LineBufferConsoleSink.Segment.text]，零开销）。
+     *
+     * 区间是 sink 侧按 `<div ...>` 到 `</div>` 圈出的**半开区间**（[DisplayDivBlock.sourceRange]，
+     * 坐标在 [DisplayDivBlock.sourceSegment] 那一段的原文里；后续同样式并段时原文是段前缀，
+     * 区间仍有效 —— `LineBufferConsoleSink` 布局分支的登记说明）。剔除后块后文本左移，
+     * 与原版零宽节点同列序（ConsoleDivPart.cs:217-219 空 SetWidth）。
+     * `sourceRange.isEmpty()`（区间不可考）的块不剔除 —— 那种子行保持过渡期可见（登记偏差）。
+     */
+    private fun stripDivSegments(line: LineBufferConsoleSink.DisplayLine): List<String>? {
+        val blocks = line.divBlocks
+        if (blocks.isEmpty()) return null
+        val bySegment = HashMap<Int, MutableList<IntRange>>(2)
+        for (block in blocks) {
+            if (block.sourceRange.isEmpty()) continue
+            bySegment.getOrPut(block.sourceSegment) { ArrayList(1) }.add(block.sourceRange)
+        }
+        if (bySegment.isEmpty()) return null
+        val texts = line.segments.mapTo(ArrayList(line.segments.size)) { it.text }
+        for ((index, ranges) in bySegment) {
+            if (index !in texts.indices) continue
+            val text = texts[index]
+            val sb = StringBuilder(text.length)
+            var copied = 0
+            var lastEnd = -1
+            for (range in ranges.sortedBy { it.first }) {
+                if (range.first < lastEnd) continue // 嵌套/畸形重叠：外层块已整段覆盖，内层无区间可剔
+                sb.append(text, copied, range.first)
+                copied = range.last + 1
+                lastEnd = range.last
+            }
+            sb.append(text, copied, text.length)
+            texts[index] = sb.toString()
+        }
+        return texts
+    }
+
+    /**
+     * 把行内的块分配到折行后**锚列所在的排**（[DisplayRow.divBlocks] 的落排规则，
+     * CONTRACT-DIV-WIRE W1）。
+     *
+     * 原版折行对零宽节点的处置：`PointX + Width <= num` 在 `PointX == num`（折点正好压在
+     * 锚列上）时成立、节点留在**当前排**（PrintStringBuffer.cs:217），所以判据是
+     * 「锚列 <= 本排累计格数就走下一排」的**严格大于**（边界归前一排）；锚列越过全行
+     * 时落最后一排（防御 —— sink 的锚列取可见前缀格数，正常不会越界）。
+     * 块按出现序进（sink 逐块登记），锚列单调不减，游标单趟推进。
+     */
+    private fun assignDivRows(
+        rows: List<DisplayRow>,
+        blocks: List<DisplayDivBlock>,
+    ): List<List<DisplayDivBlock>> {
+        val out = List(rows.size) { ArrayList<DisplayDivBlock>(1) }
+        var row = 0
+        var cellsBefore = 0
+        for (block in blocks) {
+            while (row < rows.lastIndex && block.anchorCol > cellsBefore + rows[row].cells) {
+                cellsBefore += rows[row].cells
+                row++
+            }
+            out[row].add(block)
+        }
+        return out
+    }
 
     /**
      * 折行 + 列偏移回填：[RenderLine] → [DisplayRow]。
@@ -216,6 +317,7 @@ object ConsoleAdapter {
      * `align`/`temporary` 透传，以及按原版 `SetAlignment` 算出的 [DisplayRow.indentCells]。
      * 原版在 `addDisplayLine` 里对**每一条显示行**分别调用 `SetAlignment`
      * （spec: `EmueraConsole.cs:2937-2944`），所以折行产生的每一行各自对齐、各自平移。
+     * 行带 div 块时再按锚列把块分配到锚排（[assignDivRows]，[DisplayRow.divBlocks]）。
      *
      * `noBreak` **原样交给折行器**：PRINTSINGLE / REUSELASTLINE / 独立错误行在原版走
      * `FlushSingleLine` 的 `nobr: true` 分支、一行不折（`PrintStringBuffer.cs:170-177` 的
@@ -229,12 +331,19 @@ object ConsoleAdapter {
         lines: List<RenderLine>,
         drawableWidthCells: Int = folder.clientWidth,
     ): List<DisplayRow> = lines.flatMap { line ->
-        folder.fold(line, noBr = line.noBreak).map { row ->
-            row.copy(
-                align = line.align,
-                temporary = line.temporary,
-                indentCells = alignmentShift(line.align, row.cells, drawableWidthCells),
-            )
+        val rows = folder.fold(line, noBr = line.noBreak)
+        if (rows.isEmpty()) {
+            emptyList()
+        } else {
+            val perRow = if (line.divBlocks.isEmpty()) null else assignDivRows(rows, line.divBlocks)
+            rows.mapIndexed { index, row ->
+                row.copy(
+                    align = line.align,
+                    temporary = line.temporary,
+                    indentCells = alignmentShift(line.align, row.cells, drawableWidthCells),
+                    divBlocks = perRow?.getOrNull(index) ?: emptyList(),
+                )
+            }
         }
     }
 
@@ -408,6 +517,9 @@ object ConsoleAdapter {
             align = next.align,
             indentCells = next.indentCells,
             temporary = next.temporary,
+            // 两行的块按序拼接（与核心层并入行的 divBlocks 口径同形：
+            // `LineBufferConsoleSink` 并入分支的 `prev.divBlocks + next.divBlocks`）。
+            divBlocks = prev.divBlocks + next.divBlocks,
         )
     }
 
@@ -433,22 +545,26 @@ object ConsoleAdapter {
     private fun runsOf(
         line: LineBufferConsoleSink.DisplayLine,
         focusColor: Int = LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
+        segmentTexts: List<String>? = null,
+        fontWidth: FontDisplayWidth = StaticFontDisplayWidth,
     ): List<TextRun> {
         val out = ArrayList<TextRun>(line.segments.size)
         val buttons = line.buttons
         var next = 0
         var remaining = if (buttons.isEmpty()) 0 else buttons[0].endCol - buttons[0].startCol
-        for (seg in line.segments) {
+        for ((segIndex, seg) in line.segments.withIndex()) {
             val kind = runKind(seg.kind)
+            val segText = segmentTexts?.getOrNull(segIndex) ?: seg.text
             if (kind != RunKind.BUTTON) {
-                out.add(runOf(seg, line, null, seg.text, -1, focusColor))
+                out.add(runOf(seg, line, null, segText, -1, focusColor))
                 continue
             }
-            val text = seg.text
+            val text = segText
             var p = 0
             while (p < text.length && next < buttons.size && remaining > 0) {
-                val cut = cutEnd(text, p, remaining)
-                remaining -= Grid.cells(text.substring(p, cut))
+                // 按钮列区间与段宽必须同一把尺（core 的 addButton 用 fontWidth 给出 startCol/endCol）。
+                val cut = cutEnd(text, p, remaining, fontWidth, seg.fontName)
+                remaining -= fontWidth.cells(text.substring(p, cut), seg.fontName)
                 out.add(runOf(seg, line, buttons[next].value, text.substring(p, cut), next, focusColor))
                 p = cut
                 if (remaining <= 0) {
@@ -472,9 +588,11 @@ object ConsoleAdapter {
      * 每条 run 只带自己那一片，不带整段原文。
      * [buttonId] 是源按钮编号（-1 = 不带值/身份未知），口径见 [runsOf]。
      *
-     * `back` 槽分两种语义：非按钮段落 `line.backColor`（SETBGCOLOR 的行快照），
-     * **按钮段落 [focusColor]** —— 绘制侧把按钮段的 `back` 当原版 `ButtonColor` 用
-     * （`view/ScreenComposer.glyphFore` 对 `ConsoleStyledString.cs:105-111`），而 `ButtonColor`
+     * `back` 槽分两种语义：非按钮段落 `line.backColor`（**div 已不再写它**——
+     * CONTRACT-HTMLDIV-B1 D4 后 sink 对 div 不落行底色，生产 run 该槽恒 null，
+     * spec 见 [adapt] 的 `backColor` 条），**按钮段落 [focusColor]** —— 绘制侧把按钮段的
+     * `back` 当原版 `ButtonColor` 用（`view/ScreenComposer.glyphFore` 对
+     * `ConsoleStyledString.cs:105-111`），而 `ButtonColor`
      * 的缺省就是 `Config.FocusColor`（spec: `StringStyle.cs:11,22`、`ConfigData.cs:70`）。
      * 若这里仍填行背景色（默认 0x000000），指着按钮时字色会被涂成背景色，黑底黑字不可见。
      */
@@ -504,9 +622,15 @@ object ConsoleAdapter {
     private fun runKind(kind: LineBufferConsoleSink.Kind): RunKind = RunKind.valueOf(kind.name)
 
     /** 从 [from] 起取「[Grid.cells] 累计格数首次达到 [wantCells]」的最短前缀右边界（不劈代理对）。 */
-    private fun cutEnd(text: String, from: Int, wantCells: Int): Int {
+    private fun cutEnd(
+        text: String,
+        from: Int,
+        wantCells: Int,
+        fontWidth: FontDisplayWidth,
+        fontName: String,
+    ): Int {
         var k = nextCodePoint(text, from)
-        while (k < text.length && Grid.cells(text.substring(from, k)) < wantCells) {
+        while (k < text.length && fontWidth.cells(text.substring(from, k), fontName) < wantCells) {
             k = nextCodePoint(text, k)
         }
         return k
@@ -587,6 +711,9 @@ internal class ConsoleAdaptCache {
     /** [cache] 建表时的 focusColor；与请求值不同即整表作废（见类文档「焦点色变化」条）。 */
     private var cacheFocus: Int = LineBufferConsoleSink.DEFAULT_FOCUS_COLOR
 
+    /** [cache] 建表时的排版尺实例（身份比较）；装配期换尺（罕见）即整表作废。 */
+    private var cacheFontWidth: FontDisplayWidth = StaticFontDisplayWidth
+
     /**
      * 整屏 adapt：快照里每一行，命中缓存就原样复用上一次的 [RenderLine] 实例，
      * 未命中（新行、重建行、换焦点色）才走 [ConsoleAdapter.adapt] 逐行新建。
@@ -596,17 +723,21 @@ internal class ConsoleAdaptCache {
     fun adapt(
         snapshot: List<LineBufferConsoleSink.DisplayLine>,
         focusColor: Int = LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
+        fontWidth: FontDisplayWidth = StaticFontDisplayWidth,
     ): List<RenderLine> {
-        val reusable = if (focusColor == cacheFocus) cache else null
+        // 产物里的按钮切段宽度按尺算：尺变了（运行期不发生，但换尺是合法装配动作）
+        // 旧产物全部失真 ⇒ 与焦点色同一处理，整表作废。
+        val reusable = if (focusColor == cacheFocus && fontWidth === cacheFontWidth) cache else null
         val fresh = IdentityHashMap<LineBufferConsoleSink.DisplayLine, RenderLine>(snapshot.size * 2 + 1)
         val out = ArrayList<RenderLine>(snapshot.size)
         for (line in snapshot) {
-            val rendered = reusable?.get(line) ?: ConsoleAdapter.adapt(line, focusColor)
+            val rendered = reusable?.get(line) ?: ConsoleAdapter.adapt(line, focusColor, fontWidth)
             fresh[line] = rendered
             out.add(rendered)
         }
         cache = fresh
         cacheFocus = focusColor
+        cacheFontWidth = fontWidth
         return out
     }
 }
@@ -689,13 +820,25 @@ class ConsoleLogSync(
         while (start < published.size && start > 0 && !published[start].isLogicalLine) {
             start--
         }
-        val staleRows = if (start < published.size) {
-            ConsoleAdapter.fold(folder, published.subList(start, published.size), drawableWidthCells)
-        } else {
-            emptyList()
+        // removeLast 一次删一整条逻辑行 ⇒ 循环次数 = 回撤区间里逻辑行首排的个数。
+        //
+        // 这里**直接数** published 里的逻辑行，不再把旧尾整段 fold 一遍只用来计数。
+        // 2026-11-01 真机 OOM 报告的栈顶就是那次纯计数 fold（ConsoleAdapter.kt:693 →
+        // LineFolder.fold/rowOf/FoldPiece.toRun → TextRun.copy），现场屏上正是 QoL 地图：
+        // 语料 `ERB/魔改内容/qol/qol_MAP.ERB` 的 @QOL_COM400 每 ANIMATERECOLOREDMAPS 毫秒
+        // CLEARLINE + 整屏重印（:33/:40），且 ANIMATION_SEED 随颜色动画变（:584-585），
+        // 于是每个动画 tick 几乎整页都进 diff 的 stale 尾部 ⇒ 每帧把旧尾整段折一遍再丢弃。
+        //
+        // 等价性：rowOf 把首排的 isLogicalLine 写成 firstLine && line.isLogicalLine
+        // （grid/LineFolder.kt:298，spec: PrintStringBuffer.cs:193,206），而 fold 在 runs 为空时
+        // 返回空表（LineFolder.kt:127-129）、有 run 时至少产出一排（主循环要么往 current 里加段、
+        // 要么收一次行）⇒ 一条 RenderLine 贡献的 isLogicalLine 排数恒为
+        // (runs 非空 && 该行 isLogicalLine) ? 1 : 0。
+        var retractLines = 0
+        for (i in start until published.size) {
+            val line = published[i]
+            if (line.isLogicalLine && line.runs.isNotEmpty()) retractLines++
         }
-        // removeLast 一次删一整条逻辑行 ⇒ 循环次数 = 回撤区间里逻辑行首排的个数
-        val retractLines = staleRows.count { it.isLogicalLine }
         var removed = 0
         while (removed < retractLines && buffer.removeLast()) {
             removed++

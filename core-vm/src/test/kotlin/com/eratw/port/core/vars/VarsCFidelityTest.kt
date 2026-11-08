@@ -185,7 +185,7 @@ class VarsCFidelityTest {
         s.enterFunction("F")
 
         val unbound = assertFailsWith<CodeEE> { s.getLength("UR") }
-        assertTrue(unbound.message!!.contains("EmptyRefVar"), unbound.message ?: "")
+        assertEquals("引用类型变量\"UR\"缺少引用对象", unbound.message, "Error.EmptyRefVar 逐字（ReferenceToken.cs:36）")
 
         val target = LongArray(5)
         (s.userVar("UR") as RefUserVar).bindInt(target)
@@ -496,7 +496,7 @@ class VarsCFidelityTest {
 
         // 未绑定：C# SetValueAll 先抛 EmptyRefVar（spec: VariableData.cs:2361 / :2567）
         val e = assertFailsWith<CodeEE> { s.setAll("UR", 5) }
-        assertTrue(e.message!!.contains("EmptyRefVar"), e.message ?: "")
+        assertEquals("引用类型变量\"UR\"缺少引用对象", e.message)
         assertFailsWith<CodeEE> { s.setAllStr("US", "x") }
 
         val ti = LongArray(4)

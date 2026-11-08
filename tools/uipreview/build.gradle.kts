@@ -3,7 +3,7 @@
 // HTTP 用 JDK 自带 com.sun.net.httpserver，PNG 编码用 javax.imageio）。
 // 入口用 application 插件：installDist 后 tools/uipreview/build/install/uipreview/bin/uipreview <子命令>。
 plugins {
-    kotlin("jvm")
+    alias(libs.plugins.kotlin.jvm)
     application
 }
 
@@ -12,7 +12,8 @@ application {
 }
 
 kotlin {
-    jvmToolchain(17)
+    // A-5：17 走 catalog 的 versions.jvmTarget（全仓 JVM 面同源）。
+    jvmToolchain(libs.versions.jvmTarget.get().toInt())
 }
 
 // 设备档案随 jar 分发（组长接线）：档案数据在模块根 profiles/（不在 src/main/resources，
@@ -29,8 +30,8 @@ dependencies {
     implementation(project(":core-vm"))
     implementation(project(":render"))
     testImplementation(kotlin("test"))
-    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testImplementation(libs.junit.jupiter)
+    testRuntimeOnly(libs.junit.platform.launcher)
     // 合成语料装置（MiniTitle）要用 erbcc 的 CorpusCompile + ErbcArtifacts 把临时 mini ERB
     // 编成 .erbc 产物目录。方向安全（与 tools/vmdbg 的测试依赖同一先例）：
     // erbcc(main) → core-vm(main)；uipreview(main) → core-vm + render(main)；uipreview(test) → erbcc(main) 无环。

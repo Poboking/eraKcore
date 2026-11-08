@@ -199,6 +199,37 @@ class CodeSourceViewTest {
         }
     }
 
+    /**
+     * 取指**必须**进页缓存（PERF-PAGEFETCH 2026-10-30 的哨兵）。
+     *
+     * 为什么非要有这一条：2026-10-27 第五批把取指换成「VM 独占一块缓冲、每跨一页重填」的
+     * [CodeSource.fillPage] 形态，顺带绕开了 [CodeSource.page] 的页缓存 —— 语义一点没错、
+     * 整套测试全绿，只有墙钟慢 **8.5 倍**（真产物 6M 指令一轮要取页 8,337,638 次，全落在
+     * 「重搬 16 KiB + 逐字小端解释」上，而 `_CALL`/`_RET` 本来就在调用者页 ↔ 被调页之间来回切）。
+     * 「取指方式变了但值没变」这类病，行为等价用例永远抓不到 —— 只能直接断言计数进了缓存。
+     *
+     * 判据：跑完之后 miss 与 hit 都不许是 0。miss>0 = 确实按页取指（页 0 必然未命中）；
+     * hit>0 = 回边重访的页被缓存服务了（`countingLoop` 的循环体跨页回去）。
+     * 谁再把取指退回旁路形态，两个计数都恒 0，这条当场红。
+     */
+    @Test
+    fun `映射来源下 VM 的取指确实走页缓存，不许旁路`(@TempDir dir: Path) {
+        val words = countingLoop()
+        val lines = IntArray(words.size / Instruction.WORDS) { 1 + it }
+        withMappedProgram(dir, words, lines, pageWords = 2 * Instruction.WORDS) { mappedP ->
+            VirtualMachine(mappedP, StringHost()).run(0)
+            val src = mappedP.codeSource as MappedCodeSource
+            assertTrue(
+                src.cacheMisses > 0L,
+                "VM 跑完一页都没查页缓存（miss=0）：取指又被退回「每跨一页重填 VM 缓冲」的旁路形态了",
+            )
+            assertTrue(
+                src.cacheHits > 0L,
+                "回边重访的页没有被缓存服务（hit=0）：同上，页缓存被绕开 —— 这就是那条 8.5 倍回退",
+            )
+        }
+    }
+
     // ------------------------------------------------------------------
     // 桩
     // ------------------------------------------------------------------

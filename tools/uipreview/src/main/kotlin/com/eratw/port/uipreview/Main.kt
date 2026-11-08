@@ -51,8 +51,10 @@ object Cli {
      */
     const val DEFAULT_STEPS = 20_000_000L
 
-    /** `--columns` 缺省（半角格；语义对应 `CanvasConsoleView.fontColumnsOverride` 的手机可读档）。 */
-    const val DEFAULT_COLUMNS = 110
+    /** `--columns` 缺省（半角格；预览走 `ScreenLayout.fixedColumns` 的固定列口径，
+     *  真机由配置字号派生列数，不再有固定列档）。
+     *  与 `ScreenLayout.DEFAULT_COLUMNS` 同值 136：128 格地图行（`DRAW_COLOREDMAP.ERB:10`）不折。 */
+    const val DEFAULT_COLUMNS = 136
 
     /** `--screen` 缺省（参考真机 V2199A 的 2400x1080 横屏；app 锁 `sensorLandscape`，AndroidManifest.xml:22）。 */
     const val DEFAULT_SCREEN = "2400x1080"

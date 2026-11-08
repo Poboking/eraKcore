@@ -1,7 +1,7 @@
 package com.erbcc.bridge
 
 import com.eratw.port.erbcc.DimKeyword
-import com.eratw.port.erbcc.SymbolTable
+import com.eratw.port.erbcc.LabelTable
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -31,7 +31,7 @@ class DimErhFamilyConstTest {
 
     @Test
     fun `宏套宏与 CONST 链按定点迭代折叠`() {
-        val erh = SymbolTable.collectErhSymbols(
+        val erh = LabelTable.collectErhSymbols(
             """
             #DEFINE MY_BASE 10
             #DEFINE MY_MID MY_BASE + 5
@@ -65,7 +65,7 @@ class DimErhFamilyConstTest {
     fun `互参照的宏与常量双双不纳入且不抛`() {
         // 原版 GetMacro 展开有 MacroOverLimit（LexicalAnalyzer.cs:960-963）；erbcc 侧按
         // 「整轮无进展就停」的定点口径丢弃（sizeConsts 出口），既不折叠也不报错
-        val erh = SymbolTable.collectErhSymbols(
+        val erh = LabelTable.collectErhSymbols(
             """
             #DEFINE P Q
             #DEFINE Q P
@@ -87,12 +87,15 @@ class DimErhFamilyConstTest {
         val corpus = Path.of(raw!!)
         assumeTrue(Files.isDirectory(corpus), "语料目录不存在: $corpus")
 
-        val table = SymbolTable.build(corpus)
+        val table = LabelTable.build(corpus, sizeConsts = ::sizeConsts)
         val consts = sizeConsts(table)
         fun c(name: String): Long? = consts[name.uppercase()]
+        // 根档案（corpusroot 波，2026-11-05）：NOW_VERSION 本身就是版本锚，按根取列
+        //（4.980 DIM.ERH:2=20260326 / 4.981=20261017）；其余 ERH 常量两根同值，维持单一定值。
+        val profile = com.eratw.port.erbcc.ErbccCorpusProfile.detect(corpus)
 
         // DIM.ERH:2 / :7 / :10（`#DIM CONST 名 = 纯整数`）
-        assertEquals(20260326L, c("NOW_VERSION"), "DIM.ERH:2 NOW_VERSION")
+        assertEquals(profile.nowVersion, c("NOW_VERSION"), "DIM.ERH:2 NOW_VERSION（${profile.name} 列）")
         assertEquals(8L, c("本体バージョン"), "DIM.ERH:7 本体バージョン")
         assertEquals(700L, c("REQUIRED_TRUST_恋慕"), "DIM.ERH:10 REQUIRED_TRUST_恋慕")
         // DIM_als.ERH:26（地图 ID 常量，CJK 名）

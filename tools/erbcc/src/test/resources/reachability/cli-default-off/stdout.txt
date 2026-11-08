@@ -1,0 +1,15 @@
+=== 符号链接审计 ===
+编译：文件 2  切片 2  成功 2  失败 0  解析失败切片 0  指令 10（<ms>）
+符号使用：语句 6  VarRef 6 次 / 4 处  关键字 0 次 / 0 处（静态 0 / 动态 0）
+运行期命名空间：全局用户变量 1  注册私有 #DIM 1  系统变量 161
+
+硬差异：1 处
+  未绑定变量 1 处
+    1 处 / 2 次  BAD  （例：01_MAIN.ERB:9 @SUB_ONE）
+            operand=INT indices=1 noArg=false const=false
+编译期 #DIM 告警（level 2，非红）：1 处
+    1 处 / 1 次  BAD  （例：01_MAIN.ERB:7）
+            #DIM 解析失败（level 2）: #DIM BAD 的尺寸 'NONEXISTENT' 不能求值为整数常量（非 #DEFINE 宏 / #DIM CONST 常量，原版 cs:321-323 HasNotExpressionAfterComma） | #DIM BAD, 10 = NONEXISTENT
+
+明细：<out>（2 行）
+结论：报告模式（加 --strict 可作闸）

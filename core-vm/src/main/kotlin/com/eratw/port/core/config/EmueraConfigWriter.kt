@@ -57,8 +57,9 @@ object EmueraConfigWriter {
      *     追加到文件末尾；被 `ConfigData.cs:433` 三条规则跳过的键不追加。
      *   * 已知键的行若当前值命中三条「不写出」规则（`CompatiDRAWLINE` 恒跳过、
      *     `ChangeMasterNameIfDebug` 为 true、`LastKey` 为 0），保留原行不动（不替换、不删除）。
-     *   * 换行符：LF / CRLF 按行保留；追加块用原文件的主流行尾（多数派，平票取先出现的），
-     *     原文件没有行尾时用 LF。末尾是否有换行也照原文件：原本没有的，追加后仍然没有。
+     *   * 换行符：LF / CRLF / 单独的 CR 按行保留；追加块用原文件的主流行尾（多数派，平票取先出现的），
+     *     原文件没有行尾时用 LF。末尾是否有换行也照原文件（`\r\n` / 单独的 CR 都算行尾）：
+     *     原本没有的，追加后仍然没有。
      *   * 原文为空串时没有风格可循：按 `SaveConfig` 的 `WriteLine` 口径生成整份配置，
      *     块尾带一个行尾（spec: `ConfigData.cs:447`、`:451`）。
      *
@@ -102,9 +103,11 @@ object EmueraConfigWriter {
             out.append(eol)
             return out.toString()
         }
-        val terminated = original.endsWith('\n')
+        // 末行是否带行尾：三种行尾都算（`\r\n` / `\n` / 单独的 `\r`）。只看 `\n` 会把
+        // 「CR 换行且文件以 CR 结尾」误判成没结尾，追加前再补一个 CR ⇒ 多出一行空行。
+        val terminated = lines.last().eol.isNotEmpty()
         for (item in missing) {
-            if (out.isNotEmpty() && out[out.length - 1] != '\n') {
+            if (out.isNotEmpty() && out[out.length - 1] != '\n' && out[out.length - 1] != '\r') {
                 out.append(eol) // 原文末尾没有换行：只在追加块之前补分隔符，块尾仍不补
             }
             out.append(writeLine(item, english))
@@ -214,12 +217,18 @@ object EmueraConfigWriter {
         return null
     }
 
-    /** 一行原文 + 它自己的行尾（LF / CRLF / 空串表示末行没有换行）。 */
+    /** 一行原文 + 它自己的行尾（LF / CRLF / CR / 空串表示末行没有换行）。 */
     private class RawLine(val text: String, val eol: String)
 
     /**
-     * 按 LF 切行并保留每行的行尾。裸 CR 不当换行（原版 `StreamWriter` 只产出 CRLF 或 LF），
-     * 会作为行内容保留。
+     * 保留每行自己的行尾切行。三种行尾都认：`\r\n` / `\n` / **单独的 `\r`**。
+     *
+     * 裸 CR 必须当换行，不能当内容：读取侧 [EmueraConfigParser.readConfigLines] 照原版
+     * `File.ReadAllLines`（`MinorShift.Emuera.Sub/EraStreamReader.cs:52`）把 CR 当行尾，
+     * 若写回侧把 CR 留在行文本里，同一份 CR 换行的配置文件「读→合并→写」就不再是恒等 ——
+     * 合并只认得见整行形状的键，CR 会把整份文件粘成一行，键全部匹配不上，于是既保留原样
+     * 又追加一份缺失键，落盘成双份。两侧必须同一套行定义（原版 StreamWriter 只产出 CRLF，
+     * 这是本层「保留式写回」这一偏离的配套口径）。
      */
     private fun splitLines(original: String): List<RawLine> {
         if (original.isEmpty()) {
@@ -229,11 +238,17 @@ object EmueraConfigWriter {
         var start = 0
         var index = 0
         while (index < original.length) {
-            if (original[index] == '\n') {
+            val c = original[index]
+            if (c == '\n') {
                 val crlf = index > start && original[index - 1] == '\r'
                 val textEnd = if (crlf) index - 1 else index
                 lines += RawLine(original.substring(start, textEnd), if (crlf) "\r\n" else "\n")
                 index++
+                start = index
+            } else if (c == '\r') {
+                val crlf = index + 1 < original.length && original[index + 1] == '\n'
+                lines += RawLine(original.substring(start, index), if (crlf) "\r\n" else "\r")
+                index += if (crlf) 2 else 1
                 start = index
             } else {
                 index++
@@ -246,33 +261,29 @@ object EmueraConfigWriter {
     }
 
     /**
-     * 追加块用的行尾：原文件里 CRLF / LF 谁多取谁，平票取先出现的，没有行尾时用 LF。
+     * 追加块用的行尾：原文件里 CRLF / LF / CR 谁多取谁，平票取先出现的，没有行尾时用 LF。
      * 已有行不受影响 —— 每行保留自己的行尾。
      */
     private fun dominantEol(lines: List<RawLine>): String {
         var crlf = 0
         var lf = 0
+        var cr = 0
         var first = ""
         for (line in lines) {
             when (line.eol) {
-                "\r\n" -> {
-                    crlf++
-                    if (first.isEmpty()) {
-                        first = line.eol
-                    }
-                }
-
-                "\n" -> {
-                    lf++
-                    if (first.isEmpty()) {
-                        first = line.eol
-                    }
-                }
+                "\r\n" -> crlf++
+                "\n" -> lf++
+                "\r" -> cr++ // 单独的 CR 也是行尾（见 [splitLines]）
+            }
+            // 末行没有行尾（空串）：不参与多数派，也不算「先出现的」。
+            if (line.eol.isNotEmpty() && first.isEmpty()) {
+                first = line.eol
             }
         }
         return when {
-            crlf > lf -> "\r\n"
-            lf > crlf -> "\n"
+            crlf > lf && crlf > cr -> "\r\n"
+            lf > crlf && lf > cr -> "\n"
+            cr > crlf && cr > lf -> "\r"
             else -> first.ifEmpty { "\n" }
         }
     }

@@ -1,0 +1,29 @@
+# 标注（rust-staging-refresh 车道，2026-11-01）：本档是 1101 波动合并**前**的历史快照档，
+#         档里记录的 compiler-digest c166fa80b711… 已过期（core-vm 收编 31 个文件后现读为
+#         4ef357c0758d…）；正文读数按纪律不改写，现状判据（五档拒因原文）见
+#         haruki-staging-reject-1101.txt。
+#         反向证明的五档在新编译器上仍逐档被拒，档名与判据一字未动。
+# erbcc-rs / rust-staging 车道登记：闸 2 反向证明的拒绝文案原文
+# 产法：python devtools/verify_rust_erbc_staging.py gate2 --register
+# 时间：2026-11-01 12:49:01
+# 每条都必须 rc≠0 且屏上带「CMP-66 新鲜度对账失败：」（app/build.gradle.kts:259 的 hard 档）
+
+### 档 compiler-digest：把 compiler-digest 行的十六进制改掉一位（容器与语料都不动）
+rc=1
+> CMP-66 新鲜度对账失败：产物由旧编译器产出：manifest compiler-digest c166fa80b711623417ffb9f0b79be99f78b1eb701556e62a02bd58663086a4b0（compiler-sources 194 个），当前编译器源码树 c166fa80b711623417ffb9f0b79be99f78b1eb701556e62a02bd58663086a4b2（194 个）→ 先跑 ./gradlew :tools:erbcc:compileCorpus 再出包
+
+### 档 source-sha：把第一条 source 行的 sha256 改掉一位（文件集与容器都不动）
+rc=1
+> CMP-66 新鲜度对账失败：语料文件 sha256 变了：00_const.ERH（清单 d2c3dd2ee38cce51fdf28f02e913f8eb1bbb4a014a9ea070eeb0c76f7fc38bd0，实际 d2c3dd2ee38cce51fdf28f02e913f8eb1bbb4a014a9ea070eeb0c76f7fc38bd7）→ 语料改过但没重编
+
+### 档 build-mode：把 build-mode 由 full 改成 limited（模拟 --limit 受限产物）
+rc=1
+> CMP-66 新鲜度对账失败：产物不是全量档（build-mode limited）：受限产物（--limit N）不得随包，请用 :tools:erbcc:compileCorpus 的全量产物
+
+### 档 no-digest-line：整行删掉 compiler-digest / compiler-sources（模拟旧编译器产物）
+rc=1
+> CMP-66 新鲜度对账失败：manifest 没有 compiler-digest 行（旧编译器/旧格式产物）→ 无法证明产物出自当前编译器；先跑 ./gradlew :tools:erbcc:compileCorpus 再出包
+
+### 档 corpus-drift：清单一个字不改，改随包语料根里那个 ERB（真「语料改过没重编」）
+rc=1
+> CMP-66 新鲜度对账失败：语料文件 sha256 变了：01_main.ERB（清单 82009f58dc417df8bd7b1472aa25b35a04f4efd8ee91f7e79a4da0b9eeab3a89，实际 b28c9d53b09e5a9f3408e159319efededb607e1d4ff5348b4d00996c55372acd）→ 语料改过但没重编

@@ -8,6 +8,8 @@ import com.eratw.port.core.host.BinaryFileOps
 import com.eratw.port.core.host.FileOps
 import com.eratw.port.core.host.GraphicsPool
 import com.eratw.port.core.image.PngDecoder
+import com.eratw.port.core.save.SaveConfig
+import com.eratw.port.core.save.SaveWiring
 import com.eratw.port.core.vars.VariableStore
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -123,7 +125,7 @@ class GsavePngTest {
         assertEquals(1L, pngI(ctx, "GCREATE", 10, 3, 2))
         assertEquals(1L, pngI(ctx, "GSAVE", 10, 7))
 
-        val png = ops.images["sav/img0007.png"]
+        val png = ops.images["img0007.png"]
         assertTrue(png != null, "应经二进制通道落盘，实际 images=${ops.images.keys} texts=${ops.texts.keys}")
         // PNG 签名（PNG 规范 5.2）：89 50 4E 47 0D 0A 1A 0A
         val sig = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
@@ -150,7 +152,7 @@ class GsavePngTest {
         val before = pngPool(ctx).get(10).pixels.copyOf()
 
         assertEquals(1L, pngI(ctx, "GSAVE", 10, 3))
-        val decoded = PngDecoder.decode(ops.images.getValue("sav/img0003.png"))
+        val decoded = PngDecoder.decode(ops.images.getValue("img0003.png"))
         assertEquals(4, decoded.width)
         assertEquals(3, decoded.height)
         // RGBA 逐通道往返：A/R/G/B 顺序写错会在这里显形
@@ -188,7 +190,7 @@ class GsavePngTest {
         val ctx = pngCtx(ops)
         assertEquals(1L, pngI(ctx, "GCREATE", 10, 2, 2))
         assertEquals(1L, pngI(ctx, "GSAVE", 10, 9))
-        val text = ops.texts["sav/img0009.png"]
+        val text = ops.texts["img0009.png"]
         assertTrue(text != null && text.startsWith("ERATW-GFX 1"), "回落载体应带旧魔数，实际 $text")
         // 旧载体仍可被 GLOAD 读回（readImageFile 的第三跳）
         assertEquals(1L, pngI(ctx, "GLOAD", 17, 9))
@@ -206,7 +208,7 @@ class GsavePngTest {
         val ctx = pngCtx(ops)
         assertEquals(1L, pngI(ctx, "GCREATE", 10, 2048, 2048))
         assertEquals(1L, pngI(ctx, "GSAVE", 10, 1))
-        val png = ops.images.getValue("sav/img0001.png")
+        val png = ops.images.getValue("img0001.png")
         assertEquals(2048, intAt(png, 16))
         assertEquals(2048, intAt(png, 20))
     }
@@ -225,6 +227,39 @@ class GsavePngTest {
         // {index:0000} 至少 4 位，超过 4 位按实宽（:9473）
         assertEquals(1L, pngI(ctx, "GSAVE", 10, 0))
         assertEquals(1L, pngI(ctx, "GSAVE", 10, 12345))
-        assertEquals(setOf("sav/img0000.png", "sav/img12345.png"), ops.images.keys.toSet())
+        assertEquals(setOf("img0000.png", "img12345.png"), ops.images.keys.toSet())
+    }
+
+    /**
+     * GSAVE / GLOAD 的目录跟着 `Config.SavDir` 走，而不是恒 `sav/`。
+     *
+     * 判据：`GetSaveDataPathImage`（spec: FunctionMethodCreator.cs:9471-9474）拼的是
+     * `Config.SavDir`，而 `SavDir` 由 `UseSaveFolder` 二选一（spec: Config.cs:471-481）；
+     * 注册默认 `t: false`（spec: ConfigData.cs:97）。此前 GSAVE/GLOAD 硬编码 `sav/`，
+     * 与文本通道（`SAVETEXT`/`LOADTEXT` 走同一份前缀）分家：`USE SAV FOLDER:NO` 时
+     * 图片进 `sav/`、文本进根目录，原版两者同目录。
+     */
+    @Test
+    fun `GSAVE GLOAD 与 SAVETEXT 同目录且跟随 USE SAV FOLDER`() {
+        val ops = PngFileOps()
+        val ctx = pngCtx(ops) { path -> ops.images[path] }
+        assertEquals(1L, pngI(ctx, "GCREATE", 10, 2, 2))
+
+        // 出厂 false（未装 SaveWiring、条目表默认）⇒ 两条通道都落根目录
+        assertEquals(1L, pngI(ctx, "GSAVE", 10, 4))
+        assertEquals(1L, pngI(ctx, "SAVETEXT", "T", 4))
+        assertTrue("img0004.png" in ops.images, "UseSaveFolder=false ⇒ 根目录：${ops.images.keys}")
+        assertTrue("txt04.txt" in ops.texts, "文本通道同口径：${ops.texts.keys}")
+
+        // 会话装配 UseSaveFolder=YES（语料 emuera.config:51）⇒ 两条通道一起进 sav/
+        SaveWiring.install(ctx.store, SaveConfig(useSaveFolder = true), 20)
+        assertEquals(1L, pngI(ctx, "GSAVE", 10, 5))
+        assertEquals(1L, pngI(ctx, "SAVETEXT", "U", 5))
+        assertTrue("sav/img0005.png" in ops.images, "Config.cs:471-477 ⇒ sav/：${ops.images.keys}")
+        assertTrue("sav/txt05.txt" in ops.texts, "文本通道同口径：${ops.texts.keys}")
+        // GLOAD 用同一份前缀：装好 YES 之后能读回 sav/ 里的图，读到的是自己刚写的像素
+        val before = pngPool(ctx).get(10).pixels.copyOf()
+        assertEquals(1L, pngI(ctx, "GLOAD", 17, 5))
+        assertTrue(before.contentEquals(pngPool(ctx).get(17).pixels), "GLOAD 应从 sav/ 读回同一份像素")
     }
 }

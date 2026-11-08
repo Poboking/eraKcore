@@ -175,6 +175,12 @@ class EffectiveConfig private constructor(
     /**
      * spec: `Config.cs:594-604`：`ReduceArgumentOnLoad` 为 `YES` ⇒ true、`NO` ⇒ false、
      * `ONCE` ⇒ **保持上一次的值**（这里用 null 表示「不改动」，由宿主拿上会话状态自己合）。
+     *
+     * 移植侧**无消费点**：原版只拿它在三个构建器里开装载期常量折叠
+     * （`ArgumentParser.cs:44/58` SP_PRINT_IMG、`:125` SP_PRINT_SHAPE、
+     * `:235/248/284` SP_DT_COLUMN_OPTIONS 的 `Restructure(exm)`），而本仓有意不做这一遍
+     * （`stmt/ArgBuilders.kt` 类头：省略 `Restructure`，属装载期优化、不影响 AST 形态）
+     * ⇒ 该位只报数，不接线。
      */
     var needReduceArgumentOnLoad: Boolean? = null
         private set
@@ -193,8 +199,9 @@ class EffectiveConfig private constructor(
      * spec: `Config.cs:310` 读 `ConfigCode.UseRenameFile`；装载侧只在 true 时读文件、
      * 文件缺失时打错误行（`Process.cs:261-274`）。默认 false（`ConfigSpec.kt:103` = `ConfigData.cs:46`）。
      *
-     * 本类只报数：**接线点**在 `CorpusCompile.loadRenameDic`（现在无条件加载）与
-     * `LogicalLineReader` 的 `renameDic` 形参（运行期装配侧没有调用点传它）。
+     * 本类只报数：**接线点**在 `CorpusCompile`（装载前按此位决定是否 `loadRenameDic`）、
+     * `ModImportController`（补丁导入同一门控）与 `LogicalLineReader` 的 `renameDic` 形参
+     * （运行期装配侧没有调用点传它 —— 改名只发生在装载期）。
      */
     val useRenameFile: Boolean get() = bool(ConfigKey.UseRenameFile)
 

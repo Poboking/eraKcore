@@ -201,11 +201,11 @@ class StackOpcodeTest {
             IntCase("_STK_SEQ", "_STK_PUSH_STR \"a\"\n_STK_PUSH_STR \"a\"\n_STK_SEQ", 1),
             IntCase("_STK_SNE", "_STK_PUSH_STR \"a\"\n_STK_PUSH_STR \"b\"\n_STK_SNE", 1),
             IntCase("_STK_SLT", "_STK_PUSH_STR \"a\"\n_STK_PUSH_STR \"b\"\n_STK_SLT", 1),
-            // 官方 bug：`<=` 判 c<0，相等时得 0（详见 specs/verify-notes.md §1）
-            IntCase("_STK_SLE", "_STK_PUSH_STR \"b\"\n_STK_PUSH_STR \"b\"\n_STK_SLE", 0),
+            // 4.981：`<=` 判 c<=0，相等得 1（spec: OperatorMethod.cs:578）
+            IntCase("_STK_SLE", "_STK_PUSH_STR \"b\"\n_STK_PUSH_STR \"b\"\n_STK_SLE", 1),
             IntCase("_STK_SGT", "_STK_PUSH_STR \"b\"\n_STK_PUSH_STR \"a\"\n_STK_SGT", 1),
-            // 官方 bug：`>=` 判 c<0，方向整个反了 —— "a">="b" 得 1
-            IntCase("_STK_SGE", "_STK_PUSH_STR \"a\"\n_STK_PUSH_STR \"b\"\n_STK_SGE", 1),
+            // 4.981：`>=` 判 c>=0 —— "a">="b" 得 0（spec: OperatorMethod.cs:547）
+            IntCase("_STK_SGE", "_STK_PUSH_STR \"a\"\n_STK_PUSH_STR \"b\"\n_STK_SGE", 0),
             // JZ_POP 取跳转分支：结果为 0；没跳的话栈顶会是 99
             IntCase(
                 "_STK_JZ_POP",
@@ -392,7 +392,7 @@ class StackOpcodeTest {
             DiffCase(Binary(OperatorCode.GREATER_EQUAL, IntLiteral(3), IntLiteral(4), OperandType.INT), "_STK_PUSH_IMM 3\n_STK_PUSH_IMM 4\n_STK_GE"),
             DiffCase(Binary(OperatorCode.EQUAL, IntLiteral(3), IntLiteral(3), OperandType.INT), "_STK_PUSH_IMM 3\n_STK_PUSH_IMM 3\n_STK_EQ"),
             DiffCase(Binary(OperatorCode.NOT_EQUAL, IntLiteral(3), IntLiteral(3), OperandType.INT), "_STK_PUSH_IMM 3\n_STK_PUSH_IMM 3\n_STK_NE"),
-            // 字符串比较（含两处官方 bug）
+            // 字符串比较（判据 = 4.981 OperatorMethod.cs:547/:578）
             DiffCase(Binary(OperatorCode.GREATER_EQUAL, StrLiteral("a"), StrLiteral("b"), OperandType.INT), "_STK_PUSH_STR \"a\"\n_STK_PUSH_STR \"b\"\n_STK_SGE"),
             DiffCase(Binary(OperatorCode.LESS_EQUAL, StrLiteral("b"), StrLiteral("b"), OperandType.INT), "_STK_PUSH_STR \"b\"\n_STK_PUSH_STR \"b\"\n_STK_SLE"),
             DiffCase(Binary(OperatorCode.GREATER, StrLiteral("b"), StrLiteral("a"), OperandType.INT), "_STK_PUSH_STR \"b\"\n_STK_PUSH_STR \"a\"\n_STK_SGT"),

@@ -33,6 +33,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -1394,6 +1395,78 @@ class ProcessRuntimeTest {
         )
         val console = com.eratw.port.core.host.LineBufferConsoleSink()
         val rt = ProcessRuntime(program, VariableStore(), FunctionTable(emptyList()), consoleSink = console)
+        rt.execute()
+        val text = console.lines().joinToString("") { line ->
+            line.segments.joinToString("") { it.text }
+        }
+        assertEquals("UNICODE函数: 传入了控制字符对应的值(0x9)", text)
+    }
+
+    /**
+     * B6 FN-05 收口（W7-judge）：事件成员在 Program 侧的函数名是 `KEY#defIndex` 形
+     * （erbcc 切片签名，CorpusCompile.kt:469-477），而 `FunctionTable` 键表
+     * （nonEventByKey / eventMemberByKey）存的是**裸大写名**——旧缺省通道
+     * `table.sourceFileOf(currentFunctionKey)` 对一切事件成员帧恒 null。
+     * 现缺省通道改走 `table.sourceFileOfIndex(currentFunctionIndex)`（帧下标 =
+     * `funcStack[depth]` 原值，Vm.kt 的 currentFunctionIndex）直取 meta.position。
+     * 本用例钉「事件成员帧能出源文件前缀」。
+     */
+    @Test
+    fun `事件成员帧的 UNICODE 告警能出源文件前缀（FN-05 帧直取）`() {
+        val program = Assembler.assemble(
+            """
+            .func main slots=1
+              _EVAL_STR ${'$'}0, R0
+              _HALT
+            """.trimIndent(),
+            listOf(FuncCall("UNICODE", listOf(IntLiteral(9)), OperandType.STR)),
+        )
+        val console = com.eratw.port.core.host.LineBufferConsoleSink()
+        val table = FunctionTable(
+            listOf(
+                FuncMeta(
+                    index = 0, key = "EVENTCOM", name = "EVENTCOM",
+                    isEvent = true, defIndex = 7, position = "ERB/COM.ERB:12",
+                ),
+            ),
+        )
+        // 键形不同源的对照钉：按帧名（`KEY#defIndex`）查键表依旧落空（这是诊断面的既有形状），
+        // 但运行期通道已不经它。
+        assertNull(table.sourceFileOf("EVENTCOM#7"), "键表只存裸大写名；`KEY#defIndex` 帧名不命中")
+        assertEquals("ERB/COM.ERB", table.sourceFileOfIndex(0), "帧下标直取 meta.position")
+        val rt = ProcessRuntime(program, VariableStore(), table, consoleSink = console)
+        rt.execute()
+        val text = console.lines().joinToString("") { line ->
+            line.segments.joinToString("") { it.text }
+        }
+        assertEquals(
+            "注意: ERB/COM.ERB的第2行: UNICODE函数: 传入了控制字符对应的值(0x9)",
+            text,
+            "事件成员帧必须出前缀（修复前此处是无前缀回落）",
+        )
+    }
+
+    @Test
+    fun `合成事件入口帧仍走无前缀回落（position 是合成标记）`() {
+        val program = Assembler.assemble(
+            """
+            .func main slots=1
+              _EVAL_STR ${'$'}0, R0
+              _HALT
+            """.trimIndent(),
+            listOf(FuncCall("UNICODE", listOf(IntLiteral(9)), OperandType.STR)),
+        )
+        val console = com.eratw.port.core.host.LineBufferConsoleSink()
+        val table = FunctionTable(
+            listOf(
+                FuncMeta(
+                    index = 0, key = "EVENTCOM", name = "EVENTCOM",
+                    defIndex = 90_001, position = "·event-entry·",
+                ),
+            ),
+        )
+        assertNull(table.sourceFileOfIndex(0), "· 起头的合成标记不是源文件")
+        val rt = ProcessRuntime(program, VariableStore(), table, consoleSink = console)
         rt.execute()
         val text = console.lines().joinToString("") { line ->
             line.segments.joinToString("") { it.text }

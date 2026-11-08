@@ -836,6 +836,7 @@ object StateHash {
                 if (f.isSynthetic) continue
                 if (f.name.startsWith("$") || f.name == "Companion") continue
                 if (f.name in BACKREFERENCE_FIELDS) continue
+                if (f.name in HOST_DERIVED_FIELDS) continue
                 out.add(f)
             }
             c = c.superclass
@@ -874,6 +875,35 @@ object StateHash {
 
     /** 反向上引用：结构冗余且必然成环（XML 节点父链、属性宿主）。 */
     private val BACKREFERENCE_FIELDS = setOf("parentNode", "ownerElement", "parent", "owner")
+
+    /**
+     * **宿主派生字段**：值取决于机器/临时目录，不是游戏状态，一律不进链。
+     *
+     * - `GraphicsBuffer.fileSource`（M12-MEM-GFX）：延迟装载时记下的**图片路径**，
+     *   只是渲染侧「按路径解位图」的提示。纳入它会带来两个坏处：
+     *   1) 它是路径 —— 与 [normalizePoolText] 归一掉的那类临时根/临时目录名同类，
+     *      进了链就让链值随机器与 E2E 临时目录漂移，(a)「两次运行逐条相同」跨机即失效；
+     *   2) 它不承载状态 —— 像素、尺寸、画写结果都在 `pixelData` / `width` / `height` 里照旧纳入，
+     *      缓冲被画写后 `fileSource` 归 null 这件事本身也已由像素变化覆盖。
+     * - `GraphicsBuffer.deferredSource`（`af4856d9` 的图像池回收）：重解用的**闭包**，
+     *   闭包里是文件字节（宿主对象图，本类 KDoc「不纳入项 5」点名排除的那类）。
+     *   它表示「像素还能从文件重解」这件内存管理属性，不是脚本能观察到的状态；
+     *   像素本身照旧由 `pixelData` 纳入，回收与否不改变任何可观察读数。
+     *   注意：该字段加进来时**没跟着重落链常量**，于是 `origin/main` 上 L3 链尾一直是红的
+     *   （`af4856d9` 之后、`cf6493ae` 之前无人跑全闸）—— 这里排除它之后链值回到已登记值，
+     *   是把「装置误报」修掉，不是把红改绿。
+     * - `GraphicsBuffer.lastWriteAtMs`（D5 预算哨兵 `msSinceLastWrite` 的锚点，
+     *   `System.nanoTime() / 1_000_000L`）：**宿主单调时钟派生**的「最近一笔图形写时刻」。
+     *   纳入它的后果是判据 (a)(f) 在第一个有图形写的节（#11 GOLDEN_GVIEW）起 aux:gfx 必分叉
+     *   —— 同进程两轮的墙钟读数不可能逐位相同；这在本装置的口径里与 [normalizePoolText]
+     *   归一掉的时钟文本同类（见类 KDoc「不纳入项 1」），是宿主源不确定、不是引擎行为不确定。
+     *   它不承载 ERB 可见状态 —— 消费侧 `msSinceLastWrite()` 是现算的时长差，像素/尺寸/画写
+     *   结果都在 `pixelData` / `width` / `height` 里照旧纳入。
+     *
+     * 加字段时先问一句：这个值换台机器会变吗？它是宿主对象图的一环吗？命中任一条就加到这里，
+     * 别去重落链常量（重落是给「初态被合法改变」用的，不是给宿主派生值打补丁用的）。
+     */
+    private val HOST_DERIVED_FIELDS = setOf("fileSource", "deferredSource", "lastWriteAtMs")
 
     private val EXCLUDED_PSEUDO = setOf(PseudoKind.RAND, PseudoKind.LINECOUNT, PseudoKind.INT_MAX, PseudoKind.INT_MIN)
 

@@ -4,6 +4,7 @@ import com.eratw.port.core.expr.ArgsEndWith
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.ExprToken
 import com.eratw.port.core.expr.ExprTokenKind
+import com.eratw.port.core.expr.FloatLiteral
 import com.eratw.port.core.expr.FormPart
 import com.eratw.port.core.expr.FormStringTerm
 import com.eratw.port.core.expr.IntLiteral
@@ -106,7 +107,9 @@ object ArgBuilders {
         ArgType.SP_PRINT_RECT -> printShape(ctx, maxArg = 4)
         ArgType.SP_PRINT_SPACE -> printShape(ctx, maxArg = 1)
         ArgType.SP_HTML_PRINT -> htmlPrint(ctx)
+        ArgType.SP_CALLSTR -> callStr(ctx)
         ArgType.SP_DT_COLUMN_OPTIONS -> dtColumnOptions(ctx)
+        ArgType.SP_SETIMAGELAYERL -> setImageLayerL(ctx)
         ArgType.INT_ASIGN, ArgType.STR_ASIGN ->
             throw StmtParseException(ctx.line, -1, ctx.statementName, "VARI/VARS 参数应由语句层手工解析")
         ArgType.__NULL__ ->
@@ -198,7 +201,7 @@ object ArgBuilders {
      * `Instruction` = "命令:"（Lang.cs:1918，emuera-zhs.xml:434），
      * `TooManyArg` = "参数过多"（Lang.cs:1930，emuera-zhs.xml:437）。
      * 故 `INPUTS "ANS", 0, 1` 在 PC 上打的是 `INPUTS命令:参数过多`
-     * （装载告警基准 `.workbuddy/golden-pc-loadwarnings.txt:4`，同款 BINPUTS 见 `:5`；
+     * （装载告警基准 `<internal-workdir>/golden-pc-loadwarnings.txt:4`，同款 BINPUTS 见 `:5`；
      * 语句侧触发点 ArgumentParser.cs:1157 与 SP_INPUTS 的 `:1155-1163`）。
      * 本侧统一走 [LangKey.TooManyArg] + [argPrefix]（CMP-60 渲染层），与基准逐字一致。
      */
@@ -476,6 +479,36 @@ object ArgBuilders {
         return ExpressionsArgument(types, list)
     }
 
+    /**
+     * SETIMAGELAYERL 的声明类型数组（spec: ArgumentBuilder.cs:2687-2690 argumentTypeArray）：
+     * String, Integer x6, 第 8 槽 typeof(void)（CM_ARRAY）。只在编码时落盘，执行期不做类型校验。
+     */
+    private val LAYER_L_TYPES: List<ArgValueType> = listOf(
+        ArgValueType.STR,
+        ArgValueType.INT, ArgValueType.INT, ArgValueType.INT,
+        ArgValueType.INT, ArgValueType.INT, ArgValueType.INT,
+        ArgValueType.VOID,
+    )
+
+    /**
+     * spec: ArgumentBuilder.cs:2679-2728 SP_SETIMAGELAYERL_ArgumentBuilder。
+     *
+     * 8 槽：spriteName, depth, xpos, ypos, width, height, opacity, CM_ARRAY；minArg = 2。
+     * 该构造器重写了 CreateArgument 且**不走通用 checkArgumentType**：只显式校验第 1/2 槽的类型
+     * （:2706-2715，空实参同样报 IncorrectArg），第 3..8 槽不校验类型，超 8 个实参静默丢弃
+     * （:2719-2725 只取 terms[0..7]）。
+     */
+    private fun setImageLayerL(ctx: ArgCtx): Argument {
+        val list = popTerms(ctx)
+        if (list.size < 2) fail(ctx, LangKey.NotEnoughArguments)
+        if (list[0]?.operandType != OperandType.STR) fail(ctx, LangKey.IncorrectArg, 1)
+        val depth = list[1]
+        if (depth == null || depth.operandType == OperandType.STR) fail(ctx, LangKey.IncorrectArg, 2)
+        // Encoder 要求 types.size == terms.size（FlatStatements 里的 check），故按实际实参个数取前缀。
+        val terms = if (list.size > LAYER_L_TYPES.size) list.take(LAYER_L_TYPES.size) else list
+        return ExpressionsArgument(LAYER_L_TYPES.take(terms.size), terms)
+    }
+
     /** spec: ArgumentParser.cs:890-909 METHOD —— 原版绑定 FunctionMethod 并检查参数类型（M2 符号层） */
     private fun method(ctx: ArgCtx): Argument {
         val list = popTerms(ctx)
@@ -592,21 +625,57 @@ object ArgBuilders {
         return -1
     }
 
-    /** spec: ArgumentParser.cs:2534-2570 STR_DOUBLE */
+    /**
+     * spec: ArgumentParser.cs:2535-2565 STR_DOUBLE（+ LexicalAnalyzer.cs:232-266 `ReadDouble`）。
+     *
+     * 原版执行序（照抄，勿重排）：
+     * 1. 先按逗号切出首参词法流（`Analyse(charStream, LexEndWith.Comma)`，:2538）——逗号之后是
+     *    **裸 double 字面量**，不是表达式；
+     * 2. 逗号后取 double：`ReadDouble` 是**前缀扫描**（可选符号 → 数字/小数点 → 可选 `e|E` →
+     *    可选 `-` → 数字/小数点），扫到哪算到哪，再对子串 `double.Parse`；
+     * 3. 子串解析抛异常 ⇒ 折 `0.0` 且**不告警**（:2553-2556 的 `catch` 越过 :2548 的告警）；
+     * 4. 解析成功但未到行尾 ⇒ **告警 TooManyArg（level 1，保留已解析值）**（:2548-2551）；
+     * 5. 最后才归约首参表达式；归约不出项 ⇒ 告警 WrongFormat（level 2）+ 作废该行（:2558-2563）。
+     *
+     * 移植侧此前四处偏差（W10 · AUD-p9p10）：
+     * - 尾参用 `toDoubleOrNull()`（全串匹配、全有或全无）：`1.5abc` / `1.5 2` 原版得 1.5 并告警，
+     *   移植得 0.0 且静默；
+     * - 第 4 步的 TooManyArg 告警整个缺失（其余构造器都有，唯此一处漏）；
+     * - 逗号切分用裸 `indexOfFirst`，不认括号深度：`TOOLTIP_SETDELAY F(1,2), 100` 会在
+     *   `F(1` 处切断（原版 `Analyse(…, LexEndWith.Comma)` 只在 `nestBracketS == 0` 时停，
+     *   `LexicalAnalyzer.cs:836-843`）；
+     * - 无逗号分支不校验首参归约结果，把 `null` 塞进 `StrDoubleArgument`（运行期空表达式位）。
+     *
+     * 读数与切分一律复用同族既有件：[readDouble]（Cmp46 夹具在钉）与 [topLevelCommaIndex]，
+     * 不另造一份 ReadDouble。
+     */
     private fun strDouble(ctx: ArgCtx): Argument {
         val tokens = lexWords(ctx)
-        val commaIdx = tokens.indexOfFirst { it is Token.Symbol && it.char == ',' }
-        if (commaIdx < 0) {
-            val term = com.eratw.port.core.expr.ExprParser(
-                toExprTokens(tokens), ctx.resolver, ctx.config,
-            ).reduceExpressionTerm(TermEndWith.EoL)
-            return StrDoubleArgument(term, 0.0)
+        val commaIdx = topLevelCommaIndex(tokens)
+        // 无逗号：原版 `Analyse(…, LexEndWith.Comma)` 吃掉全部词，`ReadDouble` 面对空流抛异常
+        // ⇒ 0.0 且不告警（:2540-2557），尾参整段跳过。
+        var d = 0.0
+        if (commaIdx >= 0) {
+            val comma = tokens[commaIdx] as Token.Symbol
+            val st = CharStream(ctx.argText)
+            st.jump(comma.col + 1)
+            d = try {
+                ctx.lexer.skipWhiteSpace(st)
+                val value = readDouble(st)
+                // spec: ArgumentParser.cs:2548-2551 —— 数字之后的余字是 level 1 TooManyArg，值照留。
+                ctx.lexer.skipWhiteSpace(st)
+                if (!st.eos) tooMany(ctx)
+                value
+            } catch (e: NumberFormatException) {
+                // spec: ArgumentParser.cs:2553-2556 —— `catch { doublevalue = 0.0; }`，
+                // **静默**折 0.0（注意与 SP_TIMES 的 :351-355 不同，那里要告警「不是实数」）。
+                0.0
+            }
         }
+        val head = if (commaIdx < 0) tokens else tokens.subList(0, commaIdx)
         val term = com.eratw.port.core.expr.ExprParser(
-            toExprTokens(tokens.subList(0, commaIdx)), ctx.resolver, ctx.config,
-        ).reduceExpressionTerm(TermEndWith.EoL) ?: fail(ctx, "参数格式错误")
-        val tail = rawTail(ctx.argText, tokens, commaIdx + 1).trim()
-        val d = tail.toDoubleOrNull() ?: 0.0
+            toExprTokens(head), ctx.resolver, ctx.config,
+        ).reduceExpressionTerm(TermEndWith.EoL) ?: fail(ctx, LangKey.WrongFormat)
         return StrDoubleArgument(term, d)
     }
 
@@ -810,18 +879,24 @@ object ArgBuilders {
         return SpArraySortArgument(dest, order, num1, num2)
     }
 
+    /**
+     * ARRAYSORT / SORTCHARA 的分段点：从 [from] 起第一个**圆括号深度 0** 的逗号。
+     *
+     * 原版 `Analyse(..., LexEndWith.Comma)` 只在 `nestBracketS == 0`（圆括号层）于逗号处切
+     * （spec: LexicalAnalyzer.cs:836-839）；`nestBracketL`（方括号，:798/:805/:829/:832）
+     * 只参与运算符终止判定（:787），**不参与逗号判定**。旧实现把 `[`/`]` 也计入嵌套，于是
+     * 方括号里的逗号被吞进前一段（`ARRAYSORT X, [A, B]` 之类），与同文件
+     * [topLevelCommaIndex]（:574-590，只看圆括号）分叉。两处现归一为同一口径。
+     */
     private fun findTopLevelComma(tokens: List<Token>, from: Int): Int {
         var paren = 0
-        var bracket = 0
         for (i in from until tokens.size) {
             val t = tokens[i]
             if (t is Token.Symbol) {
                 when (t.char) {
                     '(' -> paren++
                     ')' -> paren--
-                    '[' -> bracket++
-                    ']' -> bracket--
-                    ',' -> if (paren == 0 && bracket == 0) return i
+                    ',' -> if (paren == 0) return i
                 }
             }
         }
@@ -948,7 +1023,7 @@ object ArgBuilders {
         FunctionCode.TRYCALLFORM, FunctionCode.TRYJUMPFORM,
     )
 
-    /** spec: ArgumentParser.cs:877-943 SP_CALLSHARP */
+    /** spec: ArgumentParser.cs:795-861（`SP_CALLCSHARP_ArgumentBuilder`，上游类名就是这么拼的） */
     private fun callSharp(ctx: ArgCtx): Argument {
         val st = CharStream(ctx.argText)
         ctx.lexer.skipWhiteSpace(st)
@@ -1422,11 +1497,19 @@ object ArgBuilders {
      *   [splitTerm] 内），于是它作为独立 IdentifierWord 留在游标上；
      * - :77-81 用「当前词不是行尾、也不是逗号」判 `isPx` 并把它跳过。
      *
-     * 旧实现按原文切逗号 + 剥末两字符（splitPxArgs/stripPx）是文本级猜测，两处偏离原版：
-     * 额外接受原版会在**词法层**报错的 `100px`（ReadInt64 把 `p` 当二进制指数，
-     * LexicalAnalyzer.cs:216-221 在指数位非数字时 `NumericCheck` 返回 false / 直接抛
-     * CanNotConvertToInt），以及把 `100 px + 1` 静默当单位。语料 PRINTIMG/PRINTRECT/
-     * PRINTSPACE 实测 0 处 ⇒ 本次接线对语料字节中性。
+     * **粘连形 `300px` 必拒**（B4，2026-11-06 翻案落定）：`px` 只在「自成一词、后随 `,` 或行尾」
+     * 时才是单位（ExpressionParser.cs:534-537），而粘连形在词法层根本产生不了 px 词 ——
+     * 数字字面量走 `ReadInt64`（LexicalAnalyzer.cs:765 的 LiteralIntegerWord 构造），
+     * `readDigits` 吃完 `300` 后游标停在 `p`，:66-68 把它当 2 进制指数标记、ShiftNext 后
+     * 指数位是 `x`，第二次 `readDigits` 得空串 → `long.Parse("")` 抛 FormatException →
+     * :149-152 转 CodeEE(CanNotConvertToInt)，上屏 `""を整数値に変換できません`。
+     * 移植侧词法器同链条复刻（core/lexer/LexicalAnalyzer.kt readInt64/readDigits，
+     * 空串 → LexError("\"\"を整数値に変換できません")）⇒ 本层**不做任何拆词**，粘连文本原样
+     * 进词法层即可同形拒绝。曾有的「引号外拆成 `300 px`」放行近似（spaceOutPxUnit）已撤销；
+     * 语料 PRINTIMG / PRINTRECT / PRINTSPACE 实测 0 处 ⇒ 对语料字节中性。
+     *
+     * 旧实现按原文切逗号 + 剥末两字符（splitPxArgs/stripPx）是文本级猜测的另一处偏离
+     * （把 `100 px + 1` 静默当单位）已在此前按原版收掉。
      */
     private fun splitPxTerm(
         tokens: List<ExprToken>,
@@ -1449,59 +1532,9 @@ object ArgBuilders {
         return Triple(term, isPx, p)
     }
 
-    /**
-     * 把**粘连写**的单位（`300px`）拆成 `300 px`，好让 [splitPxTerm] 走词法级判定（CMP-53）。
-     *
-     * 原版的 `px` 是一个独立的词：终止位 `(TermEndWith)34` = Comma or KeyWordPx
-     * （spec: ArgumentParser.cs:57 / :124），且 `ExpressionParser.cs:534-537` 只在
-     * 「`px` 后紧跟 `,` 或行尾」时把表达式终止在这里 ⇒ 粘连形在词法层根本产生不了 px 词
-     * （`LexicalAnalyzer.cs:216-221` 会把数字后的 `p` 当 2 进制指数标记，`300px` 直接
-     * `"を整数値に変換できません"`）。移植侧既有测试与自产快照用的全是粘连形
-     * （`PRINT_IMG "a.webp", 300px, 200px, 40px`、`PRINT_RECT 5px`）⇒ 这里先在**引号外**
-     * 做一次拆词，再把文本交给词法层，读数与旧文本级剥离逐档相同。
-     *
-     * 只对「前面是数字 / `)` / `]`，后面（可隔空白）是 `,` 或行尾」的 `px` 生效，故
-     * `bg.webp`（引号内或后面是别的字符）、`20 px + 1`（后面是 `+`）都不动。
-     *
-     * TODO(verify)：原版对 `300px` 到底是报错还是接受，需 PC 侧 oracle 实跑 —— 语料
-     * PRINTIMG / PRINTRECT / PRINTSPACE 实测 0 处，无脚本样本可证 ⇒ 本处取「保持移植侧
-     * 既有读数」的保守口径，不据词法层把粘连形判死。
-     */
-    private fun spaceOutPxUnit(text: String): String {
-        val sb = StringBuilder(text.length + 8)
-        var quote = false
-        var i = 0
-        while (i < text.length) {
-            val c = text[i]
-            if (c == '"') quote = !quote
-            if (!quote && (c == 'p' || c == 'P') && i + 1 < text.length &&
-                (text[i + 1] == 'x' || text[i + 1] == 'X') && i > 0
-            ) {
-                val prev = text[i - 1]
-                val prevIsValue = prev.isDigit() || prev == ')' || prev == ']'
-                if (prevIsValue && pxEndsArg(text, i + 2)) {
-                    sb.append(' ')
-                    sb.append(c).append(text[i + 1])
-                    i += 2
-                    continue
-                }
-            }
-            sb.append(c)
-            i++
-        }
-        return sb.toString()
-    }
-
-    /** `px` 之后（跳过空白）必须是 `,` 或行尾 —— spec: ExpressionParser.cs:534-537。 */
-    private fun pxEndsArg(text: String, from: Int): Boolean {
-        var j = from
-        while (j < text.length && text[j] == ' ') j++
-        return j >= text.length || text[j] == ','
-    }
-
     /** spec: ArgumentParser.cs:19-100 SP_PRINT_IMG；px 口径见 [splitPxTerm]（CMP-53）。 */
     private fun printImg(ctx: ArgCtx): Argument {
-        val tokens = toExprTokens(lexWords(ctx, spaceOutPxUnit(ctx.argText)))
+        val tokens = toExprTokens(lexWords(ctx))
         if (tokens.isEmpty()) fail(ctx, "第1个参数不能省略")
         val (nameTerm, p1) = splitTerm(tokens, 0, TermEndWith.Comma, ctx)
         if (nameTerm == null) fail(ctx, "第1个参数不能省略")
@@ -1538,7 +1571,7 @@ object ArgBuilders {
 
     /** spec: ArgumentParser.cs:102-166 SP_PRINT_SHAPE；px 口径见 [splitPxTerm]（CMP-53）。 */
     private fun printShape(ctx: ArgCtx, maxArg: Int): Argument {
-        val tokens = toExprTokens(lexWords(ctx, spaceOutPxUnit(ctx.argText)))
+        val tokens = toExprTokens(lexWords(ctx))
         val params = mutableListOf<MixedIntegerExprTerm>()
         // 槽位数（含空槽位）单独计数：原版 :122-143 的循环**每个逗号分隔位都向 list 追加一项**
         // （`aExpression` 为 null 也照样 `list.Add(new MixedIntegerExprTerm{ num = null })`），
@@ -1581,6 +1614,44 @@ object ArgBuilders {
         val second = list.getOrNull(1)
         if (second != null && second.operandType != OperandType.INT) fail(ctx, "第2个参数类型不正确")
         return SpHtmlPrint(first, second)
+    }
+
+    /**
+     * CALLSTR 族（`TRYCALLSTR` / `TRYCCALLSTR`，4.981 上游新增）的实参：**一个字符串表达式**，
+     * 运行期求值得到函数名。`reference/emuera-cs` 零命中 ⇒ 无反编译依据；
+     * 自改说明 :275 只写「动态执行命令式函数语句」。
+     *
+     * 装成 [SpCallArgument] 并保留其 [SpCallArgument.funcNameTerm]，由 `compileJumpLike` 的
+     * CALLSTR 分支统一走 [_CALL_STR]（WIRE-1/WIRE-2）：目标名与实参在**运行期**由整串解析
+     *（见 Vm 的 `_CALL_STR` 分派 + `VmHost.resolveRuntimeCall`），故 `rowArgs` 恒空、
+     * 也不登记 callArgs 表（运行期由 `onRuntimeCallArgs` 投递逐位元数据）。
+     *
+     * **4.981 语料实测读数**：语料把实参拼进串里 ——
+     * `魔改内容/PRINT系/UI_Container_Framework.ERB` 的 `TRYCALLSTR L_CALL` **真实语句 4 处**
+     * （`:387` / `:403` / `:676` / `:744`，其 `L_CALL` 分别赋值于 `:386` / `:402` / `:675` / `:743`），
+     * 形态为 `L_CALL '= @"%RENDER_FN%({ACTIVE_IDX})"`（`:386` / `:675`）与
+     * `L_CALL '= @"%INPUT_FN%({ACTIVE_IDX}, {RESULT})"`（`:402` / `:743`）各两处；
+     * `SHOP関連/TEST.ERB:13` 的 `TRYCCALLSTR RESULTS` **真实语句 1 处**；
+     * ⇒ 真实调用点合计 **5 处**（TRYCALLSTR 4 + TRYCCALLSTR 1）。
+     * 另有 `UI_Container_Framework.ERB:600` / `:616` 为 `;` 开头的**注释行**提及，非真实调用点。
+     * 本实现把整串交 `_CALL_STR`：运行期解析出目标名与逐位实参并调用（`RENDER_FN(3)` 命中
+     * `@RENDER_FN` 且 `3` 进 R0）。串内 `[` / `;` 分隔形态与「空实参位」的省略语义在
+     * `specs/isa.yaml:2542` 之外无 C# 取证 ⇒ TODO(verify)：待 fork-src 就位后复核。
+     */
+    private fun callStr(ctx: ArgCtx): Argument {
+        val tokens = toExprTokens(lexWords(ctx))
+        if (tokens.isEmpty()) fail(ctx, "第1个参数不能省略")
+        val term = com.eratw.port.core.expr.ExprParser(tokens, ctx.resolver, ctx.config)
+            .reduceExpressionTerm(TermEndWith.EoL) ?: fail(ctx, "第1个参数格式错误")
+        if (term.operandType != OperandType.STR) fail(ctx, "第1个参数类型不正确")
+        val arg = SpCallArgument(term, emptyList(), emptyList())
+        term.constStr()?.let {
+            if (it.isNotEmpty()) {
+                arg.isConst = true
+                arg.constStr = it
+            }
+        }
+        return arg
     }
 
     /** spec: ArgumentParser.cs:233-324 SP_DT_COLUMN_OPTIONS（当前仅 default 选项） */
@@ -1757,6 +1828,65 @@ object ArgBuilders {
             return SpSetArgument(dest, reduceBinary(op, dest, term, ctx))
         }
 
+        // ---- 浮点变量（4.981 fork 第三型左值）----
+        //
+        // 这一段为什么必须存在：本函数原本只有「INT 支 + 其余全按字符串」两叉，
+        // `OperandType.FLOAT` 的左值因此**掉进字符串支** —— `LOCALF = 1.25` 编译得过
+        // （解析期 dest 已是 FLOAT），执行期却按 `getStrValue` 取右值、按字符串写左值，
+        // 语义彻底错。fork 的对应面是 `ArgumentParser.cs` 的 SP_SET 系在
+        // `GetOperandType()==FLOAT` 时走 double 通道（本机 reference 是 1.824，
+        // 无浮点左值 ⇒ 行号不可对拍，TODO(verify) 见交付报告）。
+        //
+        // 与整数支的**同构**关系：`=` 直写、`+= -= *= /= %=` 用同一个 `reduceBinaryTerm`
+        // 把「左值 op 右值」折成整式放进 Term（执行层不再按 op 二次运算，见
+        // StatementExecutor.execAssign 的口径注释）。差别只有两处，都是**故意**的：
+        // 1. 右值允许 INT 或 FLOAT（整数表达式自动提升为 double，依据 = 本仓
+        //    `reduceBinaryTerm` 的浮点提升支，Parser.kt:800-824；语料实况
+        //    `LOCALF += YOGORE:(LOCAL) * 0.01`）；
+        // 2. **不做常量折叠**（整数支的 `isConst/constInt` 形态）：`SpSetArgument` 的常量槽
+        //    只有 `constInt`/`constStr`（Argument.kt:340-356，非本路文件），加 `constDouble`
+        //    要动别人的数据结构 ⇒ 浮点常量增量也走 Term。冷路径（全语料 2 条触发点），
+        //    少一次折叠的代价可以忽略。
+        if (dest.operandType == OperandType.FLOAT) {
+            if (op == OperatorCode.ASSIGNMENT_STR) fail(ctx, "浮点变量不能使用 '$' 赋值")
+            if (op == OperatorCode.INCREMENT || op == OperatorCode.DECREMENT) {
+                // `++`/`--` 在 fork 里是否对浮点开放**未取证**（1.824 只有整数递增）。
+                // 这里按「与整数支同构」放行 = `x = x ± 1.0`，TODO(verify)。
+                val rest = rhsText.trimStart(' ', '\t').let { if (it.startsWith(";")) "" else it }
+                if (rest.isNotEmpty()) {
+                    fail(ctx, if (op == OperatorCode.INCREMENT) "++ 运算符不能带参数" else "-- 运算符不能带参数")
+                }
+                val plus = op == OperatorCode.INCREMENT
+                // 符号由**运算符**带（`reduceBinaryTerm` 折成 `dest + 1.0` / `dest - 1.0`），
+                // 字面量恒取 1.0 —— 若这里给 -1.0，`--` 会折成 `x - (-1)` = x + 1（本波实测踩过）。
+                // 整数支的对应形态是 `ConstInt = ±1` 配 `AddConst`（ArgumentParser.cs:1073-1090），
+                // 浮点侧没有 constDouble 槽，故整条走 Term。
+                val expr = reduceBinary(
+                    if (plus) OperatorCode.PLUS else OperatorCode.MINUS,
+                    dest,
+                    FloatLiteral(1.0, ctx.line),
+                    ctx,
+                )
+                return SpSetArgument(dest, expr)
+            }
+            val list = popTerms(ctx)
+            if (list.isEmpty() || list[0] == null) fail(ctx, "无法读取右值")
+            if (list.size != 1) {
+                if (op != OperatorCode.ASSIGNMENT) fail(ctx, "该赋值运算符不能有多个右值")
+                for (e in list) {
+                    val x = e ?: fail(ctx, "右值不能省略")
+                    if (!isNumericOperand(x)) fail(ctx, "不能把字符串赋给浮点变量")
+                }
+                // 数组形态（`SET 倍率, 1.0, 2.0`）：常量槽同样只有 int/str 两型 ⇒ 这里不填
+                // `constIntList/constStrList`，右值逐项留给执行层的浮点通道。
+                return SpSetArrayArgument(dest, list)
+            }
+            val term = list[0]!!
+            if (!isNumericOperand(term)) fail(ctx, "不能把字符串赋给浮点变量")
+            if (op == OperatorCode.ASSIGNMENT) return SpSetArgument(dest, term)
+            return SpSetArgument(dest, reduceBinary(op, dest, term, ctx))
+        }
+
         // 字符串变量
         when (op) {
             OperatorCode.ASSIGNMENT -> {
@@ -1825,4 +1955,15 @@ object ArgBuilders {
     } catch (e: Exception) {
         fail(ctx, e.message ?: "赋值运算符类型不匹配")
     }
+
+    /**
+     * 浮点左值的右值类型判据：**数值型**（INT 或 FLOAT）才收。
+     *
+     * 整数右值自动提升为 double 的依据是本仓 `reduceBinaryTerm` 的浮点提升支
+     * （core/expr/Parser.kt:800-824）—— 4.981 语料的两种形态 `int * 0.7` 与
+     * `float > 1.0` 都靠它；1.824 无浮点 ⇒ 该提升规则本身在 Parser.kt 里已记
+     * TODO(verify)，本函数只是同一条口径的第二消费点。
+     */
+    private fun isNumericOperand(e: Expr): Boolean =
+        e.operandType == OperandType.INT || e.operandType == OperandType.FLOAT
 }

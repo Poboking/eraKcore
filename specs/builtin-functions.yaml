@@ -8,20 +8,26 @@ notes:
 - 多个函数名共享同一实现类（如 TOUPPER/TOLOWER/TOHALF/TOFULL 共用 StrChangeStyleMethod），source 字段为类定义行号范围。
 - 参数形态中 [ ] 表示可省略参数，省略起点依据构造函数 ArgTypeList.OmitStart 或 argumentTypeArray；部分旧式类的可选参数边界标注 medium 待复核。
 - ERB 用户函数（#FUNCTION）不在本表，其注册位于 Process.LabelDictionary（Runtime.Script 侧），需另立规约。
+- 【证据源 2：fork-src（2026-10-30 W0 新增）】`source` 以 `fork-src ` 开头的条目取自上游 fork 源码仓库 qirchen421/emuera.sk@48494165（branch develop-skiasharp，2026-08-28；README 自称 Emuera 1824+v24+EMv18+EEv56+Skiav9），相对路径 `Emuera/Runtime/Script/Statements/Function/Creator.Method.cs`（注册表 `Emuera/Runtime/Script/Statements/Function/Creator.cs`，SQL 实现 `Emuera/Runtime/Utils/尊尼获加/SqlManager.cs`）。本仓 `reference/emuera-cs` 是 1.824/4.980 期快照，`GETANIMETIMER`/`TOFLOAT`/`UNCHECKED_*`/`SQL_*`/`GETPLATFORM`/`MAP_VALUES`/`MAP_MERGE`/`MAP_REMOVEIF`/`MAP_FINDKEY`/`MAP_TOSTRING`/`DISABLE_INPUT_MACRO`/`ENABLE_INPUT_MACRO` 在其中 grep 均无命中，故只能用 fork 源码作 A 级证据。
+- 【版本漂移】4.981 随包是 Emuera SkiaX 0.77.0，与上述仓库 HEAD 可能有个别差异：仓库另有 `SQL_CONNECTION_OPEN`/`SQL_READER_GET_FLOAT`/`SQL_EXECUTE_SCALAR_FLOAT`/`SQL_P_EXECUTE_SCALAR_FLOAT`/`MAP_FROMSTRING`/`UNCHECKED_SUB`/`UNCHECKED_NEGATE`/`TOSTRF`，而 4.981《画蛇又添足版自改emuera相关说明.txt》第 249、22、34 行的新增命令清单未列 `*_FLOAT` 系列与 `MAP_FROMSTRING`；本表只登记语料与自改说明确认到的条目，其余见 verify-notes.md §23。
+# 2026-10-30 4.981 增量 +28（string/浮点解析 1、math 2、view 1、variable 5、other 19）；
+# 2026-11-06 fixcore 再补 1 条 4.981 fork 新增（SPRITEANIMEFRAME，view；出处是 fork 的更新记录
+#   画蛇又添足版自改emuera相关说明.txt:236-239，无 C# 源、无 fork-src，故 source 不带宽前缀）；
+# 原 271 条口径只含 reference/emuera-cs 内可对质的函数，fork 新增条目单列在表末，source 一律带 fork-src 前缀。
 summary:
-  total: 271
+  total: 300
   by_category:
     character: 19
     debug: 6
     input: 13
     load: 3
-    math: 29
-    other: 17
+    math: 31
+    other: 36
     save: 7
-    string: 33
-    variable: 71
-    view: 73
-  low_confidence: 45
+    string: 34
+    variable: 76
+    view: 75
+  low_confidence: 46
 functions:
 - name: GETCHARA
   category: character
@@ -460,7 +466,7 @@ functions:
   args: str, search
   returns: int
   side_effects: ''
-  semantics: 统计子串 search 在 str 中出现的次数。
+  semantics: 以 search 为**正则**统计 `regex.Matches(str).Count`（非子串计数；FunctionMethodCreator.cs:5446-5457）；模式编译失败报 InvalidRegexArg（第 2 参）。
   source: FunctionMethodCreator.cs:5433-5460
   confidence: high
 - name: TOSTR
@@ -468,16 +474,16 @@ functions:
   args: value[, format]
   returns: string
   side_effects: ''
-  semantics: 整数转字符串；可指定 .NET 数字格式串（如 D5、X8），格式非法抛错。
-  source: FunctionMethodCreator.cs:5461-5499
+  semantics: 整数转字符串；可指定 .NET 数字格式串（如 D5、X8），格式非法抛错。加载期按 ArgTypeList{Int, String}（省略从第 2 参起，即 OmitStart=1）检查类型：第 1 参必填且须为整数，第 2 参可省略且须为字符串。
+  source: fork-src Creator.Method.cs:6047-6092; FunctionMethodCreator.cs:5461-5499
   confidence: high
 - name: TOINT
   category: string
   args: str
   returns: int
   side_effects: ''
-  semantics: 把字符串解析为整数（支持表达式），失败抛错。
-  source: FunctionMethodCreator.cs:5500-5557
+  semantics: 把字符串解析为整数——空串、长度短于语言感知长度、首字符不是数字或正负号、符号后不紧跟数字，一律返回 0；整数段支持 0x/0b 前缀与 e/E 指数，其后只允许再接小数点和纯数字（取整数段）；浮点实参直接截断为 long。fork 把 ReadInt64 包在 try/catch 里，溢出也返回 0；移植侧溢出仍抛 CodeEE（1.824 口径，未在本路对齐）。
+  source: fork-src Creator.Method.cs:6094-6142; FunctionMethodCreator.cs:5500-5557
   confidence: high
 - name: TOUPPER
   category: string
@@ -1148,7 +1154,7 @@ functions:
   args: name, colName, value, ...
   returns: int
   side_effects: 修改变量数据
-  semantics: 以可变参数「列名, 值」成对添加新行（id 自动按时间戳生成），成功返回 1；表不存在返回 -1。
+  semantics: 以可变参数「列名, 值」成对添加新行（id 自动按时间戳生成），**返回新行的 id**（Add 分支 `return (long)dataRow2[0]`，FunctionMethodCreator.cs:2316-2318）；表不存在返回 -1。
   source: FunctionMethodCreator.cs:2126-2324
   confidence: high
 - name: DT_ROW_SET
@@ -2190,4 +2196,239 @@ functions:
   side_effects: 控制音频播放
   semantics: 控制 BGM：op 0=暂停 1=恢复 2=停止；op=3 时按 speed（百分比）设置播放速度，第 3 参非 0 表示不变调。失败返回 -2。
   source: FunctionMethodCreator.cs:8968-9031
+  confidence: high
+# ══════════ 以下为 4.981 增量（fork-src 证据，2026-10-30 W0） ══════════
+# 读法：args 中 [ ] 表示可省略；「写 RESULT/RESULTS」在 side_effects 里显式标出;
+# 浮点类返回值是 EraType.Float（double），只有浮点容器（LOCALF/ARGF/RESULTF/#DIMF）能承接。
+- name: TOFLOAT
+  category: string
+  args: str
+  returns: float
+  side_effects: ''
+  semantics: 把字符串解析为 double 浮点值——空串、长度短于语言感知长度（LangManager.GetStrlenLang，含非 ASCII 字符的串必定超长）、或解析失败一律返回 0.0，不抛错；解析走 double.TryParse 的默认 NumberStyles.Float|AllowThousands 加当前区域设置（不是 InvariantCulture，与词法器 ReadDouble 的 InvariantCulture 不一致）：小数位/千分位分隔符随当前文化（de-DE 下 "1,5"→1.5、"1.5"→15、"1.234,5"→1234.5），千分位只许出现在整数部分且前面已有数字，只裁剪 ASCII 空白，只认 ASCII 数字，TryParse 层接受 NaN/当前文化无穷符号而字面 "Infinity" 不认（但 "∞" 这类多字节符号会先被长度门挡成 0.0，实际只有 ASCII 的 "NaN" 能走到），溢出给 ±∞、下溢给 0。返回值是浮点类型，赋给整数容器时按 TOINT 的截断规则（(long)GetFloatValue）。1.824 快照无此函数。
+  source: fork-src Creator.Method.cs:6145-6165; Creator.cs:145
+  confidence: high
+- name: UNCHECKED_ADD
+  category: math
+  args: a, b
+  returns: int
+  side_effects: ''
+  semantics: 64 位整数加法，溢出按补码回绕（C# unchecked），不做 Emuera 的有符号溢出检查；CanRestructure 为真，装载期可常量折叠。语料唯一调用点 COMMON.ERB:3039，与 UNCHECKED_MUL 连用实现 @NOISE 的 64 位散列（结果再 & 0x7fffffff）。
+  source: fork-src Creator.Method.cs:4567-4581; Creator.cs:102
+  confidence: high
+- name: UNCHECKED_MUL
+  category: math
+  args: a, b
+  returns: int
+  side_effects: ''
+  semantics: 64 位整数乘法，溢出按补码回绕（C# unchecked），不做溢出检查。语料 COMMON.ERB:3039-3040。fork 同族另有 UNCHECKED_SUB（Creator.Method.cs:4583-4597）与 UNCHECKED_NEGATE（:4615-4628），语料未使用，本表未单列。
+  source: fork-src Creator.Method.cs:4599-4613; Creator.cs:104
+  confidence: high
+- name: GETANIMETIMER
+  category: view
+  args: ''
+  returns: int
+  side_effects: 读取渲染状态
+  semantics: 返回动画重绘定时器（redrawTimer）的当前间隔毫秒数；定时器启用时取 Interval，未启用返回 0。与 SETANIMETIMER 互逆——SETANIMETIMER 传 0 或负值关定时器（此后本函数返 0），传小于 10 的正值会被抬到 10。语料以「先存旧值、SET 新值驱动动画、再 SET 回旧值」使用（魔改内容/PRINT系/Toolkits.ERB:314-325）。
+  source: fork-src Creator.Method.cs:9012-9024; EmueraConsole.cs:927,944-955; Creator.cs:242
+  confidence: high
+- name: SPRITEANIMEFRAME
+  category: view
+  args: name
+  returns: int
+  side_effects: 读取精灵状态
+  semantics: 返回动画精灵的帧数（帧表长度）。名字未创建 / 静态 sprite / 动画容器零帧 / 空名一律返回 0，不抛错；帧表只由 SPRITEANIMEADDFRAME 追加，入表失败的帧不计入，帧表里被裁空的「交集为空」帧仍算一帧。4.981 fork 新增，统一替代已废弃的 GET_GIF_FRAMES、GET_GIF_WIDTH、GET_GIF_HEIGHT、PRINT_GIF_FRAME（这四条在本仓从未登记，无并行实现）。fork 宣称统一支持 SpriteAnime / SpriteGif / SpriteWebP；本端口只有 SpriteAnime 形态（SPRITEANIMECREATE 建帧表、SPRITEANIMEADDFRAME 追加），Gif/WebP 无解码面故这两族恒 0（TODO(verify)：卡点 = 端口无 Gif/WebP 解码面）。
+  source: 画蛇又添足版自改emuera相关说明.txt:236-239（4.981 fork 新增命令；无 C# 源，reference/emuera-cs 全树零命中，fork 只发布二进制与这份更新记录；端口实现见 core-vm 的 fn/SpriteAnimeFrameMethod.kt）
+  confidence: medium
+- name: MAP_VALUES
+  category: variable
+  args: name[, resultArrayOrFlag[, flag]]
+  returns: string
+  side_effects: 可能写 RESULTS/RESULT 或指定字符串数组
+  semantics: 取映射的全部 value。1 实参返回逗号连接的 value 串；2 实参时第 2 位是 Int 开关（非 0 写入 RESULTS 并用 RESULT 记 value 数，返回 RESULTS，为 0 则直接返回空串且不写 RESULT）；3 实参时第 2 位是字符串数组、第 3 位是 Int 开关（写入该数组、用 RESULT 记数、返回空串）。映射不存在返回空串。与 MAP_GETKEYS 对称（键↔值）。
+  source: fork-src Creator.Method.cs:2360-2432; Creator.cs:312
+  confidence: high
+- name: MAP_MERGE
+  category: variable
+  args: destName, srcName
+  returns: int
+  side_effects: 修改变量数据(映射池)
+  semantics: 把 srcName 的键值对并入 destName（同 key 由 src 覆盖 dest），成功返回 1；dest 或 src 任一不存在返回 0（不抛错）。语料仅出现在注释/等价实现说明里（fromEN/Custom_Commands/摄影用lib/STRINGSET.ERB:26、ステータス表示関連/CN_GRAPHIC/_List.ERB:47），实际实现已改用 SQL_* 建表，故 ERB 树内无真调用点。
+  source: fork-src Creator.Method.cs:2434-2452; Creator.cs:313
+  confidence: high
+- name: MAP_REMOVEIF
+  category: variable
+  args: name, matchValue, mode
+  returns: int
+  side_effects: 修改变量数据(映射池)
+  semantics: 按条件批量删除键值对，返回删除条数；映射不存在返回 0；mode 非法返回 -1（不抛错）。mode 取值 KEY_CONTAINS / KEY_PREFIX / KEY_SUFFIX / VAL_CONTAINS / VAL_EQ / VAL_NE，全部按区分大小写的字符串比较。
+  source: fork-src Creator.Method.cs:2454-2503; Creator.cs:314
+  confidence: high
+- name: MAP_FINDKEY
+  category: variable
+  args: name, matchValue, mode
+  returns: string
+  side_effects: 写 RESULT（匹配到的 key 数）
+  semantics: 按条件查找匹配的 key，返回逗号连接的 key 串；映射不存在返回空串。同时把匹配条数写入 RESULT（实现用「结果串按逗号 split 的长度」，空串记 0）。mode 支持 KEY_CONTAINS / KEY_PREFIX / KEY_SUFFIX / VAL_CONTAINS / VAL_EQ——代码里**没有 VAL_NE 分支**，传 VAL_NE 会落到 switch 之外，返回空串且 RESULT=0（疑似实现遗漏，须原样复刻）。
+  source: fork-src Creator.Method.cs:2505-2573; Creator.cs:315
+  confidence: high
+- name: MAP_TOSTRING
+  category: variable
+  args: name[, sep[, kvSep]]
+  returns: string
+  side_effects: ''
+  semantics: 把映射序列化为「k<kvSep>v<sep>k<kvSep>v…」的字符串；sep 缺省逗号、kvSep 缺省等号（缺省值在运行时取，Dimension 个数由 OmitStart=1 决定）。映射不存在返回空串。与 MAP_FROMSTRING（同名反序列化，Creator.Method.cs:2604-2637）互逆。
+  source: fork-src Creator.Method.cs:2575-2602; Creator.cs:316
+  confidence: high
+- name: GETPLATFORM
+  category: other
+  args: ''
+  returns: int
+  side_effects: 读运行平台
+  semantics: 返回运行平台编号——Windows=0、Android=1、iOS=2、MacOS=3、Linux=4、其它=5（按 OperatingSystem.Is* 依次判定）。语料 TITLE.ERB:86-91 用它分流：== 0 才走 PC 专属的 TINPUTNF（无焦点限时输入 + DEMO 播放），否则走 INPUT。安卓移植必须返回 1，否则标题会掉进 PC 分支。
+  source: fork-src Creator.Method.cs:3469-3487; Creator.cs:438
+  confidence: high
+- name: DISABLE_INPUT_MACRO
+  category: other
+  args: ''
+  returns: int
+  side_effects: 改进程输入状态
+  semantics: 关闭输入宏（置 Process.inputMacroEnabled=false）并返回 0。关闭后按回车不再走 parseInput：括号宏 () 的重复输入与 \e 的 MesSkip 都不再处理。语料与 ENABLE_INPUT_MACRO 成对包裹 INPUTS（DLC/实用设置补丁/实用设置.ERB:571-573）。
+  source: fork-src Creator.Method.cs:9666-9679; Creator.cs:444
+  confidence: high
+- name: ENABLE_INPUT_MACRO
+  category: other
+  args: ''
+  returns: int
+  side_effects: 改进程输入状态
+  semantics: 恢复输入宏（置 Process.inputMacroEnabled=true）并返回 0。与 DISABLE_INPUT_MACRO 成对，恢复后括号宏与 \e 跳过继续生效。
+  source: fork-src Creator.Method.cs:9681-9694; Creator.cs:445
+  confidence: high
+- name: SQL_CONNECT
+  category: other
+  args: dbName[, connStr]
+  returns: int
+  side_effects: 打开数据库连接（进程级全局连接表）
+  semantics: 以 dbName 为键登记并打开一个 Microsoft.Data.Sqlite 连接；connStr 省略时用「Data Source=:memory:」（内存库）。同名连接已存在则直接返回 1、不重开；打开失败抛 CodeEE（文案前缀「SQL_CONNECT 失败」）。连接表按 OrdinalIgnoreCase 比较，名字大小写不敏感。语料见 魔改内容/qol/qol_db.ERB:60（SQL_CONNECT "TR_DB"）与 qol_dish.ERB:96（带 Data Source 的 connStr）。
+  source: fork-src Creator.Method.cs:10237-10251; SqlManager.cs:15,67-82; Creator.cs:405
+  confidence: high
+- name: SQL_EXECUTE_NONQUERY
+  category: other
+  args: dbName, sql
+  returns: int
+  side_effects: 执行 SQL 写语句
+  semantics: 在已连接库上执行非查询语句，返回受影响行数；库未连接抛 CodeEE（文案「数据库 '<名>' 未连接。」），SQL 出错抛 CodeEE（前缀「SQL 执行错误」并回显语句）。表名/列名的大小写敏感性由 SQLite 自身决定（表名默认不敏感）。语料大量使用（如 qol_item.ERB:99 的 INSERT OR REPLACE、qol_PHARMACY.ERB:196）。
+  source: fork-src Creator.Method.cs:10263-10270; SqlManager.cs:96-121; Creator.cs:407
+  confidence: high
+- name: SQL_EXECUTE_READER
+  category: other
+  args: dbName, sql
+  returns: int
+  side_effects: 建立游标（进程级 reader 表）
+  semantics: 执行 SELECT 并返回一个自增的 reader 句柄 id（从 1 起、每成功一次 +1，不回收）；游标要与 SQL_READER_READ / SQL_READER_GET_* / SQL_READER_CLOSE 配套使用。库未连接抛 CodeEE「数据库 '<名>' 未连接。」，查询出错抛 CodeEE（前缀「SQL 查询错误」）。语料见 qol_dish.ERB:462-483 的遍历循环。
+  source: fork-src Creator.Method.cs:10272-10279; SqlManager.cs:64,124-153; Creator.cs:408
+  confidence: high
+- name: SQL_READER_READ
+  category: other
+  args: readerId
+  returns: int
+  side_effects: 推进游标
+  semantics: 把游标推进到下一行，有行返回 1、无行返回 0；readerId 无效时返回 0（不抛错）。语料以 WHILE SQL_READER_READ(句柄) 形式遍历（qol_dish.ERB:473）。
+  source: fork-src Creator.Method.cs:10281-10288; SqlManager.cs:156-164; Creator.cs:409
+  confidence: high
+- name: SQL_READER_GET_LONG
+  category: other
+  args: readerId, columnIndex
+  returns: int
+  side_effects: 读游标当前行
+  semantics: 取当前行指定列的 64 位整数；该列为 NULL 时返回 0（与 ISNULL 成对使用）；readerId 无效抛 CodeEE「无效的 Reader ID」。列下标从 0 起（语料用常量 COL_* 名，如 qol_dish.ERB:477-478）。
+  source: fork-src Creator.Method.cs:10290-10297; SqlManager.cs:167-175; Creator.cs:410
+  confidence: high
+- name: SQL_READER_GET_STRING
+  category: other
+  args: readerId, columnIndex
+  returns: string
+  side_effects: 读游标当前行
+  semantics: 取当前行指定列的字符串；该列为 NULL 时返回空串；readerId 无效抛 CodeEE「无效的 Reader ID」。只接受 TEXT 列——对数值列直接 GetString 会由驱动抛错，语料因此对同一列按类型分开取（qol_mushi.ERB:303-315）。
+  source: fork-src Creator.Method.cs:10299-10306; SqlManager.cs:178-186; Creator.cs:412
+  confidence: high
+- name: SQL_READER_ISNULL
+  category: other
+  args: readerId, columnIndex
+  returns: int
+  side_effects: 读游标当前行
+  semantics: 判断当前行指定列是否为 NULL（1/0）；readerId 无效抛 CodeEE「无效的 Reader ID」。语料在遍历里先 ISNULL 再取值（qol_item.ERB:527、qol_wood.ERB:299）。
+  source: fork-src Creator.Method.cs:10308-10315; SqlManager.cs:200-207; Creator.cs:413
+  confidence: high
+- name: SQL_READER_CLOSE
+  category: other
+  args: readerId
+  returns: int
+  side_effects: 释放游标（Close+Dispose 并与 Command 一起释放）
+  semantics: 关闭并移除该 reader 句柄，语句层恒返回 1；readerId 无效时**静默无操作**（底层 void，不抛错）。每个 SELECT 都必须显式 CLOSE，否则句柄与其 Command 泄漏到 GlobalStatic.Reset 的 SqlManager.CloseAll 为止。
+  source: fork-src Creator.Method.cs:10317-10324; SqlManager.cs:210-219,221-234; Creator.cs:414
+  confidence: high
+- name: SQL_EXECUTE_SCALAR_LONG
+  category: other
+  args: dbName, sql
+  returns: int
+  side_effects: 读数据库
+  semantics: 执行查询取首行首列并转成整数（Convert.ToInt64）；结果 NULL 或无行时返回 0；库未连接抛 CodeEE，出错抛 CodeEE（前缀「SQL 标量查询错误」）。语料高频（qol_tachie.ERB:49、qol_wood.ERB:145、qol_graph_query.ERB:331）。
+  source: fork-src Creator.Method.cs:10326-10333; SqlManager.cs:238-273,275-276; Creator.cs:415
+  confidence: high
+- name: SQL_EXECUTE_SCALAR_STRING
+  category: other
+  args: dbName, sql
+  returns: string
+  side_effects: 读数据库
+  semantics: 执行查询取首行首列并转成字符串（result.ToString()）；结果 NULL 或无行时返回空串。语料常用它读配置行（qol_dish 的 TASTE_MAP、qol_item.ERB:67、qol_PHARMACY.ERB:385）。
+  source: fork-src Creator.Method.cs:10335-10342; SqlManager.cs:238-273,278-279; Creator.cs:417
+  confidence: high
+- name: SQL_ESCAPE
+  category: other
+  args: str
+  returns: string
+  side_effects: ''
+  semantics: 把字符串里的单个单引号 ' 转成两个 ''，用于把值拼进 SQL 字面量；null 或空串原样返回。CanRestructure 为真（可常量折叠）。注意它只做引号转义、不做其它字符转义——参数化查询（SQL_P_EXECUTE_*）才是推荐的替代。
+  source: fork-src Creator.Method.cs:2639-2651; SqlManager.cs:605-609; Creator.cs:423
+  confidence: high
+- name: SQL_IMPORT_MAP_XML
+  category: other
+  args: dbName, tableName, filePath
+  returns: int
+  side_effects: 建表并批量写入
+  semantics: 读 MAP_TOXML 格式的 XML（根 /map/p，每个 p 取 ./k 的 InnerText 与 ./v 的 InnerXml），在一个事务里建表 CREATE TABLE IF NOT EXISTS <表> (k TEXT PRIMARY KEY, v TEXT) 后逐条 INSERT OR REPLACE，成功返回 1。dbName 未连接返回 0（不抛错）；文件路径先按 WorkingDir 再按 ExeDir 找，都找不到抛 CodeEE（文案前缀「SQL_IMPORT_MAP_XML」）；XML 解析失败抛 CodeEE（前缀「导入 MAP XML 失败」）。语料见 魔改内容/qol/qol_db.ERB:61-62。
+  source: fork-src Creator.Method.cs:10343-10350; SqlManager.cs:285-339; Creator.cs:418
+  confidence: high
+- name: SQL_P_EXECUTE_NONQUERY
+  category: other
+  args: dbName, sql, [param0[, param1[, ...]]]
+  returns: int
+  side_effects: 执行 SQL 写语句（参数化）
+  semantics: 与 SQL_EXECUTE_NONQUERY 同语义，但把第 3 个起的实参按序绑定到 SQL 里的占位符 @0、@1、@2…（参数个数=实参数-2，按原样顺序，不解释为 SQL 代码）。实参一律先用 GetStrValue 求值——整数实参自动转十进制串，空表达式绑定 DBNull。返回受影响行数。语料 qol_mushi.ERB:114 一条语句绑 20 个参数（@0..@19）。
+  source: fork-src Creator.Method.cs:2653-2674; SqlManager.cs:96-121; Creator.cs:424
+  confidence: high
+- name: SQL_P_EXECUTE_READER
+  category: other
+  args: dbName, sql, [param0[, param1[, ...]]]
+  returns: int
+  side_effects: 建立游标（参数化）
+  semantics: 与 SQL_EXECUTE_READER 同语义（返回自增 reader 句柄 id），多出的实参按序绑定 @0、@1…。语料 qol_graph_query.ERB:94-99、146、195 等全是此形态（TOSTR(...) 包整数实参）。
+  source: fork-src Creator.Method.cs:2676-2697; SqlManager.cs:124-153; Creator.cs:425
+  confidence: high
+- name: SQL_P_EXECUTE_SCALAR_LONG
+  category: other
+  args: dbName, sql, [param0[, param1[, ...]]]
+  returns: int
+  side_effects: 读数据库（参数化）
+  semantics: 与 SQL_EXECUTE_SCALAR_LONG 同语义（NULL/无行返 0），多出的实参按序绑定 @0、@1…。语料 qol_mushi.ERB:162-265 的 GET_* 系列、生活系统_隙间渔获.ERB:308-309。
+  source: fork-src Creator.Method.cs:2699-2720; SqlManager.cs:238-273,275-276; Creator.cs:426
+  confidence: high
+- name: SQL_P_EXECUTE_SCALAR_STRING
+  category: other
+  args: dbName, sql, [param0[, param1[, ...]]]
+  returns: string
+  side_effects: 读数据库（参数化）
+  semantics: 与 SQL_EXECUTE_SCALAR_STRING 同语义（NULL/无行返空串），多出的实参按序绑定 @0、@1…。语料 qol_portrait_map.ERB:57、71 一条语句绑 4 个参数（其中整数实参由 TOSTR 转换）。
+  source: fork-src Creator.Method.cs:2722-2743; SqlManager.cs:238-273,278-279; Creator.cs:428
   confidence: high

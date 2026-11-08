@@ -15,6 +15,7 @@ import com.eratw.port.core.stmt.Statement
 import com.eratw.port.core.stmt.SymbolTable
 import com.eratw.port.core.vars.VariableStore
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -42,16 +43,26 @@ import kotlin.test.assertTrue
  *   `EmueraConsole.Await`（`EmueraConsole.cs:849`）⇒ 段落边界 = 让出边界，与
  *   [VmConfig.maxStepsPerRun] 的计数边界同源。
  *
- * 所以「合法重负载跑很久」在原版是**允许**的，移植层必须给它一条出路：时间闸 + 放宽的
- * 步数兜底（生产取值见 `GameSession.PRODUCTION_MAX_STEPS_PER_RUN` /
- * `GameSession.DEFAULT_MAX_RUN_MILLIS`）。
+ * 所以「合法重负载跑很久」在原版是**允许**的，移植层必须给它一条出路。2026-10-29 的出路是
+ * 「时间闸 60 s 为主」，但 2026-10-30 的玩家报告证伪了它：墙钟是设备速度的函数，60 秒在玩家
+ * 机上只够 1.33 亿条指令，而第 47 日起床链实测要 2.90 亿条 ⇒ 时间闸退回装置/诊断，生产恒 0。
+ *
+ * ## ENGFIX-3（2026-11-05）：「出路」补成了原版那一条
+ * 上面两段历史都只是在**自造闸之间调参**（5M→20M→60s→10 亿，后一刀推翻前一刀）；原版那条
+ * 判据（墙钟 + 问玩家 + 可继续）本波才做出来：[VmConfig.infiniteLoopAlertTimeMs] +
+ * [com.eratw.port.core.code.VmHost.askInfiniteLoop]，真值表见 `code/InfiniteLoopGuardTest`。
+ * 于是本文件的两条预算正式登记为 [com.eratw.port.core.code.LoopGuardCause.DeviceBudget]
+ * （移植层预算 / 极端兜底，**不是**死循环判定）：步数闸留在「正常游戏永不触及」的量级
+ * （`GameSession.PRODUCTION_MAX_STEPS_PER_RUN`，待组长按 ADR-005 登记例外），
+ * 墙钟闸生产恒 0 的结论不变。
  *
  * ## 本测试锁什么
  *
  * 1. 时间超限时抛 [StepLimitExceeded]，但**文案走时间口径**（否则玩家/台账看到的仍是
  *    「步数超过上限」，等于没区分「跑了太多指令」与「这一段跑太久」）；
  * 2. `maxRunMillis = 0`（装置缺省）时**不启用**时间闸 —— CI 上的确定性不能变；
- * 3. 步数闸的旧文案与旧行为逐字不变（既有装置与失败屏口径）。
+ * 3. 步数闸的旧文案与旧行为逐字不变（既有装置与失败屏口径）；
+ * 4. 生产取值的两条不变量：墙钟必须关、步数量级必须盖住实测最坏合法段。
  */
 class RunMillisLimitTest {
 
@@ -174,5 +185,32 @@ class RunMillisLimitTest {
             "步数闸文案必须逐字保留（既有装置/失败屏断言依赖它）：${e.message}",
         )
         assertTrue(e.elapsedMs < 0L, "步数闸触发时 elapsedMs 必须是 -1（不是时间口径）")
+    }
+
+    // ------------------------------------------------------------------
+    // 4. 生产取值：墙钟关、步数闸对实测最坏合法段留 ≥3× 余量
+    // ------------------------------------------------------------------
+
+    /**
+     * 最坏合法链 = 第 47 日（`TIME=1345`）的「起床链」：`EVENTTRAIN` 一次派发连续调 24 次
+     * `CHARA_MOVEMENT`（桌面真产物实测，读数记在 BOARD 2026-10-30；量它的临时探针已按纪律删除），
+     * 每次 12,080,416 条指令（`RedKCharaMovementReproTest` 实测）≈ 2.90 亿条。
+     *
+     * 墙钟必须关：同一条链在玩家机上要 ≈130 秒，60 秒墙钟在那里必然误杀；而步数闸是
+     * 工作量口径，同一条链在任何机型上读数一致。
+     */
+    @Test
+    fun `生产闸取值覆盖实测最坏合法段`() {
+        assertEquals(
+            0L,
+            GameSession.PRODUCTION_MAX_RUN_MILLIS,
+            "生产不得用墙钟判死合法重负载（设备速度的函数）：2026-10-30 玩家报告 60 秒只够 1.33 亿指令",
+        )
+        val worstLegitDayStart = 24L * 12_080_416L
+        assertTrue(
+            GameSession.PRODUCTION_MAX_STEPS_PER_RUN >= 3L * worstLegitDayStart,
+            "生产步数闸必须对最坏合法段留 ≥3× 余量：实际 ${GameSession.PRODUCTION_MAX_STEPS_PER_RUN} " +
+                "vs $worstLegitDayStart",
+        )
     }
 }

@@ -11,6 +11,7 @@ import com.eratw.port.core.expr.TermEndWith
 import com.eratw.port.core.expr.Unary
 import com.eratw.port.core.lexer.CharStream
 import com.eratw.port.core.lexer.ErbLexer
+import com.eratw.port.core.lexer.LangKey
 import com.eratw.port.core.lexer.LexAnalyzeFlag
 import com.eratw.port.core.lexer.LexEndWith
 import com.eratw.port.core.lexer.LexError
@@ -19,6 +20,9 @@ import com.eratw.port.core.lexer.LineKind
 import com.eratw.port.core.lexer.LogicalLine
 import com.eratw.port.core.lexer.OperatorCode as LexOperatorCode
 import com.eratw.port.core.lexer.Token
+import com.eratw.port.core.vars.CodeEE
+import com.eratw.port.core.vars.DimParser
+import java.util.Locale
 
 /** 语句层告警（非致命）。 */
 data class StmtWarning(val line: Int, val message: String)
@@ -87,7 +91,7 @@ interface DefinitionScopedResolver : StmtResolver {
  * 解析失败抛 [StmtParseException]（带行号），不静默吞错。
  */
 class LineParser(
-    val resolver: StmtResolver = StrictSymbolResolver,
+    resolver: StmtResolver = StrictSymbolResolver,
     private val config: ParserConfig = ParserConfig(),
     private val stmtConfig: StmtParseConfig = StmtParseConfig(),
     /**
@@ -97,8 +101,30 @@ class LineParser(
      * `DO NOT PROCESS TRIPLE SYMBOLS INSIDE FORM:NO` ⇒ 三连展开开启）。
      */
     private val lexerConfig: LexerConfig = LexerConfig(),
+    /**
+     * `#LOCALSIZE` / `#LOCALSSIZE` 的常量表（T5）：ERH `#DIM CONST` 名与 `#DEFINE` 宏常量
+     * 的「名（大写归一）→ 值」表，由调用方（erbcc 桥）从符号层注入
+     * —— 与 [com.eratw.port.core.frontend.LabelTable.evalSharpInt] 吃的
+     * `SymbolConfig.constValues` 同一份。
+     *
+     * 默认空表 = 只有字面量与纯算术表达式能折；常量名形态会落进
+     * [parseSharpLine] 的「无法求值为整数常量」告警支，**不再静默折成 0**。
+     */
+    private val dimConsts: Map<String, Long> = emptyMap(),
 ) {
     private val lexer = ErbLexer(lexerConfig)
+
+    /**
+     * 符号解析器（构造入参原样持有）。
+     *
+     * `LOCALF`/`ARGF` 等 fork 浮点局部名**不再有补丁层**：它们已由 [BuiltinSymbols]
+     * 正式登记（1 维 FLOAT），任何内层解析器（[StrictSymbolResolver] / [SymbolTable]
+     * / erbcc 的 `CompileResolver`）都经它的内置表兜底命中。
+     */
+    val resolver: StmtResolver = resolver
+
+    /** 常量表达式求值器（与 `#DIM` 尺寸 / 符号层 `#LOCALSIZE` 同一真源，specs/loader.md D.8.1）。 */
+    private val dimSizeEvaluator = com.eratw.port.core.compile.DimSizeEvaluator(dimConsts)
 
     /** 解析期告警（原版 level 0/1 的非致命诊断）。 */
     val warnings = mutableListOf<StmtWarning>()
@@ -146,13 +172,17 @@ class LineParser(
             throw StmtParseException(lineNo, 0, "", "不正な文字で行が始まっています")
         }
         val nameEnd = first.length
-        val code = FunctionCode.BY_NAME[first.uppercase()]
+        // 语句名大小写归一必须用不随宿主语言变化的 Locale.ROOT：tr 语系下
+        // `INITRAND`.uppercase() 会把 `i` 变成 `İ`（U+0130）、`INPUT`.uppercase() 变成 `İNPUT`，
+        // 于是所有含 `i`/`I` 的语句名查表全 Miss（与 #DIM 关键字同源的 locale 缺陷，见
+        // f88d4801 对 LexicalAnalyzer.kt:728/733 的同一把锁）。
+        val code = FunctionCode.BY_NAME[first.uppercase(Locale.ROOT)]
         if (code != null) {
             return parseInstructionLine(code, first, content, nameEnd, lineNo)
         }
         // 3. 内建函数方法名（原版 funcDic 同时收录 methodList，spec: FunctionIdentifier.cs:4140-4148）
         //    与用户定义函数方法名 → METHOD 语句
-        if (first.uppercase() in BuiltinSymbols.methods || resolver.isUserMethod(first)) {
+        if (first.uppercase(Locale.ROOT) in BuiltinSymbols.methods || resolver.isUserMethod(first)) {
             val argText = splitArgs(content, nameEnd, lineNo, first)
             val ctx = ArgCtx(
                 lineNo, FunctionCode.METHOD, first, argText, resolver, config, warn(lineNo),
@@ -214,8 +244,11 @@ class LineParser(
         val argText = splitArgs(content, nameEnd, lineNo, name)
         // PRINT 家族：后缀决定参数形态。spec: FunctionIdentifier.cs:85-171
         if (code.argType == ArgType.PRINT) {
+            // 后缀残留 ⇒ 原版 `throw new ExeEE(Lang.Error.AbnormalPrint.Text)`（:167-170，文案
+            // 「PRINT異常」/ zhs「PRINT异常」）。移植侧此前用的是自造中文串，与本文件 :160 的
+            // 「照抄原文」口径不一致（W10 · AUD-p9p10）。
             val spec = PrintSpec.parse(code)
-                ?: throw StmtParseException(lineNo, 0, name, "PRINT 语句名后缀非法")
+                ?: throw StmtParseException(lineNo, 0, name, LangKey.AbnormalPrint.render())
             val ctx = ArgCtx(
                 line = lineNo, code = code, statementName = name, argText = argText,
                 resolver = resolver, config = config, warn = warn(lineNo),
@@ -302,7 +335,11 @@ class LineParser(
             throw StmtParseException(lineNo, e.column, "", "无法解释为赋值语句：${e.message}")
         }
         if (op == LexOperatorCode.Equal) {
-            warnings.add(StmtWarning(lineNo, "赋值请使用 '=' 而不是 '=='"))
+            // P16（入册接线）：原自造句「赋值请使用 '=' 而不是 '=='」换成官方 zhs 原文
+            // （`LogicalLineParser.cs:548-554` level 0 提示；表见 specs/error-texts.yaml
+            // Use2EqualToAssign，`Lang.cs:2890` / `emuera-zhs.xml:677`）。判据不变：
+            // 提示后 op 照常改按 Assignment 执行。
+            warnings.add(StmtWarning(lineNo, LangKey.Use2EqualToAssign.renderZhs()))
             op = LexOperatorCode.Assignment
         }
         // 后置 ++/--：`LOCAL++` 与前置 `++LOCAL` 是同一语句的两种写法
@@ -404,13 +441,17 @@ class LineParser(
         // 旧实现走 `lexWords(text, lineNo)` 的 object 级 `ErbLexer()` —— 无宏、无配置。
         // 归约必须是**整型**：原版 handle 的是 `ReduceIntegerTerm`（spec: LogicalLineParser.cs:461），
         // 非整型（如 `VARI A = "x"`）要按 CodeEE 拒绝该行，而不是收成字符串初值。
-        val tokens = lexer.analyse(CharStream(text), LexEndWith.EoL, LexAnalyzeFlag.NONE, lineNo)
+        // 词法通道也必须在本 try 内：LexicalAnalyzer 的 LexError 与表达式层错误一样收敛到
+        // StmtParseException（带行号），否则裸 LexError 会绕过语句层的报错契约漏给调用方。
         return try {
+            val tokens = lexer.analyse(CharStream(text), LexEndWith.EoL, LexAnalyzeFlag.NONE, lineNo)
             ExprParser(
                 tokens.map { it.toExprToken() }, resolver, config,
             ).reduceIntegerTerm(TermEndWith.EoL)
         } catch (e: StmtParseException) {
             throw e
+        } catch (e: LexError) {
+            throw StmtParseException(lineNo, e.column, "VARI", e.message ?: "VARI 初值非法")
         } catch (e: Exception) {
             // 与语句层其它解析失败统一收敛到 StmtParseException（带行号，不静默吞错）。
             throw StmtParseException(lineNo, -1, "VARI", e.message ?: "VARI 初值非法")
@@ -866,15 +907,44 @@ class LineParser(
         } catch (e: LexError) {
             throw StmtParseException(lineNo, 0, "", e.message ?: "# 行无法解释")
         }
-        val kw = keyword.uppercase()
+        // Locale.ROOT：`#ローカルサイズ` 之类关键字的大小写归一同样不许随宿主语言变
+        // （tr 语系下 `i`/`I` 会变形，`#DIM` 关键字匹配 Miss 的同类缺陷，见 T2 的 DimParser 修复）。
+        val kw = keyword.uppercase(Locale.ROOT)
         val values = mutableListOf<Long>()
         var name: String? = null
         when (kw) {
-            "LOCALSIZE", "LOCALSSIZE" -> {
-                val term = ExprParser(tokens.map { it.toExprToken() }, resolver, config)
-                    .reduceIntegerTerm(TermEndWith.EoL)
-                // #LOCALSIZE 允许常量表达式（如 `#LOCALSIZE 人物数量上限`），此处只取字面量
-                values.add((term as? IntLiteral)?.value ?: 0L)
+            "LOCALSIZE", "LOCALSSIZE", "LOCALFSIZE" -> {
+                // T5（挖虫波第三批）：原版对 `#LOCALSIZE` 的值走
+                // `ExpressionParser.ReduceIntegerTerm(wordCollection, EoL).Restructure(null)`
+                // 必须是 `SingleLongTerm`（spec: LogicalLineParser.cs:232-239）——
+                // 宏名 / ERH `#DIM CONST` 名在这一步被 `EmuatorConst.GetConstValue` 折成实数，
+                // **折不出**才是 `SharpHasNotValidValue`（level 2，该行不生效）。
+                // 旧实现只认 `(term as? IntLiteral)`，常量名形态静默折成 `0`
+                // （`#LOCALSIZE 人物数量上限` → values = [0]），既丢真值也不报错。
+                // 现在把不可解的行写成带行号的告警（不静默 0），可折叠形态交
+                // [com.eratw.port.core.compile.DimSizeEvaluator]（与 #DIM 尺寸同一真源）。
+                val literal = try {
+                    (ExprParser(tokens.map { it.toExprToken() }, resolver, config)
+                        .reduceIntegerTerm(TermEndWith.EoL) as? IntLiteral)?.value
+                } catch (_: com.eratw.port.core.expr.ExprParseException) {
+                    // 标识符在当前 resolver 下不可解（严格解析器把未知名当错误标识符）。
+                    // 旧口径在这里等价于「非 IntLiteral」，随后由常量表折叠；折叠也失败才报错。
+                    null
+                }
+                val folded = literal ?: dimSizeEvaluator.eval(sharpArgText(content, keyword))
+                if (folded == null) {
+                    warn(lineNo)(
+                        "#$keyword 的值无法求值为整数常量（原版 SharpHasNotValidValue，level 2，" +
+                            "该行不生效）: ${sharpArgText(content, keyword)}",
+                    )
+                } else {
+                    values.add(folded)
+                }
+                // `#LOCALFSIZE n`（4.981 fork；spec: variables.yaml:99 的 float_vars 备注，
+                // fork-src LogicalLineParser.cs:257-266）与 `#LOCALSIZE` 同形，这里只做语法切分：
+                // 值进 SharpStmt.values，侧车相位由 erbcc `LabelTable.scanLabels` 落进
+                // `LabelDef.floatLocalSize` → `FuncMeta.floatLocalSize`。常量折叠与告警口径
+                // 与上面两条关键字共用（T5 修复对三键同样适用）。
             }
             "DIM", "DIMS" -> {
                 // 变量名 = 修饰符序列之后的首个标识符。原版把整行交给
@@ -885,7 +955,7 @@ class LineParser(
                 // 于是 `#DIMS CONST STR_RANK10, 10 = …` 的 name 变成 "CONST"。
                 val id = tokens.asSequence()
                     .filterIsInstance<Token.Identifier>()
-                    .firstOrNull { it.code.uppercase() !in DIM_KEYWORDS }
+                    .firstOrNull { it.code.uppercase(Locale.ROOT) !in DIM_KEYWORDS }
                 name = id?.code
                 // CORE-06：用户变量名不得占用系统保留名 —— 原版在声明层调
                 // `IdentifierDictionary.CheckUserVarName`（IdentifierDictionary.cs:258-297，
@@ -899,9 +969,49 @@ class LineParser(
                 }
                 for (t in tokens) if (t is Token.Integer) values.add(t.value)
             }
+            "DIMF" -> {
+                // `#DIMF`（4.981 fork 新增）走**同一份** [DimParser.parse]：关键字/尺寸/初值
+                // 规则与 `#DIM` 逐条相同（`UserDefinedVariable.cs:74` 只换 dimtype），
+                // 因此这里不再重复切分，而是把声明体整体交给声明层（`DimParser` 自带词法器，
+                // 并自行在 `;` 处截断，spec: LexicalAnalyzer.cs:919-929）。
+                // 注意词法层 `parseSharpLine`（LexicalAnalyzer.kt:919-926）只认
+                // LOCALSIZE/LOCALSSIZE/DIM/DIMS ⇒ `#DIMF` 的 tokens 是空表，不能按
+                // `DIM` 分支的 token 扫描取名字，必须走本条原文通道。
+                val spec = try {
+                    DimParser.parse("#DIMF", sharpDeclBody(content, keyword), isPrivate = true)
+                } catch (e: CodeEE) {
+                    throw StmtParseException(lineNo, 0, "", e.message ?: "#DIMF 声明无法解析")
+                }
+                name = spec.name
+                // CORE-06 同口径：私有变量名同样不得占用系统保留名（IdentifierDictionary.cs:340-390）。
+                reservedVarMessage(spec.name)?.let { throw StmtParseException(lineNo, 0, "", it) }
+                // 原版在装载第一遍扫描里登记私有 `#DIM`（ErbLoader.cs:413-423）；本侧预扫描
+                // （tools/erbcc 的 CorpusScan）与侧车收集（CorpusCompile 的 dimLines）现已
+                // 同口径收 `#DIMF`，生产路径的名字可见性由预扫描负责。此处仍保留即时登记：
+                // 它让**不经预扫描**的解析器（合成测试装置 / 单函数编译）在同一 @定义 的
+                // 后续行也能解析该名字，与 VARI/VARS 的登记点位一致。
+                // 维度取声明的 `dims`（`#DIMF DYNAMIC 倍率` 按原版补成 [1]，见 DimParser 的 KDoc）。
+                (resolver as? DefinitionScopedResolver)?.declarePrivateVariable(
+                    spec.name, OperandType.FLOAT, spec.dims,
+                )
+                for (d in spec.dims) values.add(d.toLong())
+            }
             else -> {}
         }
         return SharpStmt(keyword, values, name, kw == "DIMS", tokens, lineNo, content)
+    }
+
+    /**
+     * `#` 行的声明体：去掉行首 `#`、前导空白与关键字本身，余下原样交声明层。
+     *
+     * 只给 [DimParser.parse] 的 `#DIMF` 通道用（[parseSharpLine] 里 `DIM`/`DIMS` 走的是
+     * 词法层 tokens，而 `#DIMF` 在词法层没有 token 通道，见该分支注释）。
+     */
+    private fun sharpDeclBody(content: String, keyword: String): String {
+        var i = content.indexOf('#')
+        i = if (i < 0) 0 else i + 1
+        while (i < content.length && (content[i] == ' ' || content[i] == '\t')) i++
+        return content.substring(minOf(i + keyword.length, content.length))
     }
 
     // -----------------------------------------------------------------------
@@ -909,6 +1019,29 @@ class LineParser(
     // -----------------------------------------------------------------------
 
     private companion object {
+        /**
+         * `#LOCALSIZE 人物数量上限` 之类 `#` 行的**参数原文**（T5）：
+         * 去掉行首 `#`、关键字与其后的空白，再把顶层 `;` 注释剪掉
+         * （词法层 `Analyse(EoL)` 同样在首个非引号内的 `;` 处终止，
+         * spec: LexicalAnalyzer.cs:919-929；引号内的 `;` 不算）。
+         */
+        fun sharpArgText(content: String, keyword: String): String {
+            val body = content.trimStart().removePrefix("#").trim()
+            val rest = when {
+                body.length >= keyword.length &&
+                    body.regionMatches(0, keyword, 0, keyword.length, ignoreCase = true) -> body.substring(keyword.length)
+                else -> body
+            }
+            var inStr = false
+            var i = 0
+            while (i < rest.length) {
+                val c = rest[i]
+                if (c == '"') inStr = !inStr else if (c == ';' && !inStr) break
+                i++
+            }
+            return rest.substring(0, i).trim()
+        }
+
         /** `#DIM` 修饰符关键字 —— 原版 `UserDefinedVariableData.Create` 的关键字循环
          * （spec: UserDefinedVariableData.cs:54-57，7 个 `text2.Equals(...)` 分支：
          * CONST :60 / REF :89 / DYNAMIC :119 / STATIC :145 / GLOBAL :171 / SAVEDATA :200 /
@@ -935,7 +1068,7 @@ class LineParser(
          * :875 VarNameAlreadyUsedInternalVariable。
          */
         fun reservedVarMessage(rawName: String): String? {
-            val name = rawName.uppercase()
+            val name = rawName.uppercase(Locale.ROOT)
             return when {
                 name in RESERVED_VAR_NAMES -> "变量名\"$rawName\"为Emuera的保留字"
                 name in BuiltinSymbols.methods || name in FunctionCode.BY_NAME ->
@@ -965,6 +1098,8 @@ class LineParser(
         val CALL_CODES: Set<FunctionCode> = setOf(
             FunctionCode.CALL, FunctionCode.TRYCALL, FunctionCode.CALLFORM, FunctionCode.TRYCALLFORM,
             FunctionCode.TRYCCALL, FunctionCode.TRYCCALLFORM,
+            // 4.981 上游新增：字符串形态的动态调用（整串当运行期函数名，见 ArgType.SP_CALLSTR）。
+            FunctionCode.TRYCALLSTR, FunctionCode.TRYCCALLSTR,
         )
 
         /** 无参流程控制（BREAK/CONTINUE/RESTART/QUIT 等）。 */

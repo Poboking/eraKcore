@@ -27,34 +27,79 @@ package com.eratw.port.core.host
  *   `default(Point)` = **(0,0)**，连 Y 位移都不做（EmueraConsole.cs:2259-2262）。
  *   [windowCreated] 就是这一判据的替身，缺省 false → MOUSEX/MOUSEY 均读 0。
  *
+ * ## 单位：存设备像素，读数折脚本 px（移植侧）
+ *
+ * 原版窗口像素与脚本 px 是同一把尺（1:1 渲染）；本移植不是 —— 渲染层把脚本 px 按
+ * `设备字号 / 配置字号` 折成设备像素（`CellMetrics.scriptPixels`）。所以本类存的
+ * [positionX] / [positionY] / [clientWidth] / [clientHeight] 是**设备像素事实**
+ * （命中测试与越界判定都在这个坐标系里做），而 [mouseX] / [mouseY] 的读数经
+ * [pointerToScriptPx] 折回**脚本 px**，与 `CLIENTWIDTH()` 同一把尺。语料拿 `MOUSEX()`
+ * 排 UI 位置（`ERB/魔改内容/PRINT系/UI_Container_Framework.ERB:823` 的 `POS_X = MOUSEX() + MARGIN_PX`）
+ * 或与 `GETCONFIG("ウィンドウ幅")` 比（`ERB/DLC/开锁系统.ERB:230`），两把尺分叉就会把
+ * 弹窗放到屏幕外、把角度算过 1。钩子缺省 null = 恒等（headless / 既有装置逐字不变）。
+ *
  * `MOUSEB` 用的是**未位移的原始点**（FunctionMethodCreator.cs:7877），并且先用
  * `MainPicBox.ClientRectangle.Contains(point)` 判越界（:7879）：越界时**不刷新指向态**，
  * 于是返回上一次留下的 [pointing]（可能是已过期的按钮值）——原版官方行为，照抄（:7879-7883）。
+ *
+ * ## 线程契约（2026-11 挖虫波 T9）
+ *
+ * 写侧是 UI 线程（`GameHost.installMouse` / `updatePointer`：触摸坐标、客户区尺寸、
+ * `windowCreated`、`hitTest`），读侧是 VM 线程（`MouseMethods` 的 MOUSEX/MOUSEY/MOUSEB，
+ * 以及 [refreshPointingForButton] 自己的 `pointing`/`alwaysRefresh` 写读）。旧实现全部是
+ * 普通 `var`：跨线程既无可见性承诺（JMM 下读者可长期看到陈旧值），坐标**对**还可能撕裂
+ * （新 X + 旧 Y 的组合送进命中测试）。现口径：
+ * - 标量（[windowCreated]/[pointing]/[alwaysRefresh]/钩子引用）加 `@Volatile`；
+ * - 需要成对一致的**指针坐标**与**客户区尺寸**各收拢成一枚不可变快照，整对换代发布
+ *   （[setPointerPosition]/[setClientSize] 一次写一对；散字段 setter 保留兼容形态，
+ *   单次赋值读旧配对新值——原版 WinForms 单线程不存在这个窗口，移植侧成对写请走整对入口）；
+ * - 不承诺「坐标对 × 尺寸对」跨快照一致：mouseY/isPointerInClientArea 允许采到相邻两代
+ *   （弱一致一帧内自愈，且这两处的写同在 UI 线程按 setClientSize→setPointerPosition 顺序调用）。
  */
 class MouseState {
 
-    /** 窗口是否已创建（原版 `window != null && window.Created`，EmueraConsole.cs:2259）。 */
+    /** 指针坐标的不可变对快照。 */
+    private class PointerPos(val x: Int, val y: Int)
+
+    /** 客户区尺寸的不可变对快照。 */
+    private class ClientSize(val width: Int, val height: Int)
+
+    @Volatile private var pointerPos: PointerPos = PointerPos(0, 0)
+    @Volatile private var clientSize: ClientSize = ClientSize(0, 0)
+
+    /** 窗口是否已创建（原版 `window != null && window.Created`，EmueraConsole.cs:2259）；UI 写、VM 读。 */
+    @Volatile
     var windowCreated: Boolean = false
 
     /** `MainPicBox.Width`（原版 `Console.ClientWidth`，EmueraConsole.cs:232）：越界判定的右边界。 */
-    var clientWidth: Int = 0
+    var clientWidth: Int
+        get() = clientSize.width
+        set(value) { clientSize = ClientSize(value, clientSize.height) }
 
     /**
      * `MainPicBox.Height`（原版 `Console.ClientHeight`，EmueraConsole.cs:234）：
      * 既是 `MOUSEY` 的位移量（:2264），也是越界判定的下边界。
      */
-    var clientHeight: Int = 0
+    var clientHeight: Int
+        get() = clientSize.height
+        set(value) { clientSize = ClientSize(clientSize.width, value) }
 
     /** 客户区原始 X（`PointToClient` 之后、位移之前；EmueraConsole.cs:2263）。 */
-    var positionX: Int = 0
+    var positionX: Int
+        get() = pointerPos.x
+        set(value) { pointerPos = PointerPos(value, pointerPos.y) }
 
     /** 客户区原始 Y（同上；Y 向下为正，未减 [clientHeight]）。 */
-    var positionY: Int = 0
+    var positionY: Int
+        get() = pointerPos.y
+        set(value) { pointerPos = PointerPos(pointerPos.x, value) }
 
     /** 鼠标当前指向的按钮串（原版 `Console.PointingSring`，EmueraConsole.cs:437）；null = 无指向。 */
+    @Volatile
     var pointing: ConsoleButtonPointing? = null
 
     /** 原版 `Console.AlwaysRefresh`（EmueraConsole.cs:184）；MOUSEB 调用期间临时置 true（:7876-7883）。 */
+    @Volatile
     var alwaysRefresh: Boolean = false
 
     /**
@@ -64,7 +109,10 @@ class MouseState {
      * :2271-2400）算出指向的 `ConsoleButtonString`，属于渲染/控制台层，core 无从复刻。
      * 因此本字段由宿主注入（签名 = 客户区原始点 → 指向态），[refreshPointingForButton] 负责
      * 「什么条件下才调用它」这条口径。null = 宿主没有命中测试能力 → 指向态保持不变。
+     *
+     * `@Volatile`：装配点在 UI 线程（`GameHost.installMouse`），读点在 VM 线程。
      */
+    @Volatile
     var hitTest: ((Int, Int) -> ConsoleButtonPointing?)? = null
 
     /**
@@ -77,30 +125,48 @@ class MouseState {
      *
      * 生产装配（SAVE-15b）：GameSession 装配即给出——缺省收进会话的 mouseWarnings 清单，
      * 或经其 mouseWarnSink 参数转发宿主。null = 本 VM 未走生产装配（裸 MouseState /
-     * 纯 fn 装置）→ 静默。
+     * 纯 fn 装置）→ 静默。`@Volatile`：装配线程写、求值线程读。
      */
+    @Volatile
     var warnRecorder: ((String) -> Unit)? = null
 
-    /** 一次写入鼠标现场（客户区原始坐标）。 */
+    /**
+     * 指针坐标 → 脚本 px 的折算（[mouseX] / [mouseY] 的读数口径）。
+     *
+     * 由 [com.eratw.port.core.proc.GameSession] 装配期注入（同一份活状态
+     * [com.eratw.port.core.proc.ScriptScreenState] + 生效配置字号，转屏换字号档后自动跟随）；
+     * 入参是**有符号设备像素**（[mouseY] 在客户区内恒为负）。null = 恒等。`@Volatile`：
+     * 装配线程写、VM 线程读。
+     */
+    @Volatile
+    var pointerToScriptPx: ((Long) -> Long)? = null
+
+    /** 一次写入鼠标现场（客户区原始坐标）——**成对原子**：跨线程写坐标只应走这个入口。 */
     fun setPointerPosition(x: Int, y: Int) {
-        positionX = x
-        positionY = y
+        pointerPos = PointerPos(x, y)
     }
 
-    /** 一次写入客户区尺寸（宿主 resize / 首帧时调用）。 */
+    /** 一次写入客户区尺寸（宿主 resize / 首帧时调用）——**成对原子**。 */
     fun setClientSize(width: Int, height: Int) {
-        clientWidth = width
-        clientHeight = height
+        clientSize = ClientSize(width, height)
     }
-
-    /** `MOUSEX` 读数：窗口未创建 → 0（EmueraConsole.cs:2259-2262、FunctionMethodCreator.cs:7861）。 */
-    fun mouseX(): Long = if (windowCreated) positionX.toLong() else 0L
 
     /**
-     * `MOUSEY` 读数：窗口未创建 → 0；否则**原始 Y 减 [clientHeight]**（:2264、:7857）。
-     * 可视区内的鼠标必然给出 ≤ 0 的负值——原版口径，勿「顺手修正」。
+     * `MOUSEX` 读数（脚本 px）：窗口未创建 → 0（EmueraConsole.cs:2259-2262、
+     * FunctionMethodCreator.cs:7861）。设备像素经 [pointerToScriptPx] 折回，未装钩子恒等。
      */
-    fun mouseY(): Long = if (windowCreated) (positionY - clientHeight).toLong() else 0L
+    fun mouseX(): Long = if (windowCreated) toScriptPx(pointerPos.x.toLong()) else 0L
+
+    /**
+     * `MOUSEY` 读数（脚本 px）：窗口未创建 → 0；否则**原始 Y 减 [clientHeight]**（:2264、:7857）。
+     * 可视区内的鼠标必然给出 ≤ 0 的负值——原版口径，勿「顺手修正」。位移在设备像素里做完
+     * 再整段折脚本 px（两个读数同尺，逐段折算会各自补满、把差值放大 1 px）。
+     * Y 与高度各取一次快照：两对在 UI 侧按 setClientSize→setPointerPosition 顺序成对写，
+     * 跨对弱一致最多一帧（类 KDoc 线程契约第 3 条）。
+     */
+    fun mouseY(): Long = if (windowCreated) toScriptPx((pointerPos.y - clientSize.height).toLong()) else 0L
+
+    private fun toScriptPx(devicePx: Long): Long = pointerToScriptPx?.invoke(devicePx) ?: devicePx
 
     /**
      * 原始点是否落在 `MainPicBox.ClientRectangle` 内。
@@ -108,14 +174,20 @@ class MouseState {
      * WinForms `Rectangle.Contains` 为**半开区间** `[0, Width) × [0, Height)`；
      * 这正是 MOUSEB 的越界判据（FunctionMethodCreator.cs:7879）。
      * 窗口未创建时原版会先 NRE（:7877 无 `Created` 防护），移植侧按「不可用」处理，
-     * 见 [refreshPointingForButton]。
+     * 见 [refreshPointingForButton]。坐标与尺寸**各取一枚快照**（不成对撕裂）。
      */
-    fun isPointerInClientArea(): Boolean =
-        positionX in 0 until clientWidth && positionY in 0 until clientHeight
+    fun isPointerInClientArea(): Boolean {
+        val p = pointerPos
+        val cs = clientSize
+        return p.x in 0 until cs.width && p.y in 0 until cs.height
+    }
 
     /**
      * MOUSEB 的刷新动作（FunctionMethodCreator.cs:7876-7883 的逐句复刻）：
      * 先存下 `AlwaysRefresh` 并置 true，**仅当原始点在客户区内**才调 `MoveMouse`，随后还原。
+     *
+     * 命中测试拿到的坐标取自**同一枚**指针快照（T9：旧写法逐字段读，UI 线程换代会把
+     * 「新 X + 旧 Y」的混叠点喂进命中判定）。
      *
      * @return 是否执行了刷新（false = 越界或窗口未创建 → 指向态原样保留）
      */
@@ -124,9 +196,11 @@ class MouseState {
         alwaysRefresh = true                         // :7878
         try {
             if (!windowCreated) return false         // 原版此处 NRE（:7877 无防护）；移植侧视为不可用
-            if (!isPointerInClientArea()) return false  // :7879
+            val p = pointerPos
+            val cs = clientSize
+            if (p.x !in 0 until cs.width || p.y !in 0 until cs.height) return false  // :7879
             val test = hitTest ?: return false
-            pointing = test(positionX, positionY)    // :7881 = MoveMouse(point)
+            pointing = test(p.x, p.y)                // :7881 = MoveMouse(point)
             return true
         } finally {
             alwaysRefresh = saved                    // :7883

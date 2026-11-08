@@ -18,7 +18,18 @@ import java.nio.file.Path
  * - 2 维必须有第 2 维、每维 1..1,000,000、总元素 ≤1,000,000（:380-411）；
  * - 3 维必须有第 3 维、每维 1..1,000,000、总元素 ≤10,000,000（:412-448）；
  * - 写入分派与 ITEMPRICE/ITEMNAME、STR 特例交给 [VariableSizes.applySize]；
- * - 全部行读完调 [VariableSizes.decideActualArraySize] 做主数组↔名字表联动。
+ * - 4.981 fork 的**浮点行**（`LOCALF,n` / `ARGF,n`）走同一条判定链，无需特例：
+ *   名字解析（[VariableSizes.variableCode] 认 `LOCALF`/`ARGF`，其余大小写形态按原版
+ *   的区分大小写登记表判为未知名，spec: fork-src VariableIdentifier.cs:137-151,190 的
+ *   `nameDic` 以 `Enum.GetName` 为键）、`IsLocal` ⇒ 下限是 1 而不是 100
+ *   （spec: fork-src ConstantData.cs:363-367 的 `IsLocal && length < 1` 支）、
+ *   `CanForbid` ⇒ 负值改写成一整串 0（spec: fork-src ConstantData.cs:347-356；
+ *   LOCALF/ARGF 的 code 都带 `__CAN_FORBID__`，fork-src VariableCode.cs:99-100），
+ *   落点由 [VariableSizes.applySize] 的浮点支给出（spec: fork-src ConstantData.cs:532-533）；
+ *   `RESULTF` 是 0 维 ⇒ 与原版同样在 :323-327 被「0 维变量不可改尺寸」拒掉
+ *   （spec: fork-src VariableCode.cs:124、VariableDescriptor.cs:108 的 Scalar）；
+ * - 全部行读完调 [VariableSizes.decideActualArraySize] 做主数组↔名字表联动
+ *   （浮点不在联动表里，spec: fork-src ConstantData.cs:583-670 整段没有 Float）。
  *
  * "禁用数组"在存储层的形态是 dims 含 0（[com.eratw.port.core.vars.VarDef.isForbid]，
  * VariableStore.checkElement 对 IsForbid 抛 CodeEE），与原版 0 长度数组的访问语义一致。

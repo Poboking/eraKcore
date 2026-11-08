@@ -8,18 +8,24 @@ import com.eratw.port.core.expr.VarRef
 import com.eratw.port.core.expr.langCodecOf
 import com.eratw.port.core.expr.strLenLang
 import com.eratw.port.core.host.Alignment
+import com.eratw.port.core.host.CellWidth
 import com.eratw.port.core.host.InputOutcome
 import com.eratw.port.core.host.InputRequest
 import com.eratw.port.core.host.InputRequest.InputType
+import com.eratw.port.core.host.SPRITE_SLOT
 import com.eratw.port.core.host.SaveLoadHandoff
+import com.eratw.port.core.host.SpritePool
 import com.eratw.port.core.fn.BuiltinContext
 import com.eratw.port.core.fn.BuiltinHost
 import com.eratw.port.core.fn.ColorNames
 import com.eratw.port.core.fn.EmDataPools
+import com.eratw.port.core.fn.NativeMethod
 import com.eratw.port.core.fn.NativeParam
 import com.eratw.port.core.fn.SP_CHARA_CONFIG_IS_OFF
+import com.eratw.port.core.fn.SharpLinkTable
 import com.eratw.port.core.fn.dtColumnOptionsDefault
 import com.eratw.port.core.fn.nativeMethods
+import com.eratw.port.core.fn.sharpLinks
 import com.eratw.port.core.fn.spCharaEnabled
 import com.eratw.port.core.stmt.ArgType
 import com.eratw.port.core.stmt.Argument
@@ -74,6 +80,7 @@ import com.eratw.port.core.stmt.StrDataArgument
 import com.eratw.port.core.stmt.VarDeclStmt
 import com.eratw.port.core.save.SaveWiring
 import com.eratw.port.core.vars.VariableStore
+import com.eratw.port.core.vars.oorInstructionArg
 import com.eratw.port.core.code.ErbcFormat
 import com.eratw.port.core.sem.FlatArgs
 import com.eratw.port.core.sem.FlatStmtSource
@@ -104,7 +111,9 @@ sealed class ExecResult {
      * `SetBegin` 的 `force` 形参只服务于 `__CAN_BEGIN__` 守卫
      * （spec: `ProcessState.cs:169-188`，非 force 且状态位不齐全时抛 CanNotUseInstruction），
      * 而两条语句**都**硬编 `force: true` ⇒ 该守卫对二者皆不可达，"强制"只存在于名字里。
-     * `isa.yaml:1682-1698` 写的「当前实现行为一致」据此确认，不做「顺手统一」也不臆造差异。
+     * `isa.yaml:1924-1935`（BEGIN 条目，「当前实现行为一致」在 `:1927`）据此确认，
+     * 不做「顺手统一」也不臆造差异。（原引用写的 `1682-1698` 是 REPEAT 族的注释块，
+     * 与本句无关——2026-11-05 组长随 isa.yaml 位移一并纠正。）
      * 结论：本层单条分派 + 同一 [Begin] 载荷即完备，不需要 force 位（`proc/BeginType.kt:52-56` 同源）。
      *
      * 缺口已收口（M4-I i-consolereset）：原版第 3 句 `Console.ResetStyle()` 对应 `host/ConsoleSink.resetStyle()`，
@@ -161,11 +170,23 @@ class StatementExecutor {
         private set
 
     /**
-     * 旧对象树入口（T2-64 波次 C 起**仅供双路对拍装置对照**；运行期主路径走
-     * [execute] 的扁平直读）。语义、KDoc 与 `spec:` 出处全部原样保留 —— 它是「直读复刻是否
-     * 逐字一致」的唯一参照系。收尾提交由负责人整批删除（连同本文件里同标记的 `execXxx` 一族）。
+     * **对象树通道入口 —— Android 生产默认路径**。
+     *
+     * 通道判据：`app` 侧 `GameHost.kt:3341-3360` 的 flatStatements 缺省 false（真机实测开关
+     * 扁池 +114 MiB），装载期开关关 ⇒ `ProcessRuntime.kt:331-336` 不建扁池
+     * （只在 `flatStatementsEnabled` 时 `ensureFlatStmtSource`）⇒ `Program.flatStmtSource`
+     * 恒 null ⇒ `Vm.kt:1866-1874` 走 `host.executeStatement(statementOf(a), env)`，
+     * 经 `ProcessRuntime.kt:1147/:1264` 落到本函数。
+     *
+     * 原版同样是单线程对象树逐语句执行：`Process.cs:438` 的 `DoScript` 循环里
+     * `Process.cs:1018-1047` 取当前 `InstructionLine` 对象再调其
+     * `Function.Instruction.DoInstruction` —— 没有「扁平语句池」这种东西，
+     * 扁池是本移植的归因装置，不是原版形态。
+     *
+     * 扁平通道入口是本类的 `execute(source, index, ctx)` 重载（`files/flat-statements.on` 或
+     * `--ez eratwFlatStatements true` 打开的归因通道，桌面/测试默认开）。两条通道的实现是
+     * 逐句对偶，改一条必须同步改另一条；双路对拍装置见 `DualPathParityTest`。
      */
-    @Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
     fun execute(stmt: Statement, ctx: ExecContext): ExecResult = when (stmt) {
         is PrintStmt -> {
             execPrint(stmt, ctx); ExecResult.Normal
@@ -193,11 +214,13 @@ class StatementExecutor {
     }
 
     // ==================================================================
-    // T2-64 波次 C：扁平池全量直读主入口（旧 execute(stmt, ctx) 仅供双路对拍，收尾删除）
+    // 扁平池直读入口（归因/装置通道：只有 files/flat-statements.on 或
+    // --ez eratwFlatStatements true 打开时才走；产品默认走上面 execute(stmt, ctx) 的对象树）
     // ==================================================================
 
     /**
-     * 语句执行主入口（扁平池通道，契约 T2-64 §3.3）——**波次 C：37 个 `StmtTag` 全量直读**。
+     * **扁平池通道入口**（契约 T2-64 §3.3；归因/装置通道，产品默认不走，见上面的
+     * `execute(stmt, ctx)`）——**37 个 `StmtTag` 全量直读**。
      *
      * 外层按**语句类标签**（参数流槽 0，与 encode 的 `StmtTag` 同值）tableswitch；`op`（槽 1）
      * 只在「族内共享同一记录布局」时做第二级 `when`。为什么外层是 tag 而不是 op：PRINT 家族是
@@ -219,10 +242,11 @@ class StatementExecutor {
      * [com.eratw.port.core.code.ErbcDecodeException]（[openTag] / [argTerm] / [argTerms] 一族）。
      * 理由：那是「语句池记录与 op 不自洽」的**容器级**错误，不是脚本错误 —— `CodeEE` 是给 ERB
      * 作者看的运行期语义错误（proc 桥会补位置章与行号），形态错没有可归因的脚本行；
-     * 静默错读槽位是这个口径要排除的唯一结果。旧树路径没有这一支（Argument 已是具体类）。
+     * 静默错读槽位是这个口径要排除的唯一结果。对象树通道没有这一支（Argument 已是具体类）。
      *
      * **不再有兜底支**：本入口不调用 [FlatStmtSource.statementAt]，左右两支之外没有第三支。
-     * 语义逐字照抄对应 `execXxx`（旧入口 [execute] 原样保留到收尾提交删除，供双路对拍装置对照）。
+     * 语义逐字照抄对应 `execXxx`（对象树入口 `execute(stmt, ctx)` 是 Android 生产默认路径，
+     * 不是待删的旧路 —— 两条通道的实现必须同步改）。
      */
     fun execute(source: FlatStmtSource, index: Int, ctx: ExecContext): ExecResult {
         // T2-64 波次 D：分片惰性源要求**先** headAt（定位到该语句所在的片）再取数组；
@@ -385,7 +409,7 @@ class StatementExecutor {
                 val v = a.expr()?.getIntValue(ctx.eval) ?: 0L
                 val max = a.expr()?.getIntValue(ctx.eval) ?: 0L
                 val len = a.expr()?.getIntValue(ctx.eval) ?: 0L
-                ctx.console.print(createBar(v, max, len))
+                ctx.console.print(createBar(v, max, len, ctx.config.barChar1, ctx.config.barChar2))
                 if (code == FunctionCode.BARL) ctx.console.newLine()
                 ExecResult.Normal
             }
@@ -491,6 +515,58 @@ class StatementExecutor {
                 }
                 ExecResult.Normal
             }
+            FunctionCode.HTML_PRINTC, FunctionCode.HTML_PRINTLC -> {
+                /*
+                 * 4.981 上游新增：像素制表版 PRINTC / PRINTLC
+                 * （自改说明 :17-18：原版按 Shift-JIS 半角格数补空格，非等距字体会错位；
+                 * HTML_PRINTC 改用 HTML_PRINT 的像素量宽能力补齐）。
+                 *
+                 * 原版 PRINTC 的落点：`printBuffer.Append(CreateTypeCString(str, alignmentRight),
+                 * Style, force_button: true)`（EmueraConsole.cs:3229-3234）—— 恒追加进打印缓冲、
+                 * 从不 flush，故这里第二参固定 true（与 HTML_PRINT 的 opt 槽不同，本语句不消费它）。
+                 * 列宽 = `Config.PrintCLength` 个半角格 = `printCLength * FontSize / 2` 像素
+                 * （原版 `calcPrintCWidth` 就是「PrintCLength 个 ASCII 空格的像素宽」，
+                 * EmueraConsole.cs:3237-3243；FontSize 即像素字号，见 ConfigData.cs:66）。
+                 * 对齐：PRINTC 右对齐（前面补）、PRINTLC 左对齐（后面补），原版 :3267-3289。
+                 * TODO(verify)：原版判「文本是否已占满一列」用的是**源串**的 Shift-JIS 字节数
+                 * （:3255），这里改用渲染后像素宽（这正是上游换像素制的目的，语义差异已登记）；
+                 * 超宽文本的折行口径借 [htmlLength] 的第一显示行，与原版「先补再看宽」不严格同序。
+                 */
+                openTag(a, code, ErbcFormat.ArgTag.SP_HTML_PRINT)
+                val strTerm = a.expr()
+                a.expr() // 第二槽（opt）本语句不消费，仍按 encode 顺序跳过
+                if (!ctx.skipPrint) {
+                    val text = evalStr(strTerm, ctx)
+                    ctx.console.printHtml(
+                        padHtmlColumn(ctx, text, rightAlign = code == FunctionCode.HTML_PRINTC),
+                        true,
+                    )
+                }
+                ExecResult.Normal
+            }
+            FunctionCode.TEXT_BGC_ON -> {
+                // 4.981 上游新增：正文区背景色（语料 `QOL_IMAGE.ERB:2564` /
+                // `DLC/背景图补丁/地点转换.ERB:55` 都是「颜色, 不透明度」两参 INT）。
+                // 无 1.824 反编译对应物（reference 全文零命中）。
+                openTag(a, code, ErbcFormat.ArgTag.SP_SWAP_CHARA)
+                val rgb = a.expr()?.getIntValue(ctx.eval) ?: 0L
+                val opacity = a.expr()?.getIntValue(ctx.eval) ?: 0L
+                ctx.graphics.setTextBgColor(rgb, opacity)
+                ExecResult.Normal
+            }
+            FunctionCode.TEXT_BGC_OFF -> {
+                // 与 TEXT_BGC_ON 同族（语料 `QOL_IMAGE.ERB:2538` 无参关灯）。
+                // 哨兵口径：rgb < 0 = 关闭（见 GraphicsSink.setTextBgColor 的 KDoc）。
+                ctx.graphics.setTextBgColor(-1L, 0L)
+                ExecResult.Normal
+            }
+            FunctionCode.DISABLE_INPUT_MACRO, FunctionCode.ENABLE_INPUT_MACRO -> {
+                // 4.981 上游新增：输入宏展开开关（语料 `DLC/实用设置补丁/实用设置.ERB:571/573`
+                // 夹住一次 INPUTS，用来「原样记录含花括号的预设宏」）。
+                // 状态挂每 VM 的 ExecContext（与 skipPrint 同一条路），由 [waitInput] 随请求下发。
+                ctx.inputMacroEnabled = code == FunctionCode.ENABLE_INPUT_MACRO
+                ExecResult.Normal
+            }
             FunctionCode.HTML_PRINT_ISLAND -> {
                 openTag(a, code, ErbcFormat.ArgTag.SP_HTML_PRINT)
                 val strTerm = a.expr()
@@ -543,6 +619,16 @@ class StatementExecutor {
             }
             FunctionCode.CLEARBGIMAGE -> {
                 ctx.graphics.clearBgImages(); ExecResult.Normal
+            }
+            FunctionCode.SETIMAGELAYERL -> {
+                // 4.981 上游新增：行锚定版 SETIMAGELAYER（spec: Instraction.Child.cs:4161-4209）。
+                // 8 槽：spriteName, depth, xpos, ypos, width, height, opacity, CM_ARRAY（后 6 槽可缺省）。
+                execSetImageLayerL(argExpressionsOpt(a, code), ctx); ExecResult.Normal
+            }
+            FunctionCode.SEQUENCEINPUT -> {
+                // 4.981 上游 method（spec: Creator.Method.cs:9690-9705）：整段覆盖待消费输入序列，
+                // 由下一次取值等待消费（见 [waitInput] / [sequenceOutcome]）。
+                sequenceInput(ctx).submit(evalStr(argTerm(a, code), ctx)); ExecResult.Normal
             }
             FunctionCode.CLEARTEXTBOX -> {
                 ctx.console.clearText(); ExecResult.Normal // spec: Process.cs:1798-1800
@@ -606,7 +692,11 @@ class StatementExecutor {
             FunctionCode.INPUT, FunctionCode.INPUTS, FunctionCode.ONEINPUT, FunctionCode.ONEINPUTS -> {
                 execInputsFlat(code, a, ctx); ExecResult.Normal
             }
-            FunctionCode.TINPUT, FunctionCode.TONEINPUT, FunctionCode.TINPUTS, FunctionCode.TONEINPUTS -> {
+            FunctionCode.TINPUT, FunctionCode.TONEINPUT, FunctionCode.TINPUTS, FunctionCode.TONEINPUTS,
+            // 4.981 上游新增：与 TINPUT/TINPUTS 全等价（语料只有「限时 + 默认值」用法，
+            // `TITLE.ERB:88` 与 `魔改内容/qol/qol_MAP.ERB:54` 等，见 ArgBuilders 的 SP_TINPUT 记录）。
+            FunctionCode.TINPUTNF, FunctionCode.TINPUTSNF,
+            -> {
                 execTInputsFlat(code, a, ctx); ExecResult.Normal
             }
             FunctionCode.BINPUT, FunctionCode.BINPUTS, FunctionCode.ONEBINPUT, FunctionCode.ONEBINPUTS -> {
@@ -719,6 +809,13 @@ class StatementExecutor {
                 if (term != null) {
                     if (term.operandType == OperandType.INT) {
                         ctx.variables.writeInt(RESULT, longArrayOf(0), term.getIntValue(ctx.eval))
+                    } else if (term.operandType == OperandType.FLOAT) {
+                        // 4.981 fork 的第三支：表达式是浮点 ⇒ 写 `RESULTF`
+                        // （spec: variables.yaml float_vars.scalars.RESULTF，转引 fork-src
+                        // `Instraction.Child.cs:613-629`，浮点分支 `:626`；读写入口
+                        // `VariableEvaluator.cs:3105-3108`）。
+                        // 1.824 无此形态 ⇒ 本机 reference 无行号可对拍，TODO(verify)。
+                        ctx.variables.writeFloat(RESULTF, NO_INDICES, term.getFloatValue(ctx.eval))
                     } else {
                         ctx.variables.writeStr(RESULTS, longArrayOf(0), term.getStrValue(ctx.eval))
                     }
@@ -1188,8 +1285,15 @@ class StatementExecutor {
                         if (ctx.variables.readInt("ITEMSALES", longArrayOf(k.toLong())) == 0L) continue
                         val name = ctx.variables.registry.csvTable("ITEM")[k]
                         val price = ctx.variables.readInt("ITEMPRICE", longArrayOf(k.toLong()))
-                        // MoneyLabel 取原版缺省 "$"（ConfigData.cs:159；基准 CHARA-SHOP 节无在售项不触发，TODO(M4): 接 ConfigState）
-                        ctx.console.printC("[$k] $name($price$)", alignRight = false)
+                        // 金钱格式 spec: Process.cs:1236-1241 —— MoneyFirst=true（缺省，ConfigData.cs:160）
+                        // 时货币符在前；MoneyLabel 取生效条目（出厂 "$"，ConfigData.cs:159；
+                        // `_Replace.csv`/emuera.config 条目经 Config.SetReplace 生效，Config.cs:724/726）。
+                        val money = if (ctx.config.moneyFirst) {
+                            "${ctx.config.moneyLabel}$price"
+                        } else {
+                            "$price${ctx.config.moneyLabel}"
+                        }
+                        ctx.console.printC("[$k] $name($money)", alignRight = false)
                         printed++
                         if (ctx.config.printCPerLine > 0 && printed % ctx.config.printCPerLine == 0) {
                             ctx.console.newLine()
@@ -1209,7 +1313,7 @@ class StatementExecutor {
 
             // ---- CALLSHARP：本地方法调用 + 变量实参回写 ----
             FunctionCode.CALLSHARP -> {
-                execCallSharpFlat(a, code, ctx); ExecResult.Normal
+                execCallSharpFlat(a, code, ctx, index); ExecResult.Normal
             }
 
             // ---- BEGIN ----
@@ -1239,6 +1343,7 @@ class StatementExecutor {
             FunctionCode.CATCH, FunctionCode.ENDCATCH, FunctionCode.ENDFUNC, FunctionCode.FUNC,
             FunctionCode.CALLEVENT, FunctionCode.CALLF, FunctionCode.CALLFORMF,
             FunctionCode.TRYCALLF, FunctionCode.TRYCALLFORMF,
+            FunctionCode.TRYCALLSTR, FunctionCode.TRYCCALLSTR,
             FunctionCode.DATALIST, FunctionCode.ENDLIST, FunctionCode.ENDDATA,
             -> ExecResult.Normal
 
@@ -1303,6 +1408,126 @@ class StatementExecutor {
         return out
     }
 
+    /**
+     * 读 `ArgType.EXPRESSIONS` 形态的记录但**保留 null 槽位**（SETIMAGELAYERL 第 3..8 槽可缺省，
+     * 缺省位在原版是 null term 而非 0）。顺序与 [argExpressions] 相同，只是不过滤空项。
+     */
+    private fun argExpressionsOpt(a: FlatArgs, code: FunctionCode): List<Expr?> {
+        openTag(a, code, ErbcFormat.ArgTag.EXPRESSIONS)
+        val n = a.i32()
+        if (n < 0) {
+            throw com.eratw.port.core.code.ErbcDecodeException(0, "语句 $code 的表达式列表长度为负: $n")
+        }
+        return List(n) {
+            a.i32() // ArgValueType 线值（执行层不消费，只按 encode 顺序跳过）
+            a.expr()
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 4.981 上游两条语句：SETIMAGELAYERL / SEQUENCEINPUT
+    // -----------------------------------------------------------------------
+
+    /** 图层登记表（状态挂 aux，见 [ImageLayerRegistry]）。 */
+    private fun imageLayers(ctx: ExecContext): ImageLayerRegistry =
+        ctx.variables.aux.slot(IMAGE_LAYER_SLOT) { ImageLayerRegistry() }
+
+    /** 待消费输入序列（状态挂 aux，见 [SequenceInputState]）。 */
+    private fun sequenceInput(ctx: ExecContext): SequenceInputState =
+        ctx.variables.aux.slot(SEQUENCE_INPUT_SLOT) { SequenceInputState() }
+
+    /**
+     * SETIMAGELAYERL 的执行（扁平与对象树两条通道共用）。
+     * 可达依据：`specs/verify-notes.md` 23.16（A 级复核，`specs/isa.yaml` 的 `SETIMAGELAYERL` 条同记）。
+     * 以下三条 fork-src 行号均**不可本机取证**（TODO(verify)：待 fork-src 就位后复核）：
+     * `Instraction.Child.cs:4161-4209`（本机整文件缺失）、
+     * `ArgumentBuilder.cs:2679-2728`（本机该文件 118 行 stub，无实参构造）、
+     * `FunctionIdentifier.cs:283`（本机 4332 行但全文无 `SETIMAGELAYER`；`:283` 实为 PRINTDATA 相关
+     * `func.dataList.Count`，非 SETIMAGELAYERL 注册点）。
+     * 下文其余 `Instraction.Child.cs:<N>`（:4176-4182 / :4188 / :4192-4198 / :4199-4205 / :4207）
+     * 同属该整文件缺失，一律不可本机取证。
+     *
+     * 缺省值逐条对齐原版（:4176-4182，不可本机取证）：xpos/ypos/width/height = 0、opacity = 255、CM_ARRAY 可空；
+     * height <= 0 时回落到 sprite 的 DestBaseSize.Height（:4192-4198，未创建的 sprite 保持原值）。
+     * lineNo 是**显示行索引**（:4188 `GetLineNo`，EmueraConsole.Print.cs:231-234 每显示行 +1），
+     * 不是 LINECOUNT 的逻辑行数；followScroll 恒 true（:4207）。
+     *
+     * 图层**双写**：既有 [IMAGE_LAYER_SLOT] 的 [ImageLayerRegistry] 登记保留
+     * （`UpstreamStatementsTailTest` 仍读它），同时在登记之后经
+     * [com.eratw.port.core.host.GraphicsSink.setImageLayer] **追加一次**渲染转发
+     * （WIRE-3；渲染侧 `render` 的 `view.GraphicsLayer` 消费，同 depth 覆盖）。
+     * TODO(verify)：最终屏幕坐标 `x = DrawingParam_ShapePositionShift + xpos`、
+     * `y = GetLinePointY(lineNo) + LineHeight - ClientHeight + (imageHeight - LineHeight) + ypos`
+     * （:4199-4205）依赖 LineHeight / ClientHeight / GetLinePointY 三项 core 层没有的数据面，
+     * 故只转发 xpos/ypos 与 lineNo，由渲染侧按同一公式换算（`view.ImageLayerGeometry`）。
+     */
+    private fun execSetImageLayerL(terms: List<Expr?>, ctx: ExecContext) {
+        val name = evalStr(terms.getOrNull(0), ctx)
+        val depth = terms.getOrNull(1)?.getIntValue(ctx.eval) ?: 0L
+        val xpos = (terms.getOrNull(2)?.getIntValue(ctx.eval) ?: 0L).toInt()
+        val ypos = (terms.getOrNull(3)?.getIntValue(ctx.eval) ?: 0L).toInt()
+        val width = (terms.getOrNull(4)?.getIntValue(ctx.eval) ?: 0L).toInt()
+        var height = (terms.getOrNull(5)?.getIntValue(ctx.eval) ?: 0L).toInt()
+        val opacity = (terms.getOrNull(6)?.getIntValue(ctx.eval) ?: 255L).toInt()
+        if (height <= 0) {
+            val sprite = ctx.variables.aux.peek<SpritePool>(SPRITE_SLOT)?.find(name)
+            if (sprite != null && sprite.isCreated) height = sprite.height
+        }
+        // 原版 GetLineNo = displayLineList 的显示行计数（EmueraConsole.Print.cs:155-157、:231-234）；
+        // 宿主不追踪显示行时回落逻辑行数（Noop / 纯 sem 场景）。
+        val lineNo = ctx.console.displayedLines?.size ?: ctx.console.lineCount.toInt()
+        imageLayers(ctx).set(
+            ImageLayerRegistry.Layer(
+                spriteName = name, depth = depth, lineNo = lineNo,
+                xpos = xpos, ypos = ypos, width = width, height = height,
+                opacity = opacity, followScroll = true,
+            ),
+        )
+        // 与 aux 登记**并行**的渲染转发（守 ADR-005：不改既有登记语义）；宿主缺省实现空转。
+        ctx.graphics.setImageLayer(
+            name, depth, lineNo, xpos, ypos, width, height, opacity, true,
+        )
+    }
+
+    /**
+     * SEQUENCEINPUT 的消费点（[waitInput] 的最前面）。spec: EmueraConsole.cs:699-722
+     * （SimulatePressEnter；`WaitInput` 首行与 `WaitInputNoFocus` :780-788 的同一守卫）。
+     *
+     * 原版把预置串原样交给 `PressEnterKey(false, raw, false)`：按 `\n` 拆段、逐段
+     * `RunEmueraProgram`（:1419-1530），整串只用一次（取走即清 hasSequenceInput）。
+     * 本移植的脚本执行在 VM 栈上同步进行，无法在等待点内重入 `RunEmueraProgram`，
+     * 故近似为「预置串按 `\n` 拆段入队，每次取值等待消费一段」，队列空即清标志。
+     *
+     * TODO(verify)：段内的 `\e` 前缀（清 MesSkip）与 ONEINPUT 截首字符（:1443-1461）、
+     * `InputType.Void` 段的空串丢弃尚未复刻；宏展开（`%MACRO_PRESET:...%`）归输入宿主
+     * （`InputRequest.macroEnabled`）。4.981 全包唯一调用点 `ERB/コマンド関連/USERCOM.ERB:177`。
+     */
+    private fun sequenceOutcome(ctx: ExecContext, request: InputRequest): InputOutcome? {
+        val state = ctx.variables.aux.peek<SequenceInputState>(SEQUENCE_INPUT_SLOT) ?: return null
+        val raw = state.poll() ?: return null
+        // SimulatePressEnter 不经输入框 ⇒ 宏展开开关不参与；MesSkip 从本次提交的 keySkip = false
+        // 起算（EmueraConsole.cs:1373）。
+        ctx.mesSkip = false
+        val text = raw.trim()
+        val asInt = text.toLongOrNull()
+        return when (request.form) {
+            InputRequest.RequestForm.VALUE -> when (request.type) {
+                InputRequest.InputType.INT ->
+                    InputOutcome(intValue = asInt ?: 0L, writesStr = false)
+                InputRequest.InputType.STR ->
+                    InputOutcome(strValue = raw, writesInt = false)
+            }
+            // AnyValue：解析得动写 RESULT，写不动写 RESULTS（EmueraConsole.cs:1256-1274）。
+            InputRequest.RequestForm.ANY_VALUE -> InputOutcome(
+                intValue = asInt ?: 0L,
+                strValue = raw,
+                writesInt = asInt != null,
+                writesStr = asInt == null,
+            )
+            else -> InputOutcome(writesInt = false, writesStr = false)
+        }
+    }
+
     /** SETCOLOR/SETBGCOLOR 参数（逐字复刻 [evalColor]）。spec: Process.cs:1409-1439 */
     private fun evalColorFlat(a: FlatArgs, code: FunctionCode, ctx: ExecContext): Triple<Int, Int, Int> {
         openTag(a, code, ErbcFormat.ArgTag.SP_COLOR)
@@ -1364,6 +1589,14 @@ class StatementExecutor {
                     val value = if (isConst) a.constInt else term?.getIntValue(ctx.eval) ?: 0L
                     if (addConst) dest.addIntValue(ctx.eval, value)
                     else dest.setIntValue(ctx.eval, value)
+                } else if (dest.operandType == OperandType.FLOAT) {
+                    // 浮点单点写（4.981 第三型）。生产路径就是这条扁平直读 ——
+                    // 只改 [execAssign] 的树入口不会让真机变对（本波实测：树绿、直读仍按
+                    // 字符串通道写 ⇒「变量 X 是浮点变量，不能写入字符串」）。
+                    // `isConst` 对浮点恒 false（解析期不折常量，见 ArgBuilders 浮点支的注记）。
+                    val value = term?.getFloatValue(ctx.eval) ?: 0.0
+                    if (addConst) dest.addFloatValue(ctx.eval, value)
+                    else dest.setFloatValue(ctx.eval, value)
                 } else {
                     val value = if (isConst) a.constStr else term?.getStrValue(ctx.eval) ?: ""
                     dest.setStrValue(ctx.eval, value)
@@ -1386,6 +1619,10 @@ class StatementExecutor {
                 if (dest.operandType == OperandType.INT) {
                     val vals = if (constIntList != null) constIntList
                     else terms.map { it?.getIntValue(ctx.eval) ?: 0L }.toLongArray()
+                    ctx.variables.setValues(name, idx, vals)
+                } else if (dest.operandType == OperandType.FLOAT) {
+                    // 浮点批量形态：没有 constDoubleList 槽（Argument.kt 非本路文件）⇒ 恒逐项求值。
+                    val vals = DoubleArray(terms.size) { i -> terms[i]?.getFloatValue(ctx.eval) ?: 0.0 }
                     ctx.variables.setValues(name, idx, vals)
                 } else {
                     val vals = if (constStrList != null) constStrList
@@ -1413,7 +1650,14 @@ class StatementExecutor {
         val head = source.headAt(index)
         val stream = source.argStreamBase()
         // 槽 2..4 与 FlatStatements.readPrintSpec 的读取序一致（argType、bits、flag）。
-        val argType = ArgType.entries[stream[head + 2]]
+        // argType 是枚举序号线值：越界说明记录与代码不自洽，按本类统一口径抛 ErbcDecodeException
+        // （与 execute 里的 op 越界校验同口径），不让 entries[] 抛 AIOOBE。
+        val argTypeWire = stream[head + 2]
+        val argType = ArgType.entries.getOrNull(argTypeWire)
+            ?: throw com.eratw.port.core.code.ErbcDecodeException(
+                head + 2,
+                "扁平语句流第 $index 条的 ArgType 越界: $argTypeWire（共 ${ArgType.entries.size} 个 ArgType）",
+            )
         val bits = stream[head + 3]
         val flag = stream[head + 4]
         // —— 打印窗口起点（与 execPrint 同序：UseUserStyle 先于 UseSetColorStyle）——
@@ -1719,7 +1963,8 @@ class StatementExecutor {
         val timeout = a.expr()
         val mouseTerm = a.expr()
         val canSkip = a.expr()
-        val isStr = code == FunctionCode.TINPUTS || code == FunctionCode.TONEINPUTS
+        val isStr = code == FunctionCode.TINPUTS || code == FunctionCode.TONEINPUTS ||
+            code == FunctionCode.TINPUTSNF
         if (canSkip != null && ctx.mesSkip) {
             val mouse = mouseTerm?.getIntValue(ctx.eval) ?: 0L
             val slot = longArrayOf(if (mouse == 0L) 0L else 1L)
@@ -1857,6 +2102,19 @@ class StatementExecutor {
         // C# 只在 Start != null 时才比较/交换（FunctionIdentifier.cs:1642-1656）：负 END + 缺 START
         // 以 (0, 负值) 进 SetValueAll ⇒ 循环不执行 = no-op。此前无条件交换会把负 END 换成负起点
         // （2026-10-26 fixcore 审查 C6；语料无负 END 用法，纯对齐）。
+        // 显式端点为负：C# 不在语句层判，而是负值进 `SetValueAll` 后由
+        // `IsArrayRangeValid`（VariableEvaluator.cs:275/:303 喂 "VARSET", 3L, 4L；
+        // 各界面实现在 VariableData.cs:89-100、UserDefinedVariableToken.cs:90-101、
+        // ReferenceToken.cs:78-89、CharaVariableToken.cs:72-83：index1<0||index2<0 即抛）
+        // 抛 **OoRInstructionArg** —— 2026-11-05 lane negrange 起文案接该官方键
+        // （旧自造串「VARSET命令的区间起点(N)为负值」退役）；判界口径不变（R22-1：
+        // 此前 end<0 被 VariableStore 的「到末尾」哨兵吞掉、静默全量填充）。
+        if (startTerm != null && start < 0) {
+            throw oorInstructionArg("VARSET", 3, start.toLong(), name)
+        }
+        if (endTerm != null && end < 0) {
+            throw oorInstructionArg("VARSET", 4, end.toLong(), name)
+        }
         if (startTerm != null && start > end) {
             val t = start; start = end; end = t
         }
@@ -2290,13 +2548,14 @@ class StatementExecutor {
         if (i2.isCharacterData) throw CodeEE("ARRAYCOPY命令的第2参数\"$n2\"是一个角色变量(不支持)")
         if (i1.dimension != i2.dimension) throw CodeEE("ARRAYCOPY命令的两个参数维度不一致")
         if (i1.operandType != i2.operandType) throw CodeEE("ARRAYCOPY命令的两个参数的数组变量类型不一致")
-        // 登记残差：Process.cs:1749-1752 的非常量名路径还有一条 `ArraycopyArgIsConst`（第 2 参数
-        // 为只读变量，zhs:513），以及常量名路径（Process.cs:1755-1762）**只查类型不一致**、
-        // 不查数组/角色/只读。语料实测 `ARRAYCOPY` 共 50 处，其中 48 处两个参数都是字符串常量名
-        // （装载期 `copyArray` 的 `checkArrayName`，ArgBuilders.kt:1257-1269，已在符号层覆盖常量名
-        // 的数组/角色判定），2 处第 1 参为运行期名（`ARG_VARNAME` 与 FORM 串 `@"特效组{ARG}"`）。
-        // 移植侧统一走上面这条更严的判序，两条残差不影响语料可达读数
-        // （TODO(verify)：无符号表的裸构造路径可达时需补 const 分支）。
+        // 只读（常量）目标：官方**执行期**也拦 —— 非常量名路径 `Process.cs:1748-1750` 直接
+        // `throw CodeEE(ArraycopyArgIsConst, "2", 名)`（zhs:513 =
+        // `ARRAYCOPY命令的第{0}参数"{1}"是一个只读变量`），常量名路径则由解析期同文案 warn
+        // 挡死（`ArgumentParser.cs:2481-2484`，level 2 = 行级错误）。这是 C# 证据里
+        // 「执行期也拦」的形态之一，因此 B5 删掉存储层常量闸之后，这一条必须留在执行期
+        // （否则常量目标会被静默写穿）。移植侧的常量名解析闸在 `stmt/ArgBuilders.kt` 的 copyArray
+        // （只查数组/角色，缺只读那一条）—— 缺口见交付报告的「需组长接线」。
+        if (i2.isConst) throw CodeEE("ARRAYCOPY命令的第2参数\"$n2\"是一个只读变量")
         val isStr = i1.operandType == OperandType.STR
         if (i1.dimension <= 1) {
             val n = minOf(ctx.variables.getLength(n1), ctx.variables.getLength(n2))
@@ -2422,14 +2681,23 @@ class StatementExecutor {
     }
 
     /**
-     * CALLSHARP 直读 —— [execCallSharp] 逐字复刻。
-     * spec: `FunctionIdentifier.cs:1212-1233`。四步逐句对齐原版：
+     * CALLSHARP 的**唯一执行体**（B5 收敛，2026-11-07）—— 原版
+     * `FunctionIdentifier.cs:1212-1233` 的四步逐句对齐：
      *
-     * 1. 名字：装载期由 `SetJumpTo` 把常量名绑成 `CallFunc`，非常量名置 `useCallForm`
-     *    （`:1191-1208`）；查不到方法时是 `ParserMediator.Warn(..., isError: true)` =
-     *    **装载期**错误（`:1204`），文案原文 `No native method {name} found`。
-     *    移植侧没有装载期的插件表（DLL 加载属宿主/M5），故把校验挪到执行期、
-     *    未命中直接 CodeEE —— 差异登记：报错时机由装载期变运行期，文案同源。
+     * 1. 名字：原版在**联结期**由 `SetJumpTo`（FunctionIdentifier.cs:1193-1210）把常量名
+     *    绑成 `CallFunc`、未命中记行级错误（`:1204` Warn(isError:true) → line.IsError/ErrMes，
+     *    ParserMediator.cs:129-130），执行期由 Process.cs:1017-1019 抛**记录的** ErrMes；
+     *    非常量名置 `useCallForm`（:1195-1199）保持动态。
+     *    移植侧的注册表挂 `store.aux`、宿主装配在会话建成后 ⇒ 常量名行由 CSHARP-WIRE 在
+     *    **装载趟预填**（GameHost 装配段 `wireCorpusNativeMethods` → `prefillSharpLinks`，
+     *    source/erbc 两路同一裁决），未预填的非常量名行裁决点在「该行第一次执行」，
+     *    机制与不重查口径见 [com.eratw.port.core.fn.SharpLinkTable]：
+     *    - 未命中：把 `No native method {name} found`（官方英文原样，ADR-005）
+     *      **记进行级错误态**再抛 —— 后续走到该行照记录值重抛，注册表再长出同名也不复活
+     *      （预填行装载期即记，警告经 `GameSession.sharpLoadWarnings` 上屏 ≡ 原版
+     *      ParserMediator.cs:143-158 的 warningList 装载完统一显示）；
+     *    - 命中：方法本体进联结缓存，此后不再查表（= 原版绑死 CallFunc，
+     *      `NativeMethodRegistry.clear` 也不影响已绑定行）。
      *    非常量名一侧原版保持 `CallFunc == null`，运行期即 NRE（`:1217` 无空检查）；
      *    移植侧改为「现求现查」，属**不复刻崩溃**的有意偏离，见交付报告 TODO(verify)。
      * 2. 实参 → 槽：`IsString` 走 `strValue`，否则 `intValue`
@@ -2445,31 +2713,82 @@ class StatementExecutor {
      * 位置参数保持下标对齐：原版 `RowArgs[i]` 与 `array[i]` 同序（`:1216`/`:1220`），
      * 空位（省略的实参）在本工程 AST 里是 null 槽 —— 原版此时 `ConvertTerm(null)` 直接
      * NRE，移植侧给该槽补 `intValue = 0` 并**跳过回写**（无变量身份可写）。
-     * 语料零处 CALLSHARP ⇒ 无可比读数，只登记口径。
+     * 4.980 语料零处 CALLSHARP ⇒ 无可比读数；4.981 起 AI对话补丁 3 处
+     * （`对话调用.erb:35-36`），宿主侧接线见 app GameHost.wireCorpusNativeMethods。
+     *
+     * @param rowKey 行级联结记录的行键：扁平通道 = 语句池下标（装箱 Long，
+     *   [execCallSharpFlat]），对象树通道 = `SpCallSharpArgument` 实例身份
+     *   （[execCallSharp]；两种键同表，见 [com.eratw.port.core.fn.SharpLinkTable]）。
      */
-    private fun execCallSharpFlat(a: FlatArgs, code: FunctionCode, ctx: ExecContext) {
-        openTag(a, code, ErbcFormat.ArgTag.SP_CALL_SHARP)
-        val funcNameTerm = a.expr()
-        a.exprOptList() // subNames：执行层不消费，按 encode 顺序跳过
-        val rowArgs = a.exprOptList()
-        val name = if (a.isConst) a.constStr else funcNameTerm?.getStrValue(ctx.eval) ?: ""
-        val method = nativeMethods(ctx.variables.aux).find(name)
-            ?: throw CodeEE("No native method $name found")
+    private fun callSharpRows(funcNameTerm: Expr?, rowArgs: List<Expr?>, ctx: ExecContext, rowKey: Any) {
+        val method = resolveSharpMethod(ctx, funcNameTerm, rowKey)
         val params = Array(rowArgs.size) { i -> toNativeParam(rowArgs[i], ctx) }
         method.execute(params)
         for (i in rowArgs.indices) {
             val ref = rowArgs[i] as? VarRef ?: continue
-            if (ref.operandType == OperandType.STR) writeVarRefStr(ref, params[i].strValue, ctx)
-            else writeVarRef(ref, params[i].intValue, ctx)
+            writeBackNativeArg(ref, params[i], ctx)
         }
+    }
+
+    /**
+     * 扁平语句池入口（B5 后只剩「取实参」）：解码 name / subNames / rowArgs 后交
+     * [callSharpRows]；行键 = 语句池下标（[com.eratw.port.core.fn.SharpLinkTable] 的 flat 键）。
+     */
+    private fun execCallSharpFlat(a: FlatArgs, code: FunctionCode, ctx: ExecContext, stmtIndex: Int) {
+        openTag(a, code, ErbcFormat.ArgTag.SP_CALL_SHARP)
+        val funcNameTerm = a.expr()
+        a.exprOptList() // subNames：执行层不消费，按 encode 顺序跳过
+        val rowArgs = a.exprOptList()
+        callSharpRows(funcNameTerm, rowArgs, ctx, stmtIndex.toLong())
+    }
+
+    /**
+     * CALLSHARP 名字 → 方法本体的**行级联结裁决**（两条通道共用一份逻辑，B5 收敛）。
+     * 机制与不重查口径见 [com.eratw.port.core.fn.SharpLinkTable]；
+     * 文案 = 官方英文原样（`FunctionIdentifier.cs:1204`，ADR-005）。
+     *
+     * const 名判定 = `funcNameTerm is [StrLiteral]`：原版 SP_CALLCSHARP_ArgumentBuilder
+     * 的名字恒为 SingleStrTerm（ArgumentParser.cs:800）⇒ `:850-853` 的
+     * `IsConst = true; ConstStr = <名>` **恒置** —— CALLSHARP 没有动态名形态，SetJumpTo 的
+     * `!IsConst → useCallForm` 分支（FunctionIdentifier.cs:1195-1199）对它不可达。
+     * 移植侧同形：源路 builder（ArgBuilders.callSharp）与 erbc/flat 解码
+     * （ExprTag.STR_LITERAL 往返，ErbcReader.kt:958）名字都是 StrLiteral；
+     * 非 StrLiteral 只可能是装置手工构造，走「现求现查」不记行错（防御支，不可达自生产）。
+     *
+     * @param rowKey 行键（语句池下标 / `SpCallSharpArgument` 实例），见 [SharpLinkTable]。
+     */
+    private fun resolveSharpMethod(
+        ctx: ExecContext,
+        funcNameTerm: Expr?,
+        rowKey: Any,
+    ): NativeMethod {
+        val links = sharpLinks(ctx.variables.aux)
+        val cached = links.link(rowKey)
+        if (cached != null) {
+            cached.errMes?.let { throw CodeEE(it) }
+            return cached.method!!
+        }
+        val literal = funcNameTerm as? com.eratw.port.core.expr.StrLiteral
+        val name = literal?.value ?: funcNameTerm?.getStrValue(ctx.eval) ?: ""
+        val found = nativeMethods(ctx.variables.aux).find(name)
+        if (found == null) {
+            val msg = "No native method $name found"
+            if (literal != null) links.bind(rowKey, SharpLinkTable.Link(null, msg))
+            throw CodeEE(msg)
+        }
+        if (literal != null) links.bind(rowKey, SharpLinkTable.Link(found, null))
+        return found
     }
 
     // ==================================================================
     // PRINT 家族
     // ==================================================================
 
-    /** spec: FunctionIdentifier.cs:173-229 PRINT_Instruction.DoInstruction + ExpressionMediator.cs:50-69 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * spec: FunctionIdentifier.cs:173-229 PRINT_Instruction.DoInstruction + ExpressionMediator.cs:50-69
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execPrintFlat]。
+     */
     private fun execPrint(stmt: PrintStmt, ctx: ExecContext) {
         if (ctx.skipPrint) return
         val spec = stmt.print
@@ -2538,7 +2857,9 @@ class StatementExecutor {
     // 通用指令分派
     // ==================================================================
 
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execInstructionFlat]。
+     */
     private fun execInstruction(code: FunctionCode, stmt: Statement, ctx: ExecContext): ExecResult = when (code) {
         // ---- 显示 ----
         FunctionCode.PRINTBUTTON, FunctionCode.PRINTBUTTONC, FunctionCode.PRINTBUTTONLC -> {
@@ -2613,7 +2934,7 @@ class StatementExecutor {
             val v = arg.value?.getIntValue(ctx.eval) ?: 0L
             val max = arg.max?.getIntValue(ctx.eval) ?: 0L
             val len = arg.length?.getIntValue(ctx.eval) ?: 0L
-            ctx.console.print(createBar(v, max, len))
+            ctx.console.print(createBar(v, max, len, ctx.config.barChar1, ctx.config.barChar2))
             if (code == FunctionCode.BARL) ctx.console.newLine()
             ExecResult.Normal
         }
@@ -2714,6 +3035,34 @@ class StatementExecutor {
             }
             ExecResult.Normal
         }
+        FunctionCode.HTML_PRINTC, FunctionCode.HTML_PRINTLC -> {
+            // 与扁平直读分支同一口径（见本文件 4.981 语句分支的 KDoc）。
+            val arg = stmt.args as SpHtmlPrint
+            if (!ctx.skipPrint) {
+                val text = evalStr(arg.str, ctx)
+                ctx.console.printHtml(
+                    padHtmlColumn(ctx, text, rightAlign = code == FunctionCode.HTML_PRINTC),
+                    true,
+                )
+            }
+            ExecResult.Normal
+        }
+        FunctionCode.TEXT_BGC_ON -> {
+            val arg = stmt.args as SpSwapCharaArgument
+            ctx.graphics.setTextBgColor(
+                arg.x?.getIntValue(ctx.eval) ?: 0L,
+                arg.y?.getIntValue(ctx.eval) ?: 0L,
+            )
+            ExecResult.Normal
+        }
+        FunctionCode.TEXT_BGC_OFF -> {
+            ctx.graphics.setTextBgColor(-1L, 0L)
+            ExecResult.Normal
+        }
+        FunctionCode.DISABLE_INPUT_MACRO, FunctionCode.ENABLE_INPUT_MACRO -> {
+            ctx.inputMacroEnabled = code == FunctionCode.ENABLE_INPUT_MACRO
+            ExecResult.Normal
+        }
         FunctionCode.HTML_PRINT_ISLAND -> {
             val arg = stmt.args as SpHtmlPrint
             if (!ctx.skipPrint) ctx.console.addHtmlIsland(evalStr(arg.str, ctx))
@@ -2774,6 +3123,14 @@ class StatementExecutor {
         }
         FunctionCode.CLEARBGIMAGE -> {
             ctx.graphics.clearBgImages(); ExecResult.Normal
+        }
+        FunctionCode.SETIMAGELAYERL -> {
+            // 同扁平通道；对象树路径保留 null 槽位（第 3..8 槽可缺省）。
+            val terms = (stmt.args as? ExpressionsArgument)?.terms ?: emptyList()
+            execSetImageLayerL(terms, ctx); ExecResult.Normal
+        }
+        FunctionCode.SEQUENCEINPUT -> {
+            sequenceInput(ctx).submit(evalStrArg(stmt.args, ctx)); ExecResult.Normal
         }
         FunctionCode.CLEARTEXTBOX -> {
             ctx.console.clearText(); ExecResult.Normal // spec: Process.cs:1798-1800
@@ -2837,7 +3194,9 @@ class StatementExecutor {
         FunctionCode.INPUT, FunctionCode.INPUTS, FunctionCode.ONEINPUT, FunctionCode.ONEINPUTS -> {
             execInputs(code, stmt, ctx); ExecResult.Normal
         }
-        FunctionCode.TINPUT, FunctionCode.TONEINPUT, FunctionCode.TINPUTS, FunctionCode.TONEINPUTS -> {
+        FunctionCode.TINPUT, FunctionCode.TONEINPUT, FunctionCode.TINPUTS, FunctionCode.TONEINPUTS,
+        FunctionCode.TINPUTNF, FunctionCode.TINPUTSNF,
+        -> {
             execTInputs(code, stmt, ctx); ExecResult.Normal
         }
         FunctionCode.BINPUT, FunctionCode.BINPUTS, FunctionCode.ONEBINPUT, FunctionCode.ONEBINPUTS -> {
@@ -3460,8 +3819,15 @@ class StatementExecutor {
                     if (ctx.variables.readInt("ITEMSALES", longArrayOf(k.toLong())) == 0L) continue
                     val name = ctx.variables.registry.csvTable("ITEM")[k]
                     val price = ctx.variables.readInt("ITEMPRICE", longArrayOf(k.toLong()))
-                    // MoneyLabel 取原版缺省 "$"（ConfigData.cs:159；基准 CHARA-SHOP 节无在售项不触发，TODO(M4): 接 ConfigState）
-                    ctx.console.printC("[$k] $name($price$)", alignRight = false)
+                    // 金钱格式 spec: Process.cs:1236-1241 —— MoneyFirst=true（缺省，ConfigData.cs:160）
+                    // 时货币符在前；MoneyLabel 取生效条目（出厂 "$"，ConfigData.cs:159；
+                    // `_Replace.csv`/emuera.config 条目经 Config.SetReplace 生效，Config.cs:724/726）。
+                    val money = if (ctx.config.moneyFirst) {
+                        "${ctx.config.moneyLabel}$price"
+                    } else {
+                        "$price${ctx.config.moneyLabel}"
+                    }
+                    ctx.console.printC("[$k] $name($money)", alignRight = false)
                     printed++
                     if (ctx.config.printCPerLine > 0 && printed % ctx.config.printCPerLine == 0) {
                         ctx.console.newLine()
@@ -3525,6 +3891,7 @@ class StatementExecutor {
         FunctionCode.CATCH, FunctionCode.ENDCATCH, FunctionCode.ENDFUNC, FunctionCode.FUNC,
         FunctionCode.CALLEVENT, FunctionCode.CALLF, FunctionCode.CALLFORMF,
         FunctionCode.TRYCALLF, FunctionCode.TRYCALLFORMF,
+        FunctionCode.TRYCALLSTR, FunctionCode.TRYCCALLSTR,
         FunctionCode.DATALIST, FunctionCode.ENDLIST, FunctionCode.ENDDATA,
         -> ExecResult.Normal
 
@@ -3546,8 +3913,9 @@ class StatementExecutor {
     /**
      * RETURN：按书写顺序求值全部项，SetResultX 只写 RESULT:0..n-1，不清除更高下标。
      * 无参（或空列表）写 RESULT:0=0。spec: FunctionIdentifier.cs:3250-3271、VariableEvaluator.cs:2010-2016
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execReturnFlat]。
      */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
     private fun execReturn(stmt: ReturnStmt, ctx: ExecContext): ExecResult {
         // 空列表理论不发生（ArgBuilders 已补 0），仍按原版兜底（spec: FunctionIdentifier.cs:3265-3268）。
         val values = stmt.values.map { it?.getIntValue(ctx.eval) ?: 0L }.ifEmpty { listOf(0L) }
@@ -3566,8 +3934,9 @@ class StatementExecutor {
     /**
      * RETURNFORM：FORM 串已展开为逗号分隔的整数表达式（如 "11, 3"），逐段求值后同 SetResultX。
      * spec: FunctionIdentifier.cs:3221-3238
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execReturnFormFlat]。
      */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
     private fun execReturnForm(stmt: ReturnFStmt, ctx: ExecContext): ExecResult {
         val text = stmt.value?.getStrValue(ctx.eval) ?: ""
         val parse = ctx.runtimeIntList
@@ -3593,8 +3962,11 @@ class StatementExecutor {
     // 分派辅助：PRINTBUTTON / INPUT 家族
     // ==================================================================
 
-    /** spec: Process.cs:1107-1144 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * spec: Process.cs:1107-1144
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execPrintButtonFlat]。
+     */
     private fun execPrintButton(code: FunctionCode, stmt: Statement, ctx: ExecContext) {
         if (ctx.skipPrint) return
         // 原版在求值前显式把两条开关都复位为 true（spec: Process.cs:1110-1111 / :1129-1130）：
@@ -3633,10 +4005,21 @@ class StatementExecutor {
      * [com.eratw.port.core.host.InputSink.consumeMesSkip] 一次性取出。
      */
     private fun waitInput(ctx: ExecContext, request: InputRequest): InputOutcome {
+        // 4.981 SEQUENCEINPUT：原版 WaitInput 首行先看 hasSequenceInput（EmueraConsole.cs:780-788），
+        // 有预置序列就直接当「用户按了回车」推进，不再阻塞宿主。见 [sequenceOutcome]。
+        sequenceOutcome(ctx, request)?.let {
+            // 序列预置交付天然不带宿主鼠标附加槽，仍走同一回写口以保持一致。
+            writeAuxResultSlots(ctx, it)
+            yieldBoundaryCount++
+            if (ctx.input.consumeMesSkip()) ctx.mesSkip = true
+            return it
+        }
         // 脚本行身份（原版 process.getCurrentLine）：控制台世代推进的判据之一，
         // 见 EmueraConsole.newGeneration（EmueraConsole.cs:789-797）与
         // InputRequest.scriptLine 的 KDoc。未接线（纯 sem 单测）时保持 -1。
-        val req = ctx.scriptLineToken?.let { request.copy(scriptLine = it()) } ?: request
+        val base = ctx.scriptLineToken?.let { request.copy(scriptLine = it()) } ?: request
+        // 输入宏展开开关随请求下发（DISABLE_INPUT_MACRO / ENABLE_INPUT_MACRO 写 ctx.inputMacroEnabled）。
+        val req = base.copy(macroEnabled = ctx.inputMacroEnabled)
         ctx.mesSkip = false
         // 帧发布（CONSOLE-FRAMEGATE）：输入等待前把本段积攒的内容整帧上屏 ——
         // 原版 WAIT 置 state=WaitInput 后主循环退到消息循环，paint 有机会跑
@@ -3647,11 +4030,41 @@ class StatementExecutor {
         ctx.console.noteInputWait(req)
         armIsTimeout(ctx, req)
         val outcome = ctx.input.waitInput(req)
+        // 宿主鼠标事件多写的 RESULT/RESULTS 槽（如 RESULT:1 左键位）：单一汇聚点，
+        // flat/object-tree 双通道的 INPUT/TINPUT/BINPUT/INPUTANY/INPUTMOUSEKEY 一并覆盖。
+        writeAuxResultSlots(ctx, outcome)
         yieldBoundaryCount++
         // 让出返回即重新冻结：本段（到下一个让出边界为止）的变化积累成一帧。
         ctx.console.holdFrame()
         if (ctx.input.consumeMesSkip()) ctx.mesSkip = true
         return outcome
+    }
+
+    /**
+     * 把 [InputOutcome] 的**附加槽**写回 RESULT / RESULTS 数组。
+     *
+     * 原版窗口侧在鼠标按下时经 `Process.InputInteger(idx, i)` / `InputString(idx, s)`
+     * 写多个下标（`MainWindow.cs:834` 的 `RESULTS:1 = selectedString`、`:847` 的
+     * `RESULT:1 = 1` 左键位、`:828` 的 `RESULT:3` 取色、`:832` 的 `RESULT:2` 修饰键），
+     * 之后 `PressEnterKey` 才把按钮值交到主槽（`EmueraConsole.cs:1135`）。本移植此前
+     * 只把交付写进 `RESULT:0`，于是 `QOL_USERCOM.ERB @COM_OPTION` 的
+     * `INPUT -1, 1` / `MOUSE_BTN = RESULT:1` 永远读不到左键，子选单点击不生效。
+     *
+     * **为什么挂在 [waitInput] 这一处**：所有取值等待（对象树 [execInputs] / [execTInputs] /
+     * [execBInputs]、扁平对偶、`INPUTANY`、`INPUTMOUSEKEY`）都经过这个方法取交付，
+     * 一处回写即可让双通道与全部语句同口径，避免逐分支漏写造成「产物路径不同表现不同」。
+     *
+     * **排除主槽 0**：`RESULT:0` / `RESULTS:0` 仍由各语句分支按 `writesInt` / `writesStr`
+     * 写；附加槽与它下标不重叠，写回先后对脚本可见结果无影响（原版两者也都发生在
+     * 本次 INPUT 语句结束之前）。空表 = 常规键盘交付，零写入、零行为变化。
+     */
+    private fun writeAuxResultSlots(ctx: ExecContext, outcome: InputOutcome) {
+        for ((slot, value) in outcome.resultIntSlots) {
+            if (slot != 0) ctx.variables.writeInt(RESULT, longArrayOf(slot.toLong()), value)
+        }
+        for ((slot, value) in outcome.resultStrSlots) {
+            if (slot != 0) ctx.variables.writeStr(RESULTS, longArrayOf(slot.toLong()), value)
+        }
     }
 
     /**
@@ -3708,8 +4121,11 @@ class StatementExecutor {
         ctx.mesSkip = if (stopMesSkip) false else ctx.input.consumeMesSkip()
     }
 
-    /** INPUT/INPUTS/ONEINPUT/ONEINPUTS。spec: FunctionIdentifier.cs:827-1001 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * INPUT/INPUTS/ONEINPUT/ONEINPUTS。spec: FunctionIdentifier.cs:827-1001
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execInputsFlat]。
+     */
     private fun execInputs(code: FunctionCode, stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpInputsArgument
         val isStr = code == FunctionCode.INPUTS || code == FunctionCode.ONEINPUTS
@@ -3736,11 +4152,15 @@ class StatementExecutor {
         else ctx.variables.writeInt(RESULT, longArrayOf(0), o.intValue)
     }
 
-    /** TINPUT/TINPUTS/TONEINPUT/TONEINPUTS。spec: FunctionIdentifier.cs:1003-1099 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * TINPUT/TINPUTS/TONEINPUT/TONEINPUTS。spec: FunctionIdentifier.cs:1003-1099
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execTInputsFlat]。
+     */
     private fun execTInputs(code: FunctionCode, stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpTInputsArgument
-        val isStr = code == FunctionCode.TINPUTS || code == FunctionCode.TONEINPUTS
+        val isStr = code == FunctionCode.TINPUTS || code == FunctionCode.TONEINPUTS ||
+            code == FunctionCode.TINPUTSNF
         if (arg.canSkip != null && ctx.mesSkip) {
             val mouse = arg.mouse?.getIntValue(ctx.eval) ?: 0L
             val slot = longArrayOf(if (mouse == 0L) 0L else 1L)
@@ -3779,8 +4199,9 @@ class StatementExecutor {
      *    按钮布局检测依赖控制台显示状态（M4 文字流层），当前统一走输入等待。
      *    RefreshStrings(:2127)/ApplyTextBoxChanges(:2143) 为绘制层动作，VM 侧不建模。
      * TODO(verify): 无按钮且有/无默认值的分支需要 console 按钮状态。
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execBInputsFlat]。
      */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
     private fun execBInputs(code: FunctionCode, stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpInputsArgument
         val isStr = code == FunctionCode.BINPUTS || code == FunctionCode.ONEBINPUTS
@@ -3812,8 +4233,11 @@ class StatementExecutor {
     // 变量操作
     // ==================================================================
 
-    /** SETBIT/CLEARBIT/INVERTBIT。spec: FunctionIdentifier.cs:731-760 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * SETBIT/CLEARBIT/INVERTBIT。spec: FunctionIdentifier.cs:731-760
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execBitFlat]。
+     */
     private fun execBit(code: FunctionCode, stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as BitArgument
         val op = when (code) {
@@ -3837,8 +4261,11 @@ class StatementExecutor {
         }
     }
 
-    /** SWAP。spec: Process.cs:1371-1395 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * SWAP。spec: Process.cs:1371-1395
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execSwapFlat]。
+     */
     private fun execSwap(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpSwapVarArgument
         val n1 = arg.var1.name
@@ -3857,8 +4284,11 @@ class StatementExecutor {
         }
     }
 
-    /** VARSET。spec: FunctionIdentifier.cs:1625-1669 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * VARSET。spec: FunctionIdentifier.cs:1625-1669
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execVarSetFlat]。
+     */
     private fun execVarSet(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpVarSetArgument
         val name = arg.dest.name
@@ -3874,6 +4304,14 @@ class StatementExecutor {
         // C# 只在 Start != null 时才比较/交换（FunctionIdentifier.cs:1642-1656）：负 END + 缺 START
         // 以 (0, 负值) 进 SetValueAll ⇒ 循环不执行 = no-op。此前无条件交换会把负 END 换成负起点
         // （2026-10-26 fixcore 审查 C6；语料无负 END 用法，纯对齐）。
+        // 显式端点为负抛官方 OoRInstructionArg（同 execVarSetFlat，R22-1），双路口径一致；
+        // 2026-11-05 lane negrange 退役自造串「VARSET命令的区间起点(N)为负值」/「…终点…」。
+        if (arg.start != null && start < 0) {
+            throw oorInstructionArg("VARSET", 3, start.toLong(), name)
+        }
+        if (arg.end != null && end < 0) {
+            throw oorInstructionArg("VARSET", 4, end.toLong(), name)
+        }
         if (arg.start != null && start > end) {
             val t = start; start = end; end = t
         }
@@ -3904,8 +4342,9 @@ class StatementExecutor {
      *
      * 原文 bug 一并复刻：`end` 越界的报错文案回填的是 `start`（FunctionIdentifier.cs:1700
      * 的第二个占位符写的是 `num2`）。
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execCVarSetFlat]。
      */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
     private fun execCVarSet(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpCVarSetArgument
         // 原版 GetFixedVariableTerm 会求值目标变量的固定下标；CVARSET 不使用该结果
@@ -3978,8 +4417,11 @@ class StatementExecutor {
         }
     }
 
-    /** VARSIZE。spec: Process.cs:1321-1326 + VariableEvaluator.cs:1932-1950（写 RESULT 数组） */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * VARSIZE。spec: Process.cs:1321-1326 + VariableEvaluator.cs:1932-1950（写 RESULT 数组）
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execVarSizeFlat]。
+     */
     private fun execVarSize(stmt: Statement, ctx: ExecContext) {
         val name = (stmt.args as SpVarsizeArgument).varName
         val info = ctx.variables.resolveVarInfo(name) ?: throw CodeEE("未定义的变量 $name")
@@ -3992,8 +4434,11 @@ class StatementExecutor {
         }
     }
 
-    /** POWER。spec: Process.cs:1350-1370 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * POWER。spec: Process.cs:1350-1370
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execPowerFlat]。
+     */
     private fun execPower(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpPowerArgument
         val x = arg.x?.getIntValue(ctx.eval)?.toDouble() ?: 0.0
@@ -4007,8 +4452,11 @@ class StatementExecutor {
         writeVarRef(arg.dest, r.toLong(), ctx)
     }
 
-    /** ENCODETOUNI。spec: Process.cs:1773-1789（写 RESULT 数组） */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * ENCODETOUNI。spec: Process.cs:1773-1789（写 RESULT 数组）
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execEncodeToUniFlat]。
+     */
     private fun execEncodeToUni(stmt: Statement, ctx: ExecContext) {
         val text = evalStrArg(stmt.args, ctx)
         val cap = ctx.variables.getLength(RESULT)
@@ -4027,8 +4475,11 @@ class StatementExecutor {
         ctx.variables.writeInt(RESULT, longArrayOf(0L), i.toLong())
     }
 
-    /** SPLIT。spec: Process.cs:1561-1576 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * SPLIT。spec: Process.cs:1561-1576
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execSplitFlat]。
+     */
     private fun execSplit(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpSplitArgument
         val target = evalStr(arg.targetStr, ctx)
@@ -4068,8 +4519,11 @@ class StatementExecutor {
         }
     }
 
-    /** ARRAYSHIFT。spec: Process.cs:1614-1660 + VariableEvaluator.cs:707-773 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * ARRAYSHIFT。spec: Process.cs:1614-1660 + VariableEvaluator.cs:707-773
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execArrayShiftFlat]。
+     */
     private fun execArrayShift(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpArrayShiftArgument
         val name = arg.dest.name
@@ -4144,12 +4598,17 @@ class StatementExecutor {
         writeBack1D(ctx, name, idx, arr, isStr)
     }
 
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * 对象树通道辅助（Android 生产默认）；扁平侧在 [execArrayShiftFlat] 里直接读槽位，没有对偶函数。
+     */
     private fun fillValue(arg: SpArrayShiftArgument, ctx: ExecContext, isStr: Boolean): Any =
         if (isStr) (arg.num2?.getStrValue(ctx.eval) ?: "") else (arg.num2?.getIntValue(ctx.eval) ?: 0L)
 
-    /** ARRAYREMOVE。spec: Process.cs:1661-1677 + VariableEvaluator.cs:845-887 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * ARRAYREMOVE。spec: Process.cs:1661-1677 + VariableEvaluator.cs:845-887
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execArrayRemoveFlat]。
+     */
     private fun execArrayRemove(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpArrayControlArgument
         val name = arg.dest.name
@@ -4181,8 +4640,11 @@ class StatementExecutor {
         writeBack1D(ctx, name, idx, out, isStr)
     }
 
-    /** ARRAYSORT。spec: Process.cs:1678-1710 + VariableEvaluator.cs:889-958 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * ARRAYSORT。spec: Process.cs:1678-1710 + VariableEvaluator.cs:889-958
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execArraySortFlat]。
+     */
     private fun execArraySort(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpArraySortArgument
         val name = arg.dest.name
@@ -4236,8 +4698,9 @@ class StatementExecutor {
      * ARRAYCOPY。spec: Process.cs:1711-1772 + VariableEvaluator.cs:947-990。
      * 数据流向：第 1 参数数组 → 第 2 参数数组（CopyArray(var1, var2)：array2[i] = array[i]）。
      * TODO(verify): isa.yaml 记为「第二个复制到第一个」，与源码相反；按源码实现。
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execArrayCopyFlat]。
      */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
     private fun execArrayCopy(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpCopyArrayArgument
         val n1 = evalStr(arg.varName1, ctx)
@@ -4260,13 +4723,14 @@ class StatementExecutor {
         if (i2.isCharacterData) throw CodeEE("ARRAYCOPY命令的第2参数\"$n2\"是一个角色变量(不支持)")
         if (i1.dimension != i2.dimension) throw CodeEE("ARRAYCOPY命令的两个参数维度不一致")
         if (i1.operandType != i2.operandType) throw CodeEE("ARRAYCOPY命令的两个参数的数组变量类型不一致")
-        // 登记残差：Process.cs:1749-1752 的非常量名路径还有一条 `ArraycopyArgIsConst`（第 2 参数
-        // 为只读变量，zhs:513），以及常量名路径（Process.cs:1755-1762）**只查类型不一致**、
-        // 不查数组/角色/只读。语料实测 `ARRAYCOPY` 共 50 处，其中 48 处两个参数都是字符串常量名
-        // （装载期 `copyArray` 的 `checkArrayName`，ArgBuilders.kt:1257-1269，已在符号层覆盖常量名
-        // 的数组/角色判定），2 处第 1 参为运行期名（`ARG_VARNAME` 与 FORM 串 `@"特效组{ARG}"`）。
-        // 移植侧统一走上面这条更严的判序，两条残差不影响语料可达读数
-        // （TODO(verify)：无符号表的裸构造路径可达时需补 const 分支）。
+        // 只读（常量）目标：官方**执行期**也拦 —— 非常量名路径 `Process.cs:1748-1750` 直接
+        // `throw CodeEE(ArraycopyArgIsConst, "2", 名)`（zhs:513 =
+        // `ARRAYCOPY命令的第{0}参数"{1}"是一个只读变量`），常量名路径则由解析期同文案 warn
+        // 挡死（`ArgumentParser.cs:2481-2484`，level 2 = 行级错误）。这是 C# 证据里
+        // 「执行期也拦」的形态之一，因此 B5 删掉存储层常量闸之后，这一条必须留在执行期
+        // （否则常量目标会被静默写穿）。移植侧的常量名解析闸在 `stmt/ArgBuilders.kt` 的 copyArray
+        // （只查数组/角色，缺只读那一条）—— 缺口见交付报告的「需组长接线」。
+        if (i2.isConst) throw CodeEE("ARRAYCOPY命令的第2参数\"$n2\"是一个只读变量")
         val isStr = i1.operandType == OperandType.STR
         if (i1.dimension <= 1) {
             val n = minOf(ctx.variables.getLength(n1), ctx.variables.getLength(n2))
@@ -4301,8 +4765,11 @@ class StatementExecutor {
     // 其他
     // ==================================================================
 
-    /** 赋值语句（SET）。spec: FunctionIdentifier.cs:606-666 + LogicalLineParser.cs:536-556 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * 赋值语句（SET）。spec: FunctionIdentifier.cs:606-666 + LogicalLineParser.cs:536-556
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execSetFlat]。
+     */
     private fun execAssign(stmt: AssignStmt, ctx: ExecContext) {
         when (val arg = stmt.args) {
             is SpSetArrayArgument -> {
@@ -4314,6 +4781,15 @@ class StatementExecutor {
                 if (stmt.dest.operandType == OperandType.INT) {
                     val vals = if (arg.constIntList != null) arg.constIntList
                     else arg.terms.map { it?.getIntValue(ctx.eval) ?: 0L }.toLongArray()
+                    ctx.variables.setValues(name, idx, vals)
+                } else if (stmt.dest.operandType == OperandType.FLOAT) {
+                    // 浮点批量形态（`SET 倍率, 1.0, 2.0`）。没有 `constDoubleList` 槽
+                    // （Argument.kt 非本路文件）⇒ 恒走逐项求值；逐项 `getFloatValue` 对
+                    // INT 右值自动宽化（Expr.getFloatValue 的默认实现），与解析期的
+                    // 提升口径一致（ArgBuilders 浮点支的注记）。
+                    val vals = DoubleArray(arg.terms.size) { i ->
+                        arg.terms[i]?.getFloatValue(ctx.eval) ?: 0.0
+                    }
                     ctx.variables.setValues(name, idx, vals)
                 } else {
                     val vals = if (arg.constStrList != null) arg.constStrList
@@ -4339,6 +4815,14 @@ class StatementExecutor {
                     val value = if (arg.isConst) arg.constInt else arg.term?.getIntValue(ctx.eval) ?: 0L
                     if (arg.addConst) stmt.dest.addIntValue(ctx.eval, value)
                     else stmt.dest.setIntValue(ctx.eval, value)
+                } else if (stmt.dest.operandType == OperandType.FLOAT) {
+                    // 浮点单点写（4.981 第三型）。`arg.isConst` 恒 false —— 解析期不给浮点
+                    // 折常量（`SpSetArgument` 只有 constInt/constStr 两槽），值一律来自 Term。
+                    // Term 里的浮点左值自读由 `VarRef.getFloatValue` 承接（本波接上），
+                    // 所以 `倍率 *= 1.2` 这种「整式 = 左值 op 右值」的形态能算出正确值。
+                    val value = arg.term?.getFloatValue(ctx.eval) ?: 0.0
+                    if (arg.addConst) stmt.dest.addFloatValue(ctx.eval, value)
+                    else stmt.dest.setFloatValue(ctx.eval, value)
                 } else {
                     val value = if (arg.isConst) arg.constStr else arg.term?.getStrValue(ctx.eval) ?: ""
                     stmt.dest.setStrValue(ctx.eval, value)
@@ -4348,8 +4832,11 @@ class StatementExecutor {
         }
     }
 
-    /** VARI/VARS 运行期：标量时以参数赋初值。spec: FunctionIdentifier.cs:33-71 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * VARI/VARS 运行期：标量时以参数赋初值。spec: FunctionIdentifier.cs:33-71
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execVarDeclFlat]。
+     */
     private fun execVarDecl(stmt: VarDeclStmt, ctx: ExecContext) {
         // 本游戏 setting.json `UseScopedVariableInstruction:false`：原版在**标识符解析期**即抛
         // CodeEE（CanNotUseVAR，spec: IdentifierDictionary.cs:624-627），语料零使用 ⇒ 语义按禁用处理。
@@ -4376,8 +4863,11 @@ class StatementExecutor {
         }
     }
 
-    /** PRINTDATA 家族。spec: FunctionIdentifier.cs:270-320 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * PRINTDATA 家族。spec: FunctionIdentifier.cs:270-320
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execPrintDataFlat]。
+     */
     private fun execPrintData(stmt: Statement, ctx: ExecContext, code: FunctionCode) {
         if (ctx.skipPrint) return
         // 打印窗口起点（spec: FunctionIdentifier.cs:276-277，置位先于数据组查找——与原版同序）。
@@ -4418,8 +4908,11 @@ class StatementExecutor {
         ctx.console.setUseSetColorStyle(true)
     }
 
-    /** STRDATA。spec: Process.cs:1801-1829 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * STRDATA。spec: Process.cs:1801-1829
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execStrDataFlat]。
+     */
     private fun execStrData(stmt: Statement, ctx: ExecContext) {
         val groups = ctx.dataSections?.groupsOf(stmt) ?: return
         if (groups.isEmpty()) return
@@ -4429,8 +4922,11 @@ class StatementExecutor {
         if (dest != null) writeVarRefStr(dest, joined, ctx)
     }
 
-    /** HTML_TAGSPLIT。spec: FunctionIdentifier.cs:347-369 + HtmlManager.cs:486-515 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * HTML_TAGSPLIT。spec: FunctionIdentifier.cs:347-369 + HtmlManager.cs:486-515
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execHtmlTagSplitFlat]。
+     */
     private fun execHtmlTagSplit(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpHtmlSplitArgument
         val parts = htmlTagSplit(evalStr(arg.targetStr, ctx))
@@ -4578,46 +5074,50 @@ class StatementExecutor {
         (ctx.eval as? BuiltinContext)?.host ?: BuiltinHost.DEFAULT
 
     /**
-     * CALLSHARP —— 调宿主注册的本地方法，并把**变量实参**回写。
-     * spec: `FunctionIdentifier.cs:1212-1233`。四步逐句对齐原版：
+     * 对象树入口（B5 后只剩「取实参」的薄适配）：语义全在 [callSharpRows]，
+     * 与扁平通道是**同一份实现**，不保留第二套裁决逻辑。
      *
-     * 1. 名字：装载期由 `SetJumpTo` 把常量名绑成 `CallFunc`，非常量名置 `useCallForm`
-     *    （`:1191-1208`）；查不到方法时是 `ParserMediator.Warn(..., isError: true)` =
-     *    **装载期**错误（`:1204`），文案原文 `No native method {name} found`。
-     *    移植侧没有装载期的插件表（DLL 加载属宿主/M5），故把校验挪到执行期、
-     *    未命中直接 CodeEE —— 差异登记：报错时机由装载期变运行期，文案同源。
-     *    非常量名一侧原版保持 `CallFunc == null`，运行期即 NRE（`:1217` 无空检查）；
-     *    移植侧改为「现求现查」，属**不复刻崩溃**的有意偏离，见交付报告 TODO(verify)。
-     * 2. 实参 → 槽：`IsString` 走 `strValue`，否则 `intValue`
-     *    （`:1216` + `PluginMethodParameterBuilder.cs:8-15`）。
-     * 3. `Execute(array)`：返回值不存在，出参全靠改槽（`:1217`，`IPluginMethod.cs:13`）。
-     * 4. **回写**：`RowArgs` 逐个看是不是变量项，是才写回；判定用接收侧
-     *    `variableTerm.IsString`（**不是**槽自己的 isString，`:1219-1231`），
-     *    非变量实参（字面量/表达式）求值后丢弃，不报错。
-     *    这条就是 `isa.yaml:1340-1347` 记的「变量实参回写」，也是
-     *    `:1218-1233` 注释段里 CALL 家族唯一有出参通道的语句
-     *    （对比 CALLF 求值后丢弃、CALL 不写 RESULT）。
-     *
-     * 位置参数保持下标对齐：原版 `RowArgs[i]` 与 `array[i]` 同序（`:1216`/`:1220`），
-     * 空位（省略的实参）在本工程 AST 里是 null 槽 —— 原版此时 `ConvertTerm(null)` 直接
-     * NRE，移植侧给该槽补 `intValue = 0` 并**跳过回写**（无变量身份可写）。
-     * 语料零处 CALLSHARP ⇒ 无可比读数，只登记口径。
+     * 这条通道是 **Android 生产默认**：`GameHost` 传 `flatStatements = false`
+     * （GameHost.kt:3341-3360 的归因开关缺省关），`Program.flatStmtSource` 恒 null ⇒
+     * `Vm.kt:1866-1874` 走 `statementOf(index)` 后调 `ProcessRuntime.executeStatement(stmt, env)`
+     * （ProcessRuntime.kt:331-336 的 init 只在 `flatStatementsEnabled` 时建扁池）。
+     * 行键 = 本行 `SpCallSharpArgument` 实例身份（对象树每行一份参数实例，与语句 1:1），
+     * 装载趟预填已按同一键写进 [com.eratw.port.core.fn.SharpLinkTable]。
      */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
     private fun execCallSharp(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as? SpCallSharpArgument
             ?: throw CodeEE("CALLSHARP 参数形态错误")
-        val name = if (arg.isConst) arg.constStr else arg.funcNameTerm?.getStrValue(ctx.eval) ?: ""
-        val method = nativeMethods(ctx.variables.aux).find(name)
-            ?: throw CodeEE("No native method $name found")
-        val rowArgs = arg.rowArgs
-        val params = Array(rowArgs.size) { i -> toNativeParam(rowArgs[i], ctx) }
-        method.execute(params)
-        for (i in rowArgs.indices) {
-            val ref = rowArgs[i] as? VarRef ?: continue
-            if (ref.operandType == OperandType.STR) writeVarRefStr(ref, params[i].strValue, ctx)
-            else writeVarRef(ref, params[i].intValue, ctx)
-        }
+        callSharpRows(arg.funcNameTerm, arg.rowArgs, ctx, arg)
+    }
+
+    /**
+     * CALLSHARP 的**变量实参回写**一步（唯一实现，两个入口共用）。
+     *
+     * 官方链条：回写环 `FunctionIdentifier.cs:1219-1231` 只看「实参是不是变量项」，
+     * 随后 `VariableTerm.cs:108-129`（INT）/ `:131-152`（STR）的 `SetValue` 直接把值交给
+     * `Identifier`，而官方存储层的写入口本身**没有常量闸**（`VariableData.cs:1340-1344` 的
+     * `StaticInt1DVariableToken.SetValue`、`:1614-1618` 的 `StaticStr1DVariableToken.SetValue`
+     * 都只 `array[arguments[0]] = value`；全文件唯一的 `IsConst` 读点在 `:4089`，是存档装载
+     * 白名单，与本路径无关）。官方对常量的拦截在**解析期**的实参/左值校验
+     * （`ArgumentBuilder.cs:92-105` `getChangeableVariable`、`ArgumentParser.cs:903-907`
+     * 赋值左值、`:1784-1788` VARSET、`:2197-2201` SAVEVAR 目标），CALLSHARP 的
+     * `DoInstruction` 不经过它们 ⇒ 官方连 `#DIMS CONST` 的实参也会被写回去。
+     *
+     * B5（2026-11-07）**删掉了这里的 `ref.isConst` 特例**：本步现在对常量实参位照常回写，
+     * 与官方逐字同形。前提已由同波次的两步落实 ——
+     * 1. 解析期闸在移植侧早已存在且与官方同形（`stmt/ArgBuilders.kt` 的 changeable :243-248、
+     *    set :1768「左值是常量」、sortArray :839、varset :1213、savevar :1435），
+     *    语句级常量目标在装载期就被拒，不需要执行期兜第二次；
+     * 2. 存储层的常量闸已删除（`UserVariables.kt` 的 `StaticIntUserVar.writeInt` /
+     *    `StaticStrUserVar.writeStr`、`vars/VariableStore.kt` 的 `StaticFloatUserVar.writeElem`），
+     *    因此回写不会撞上「变量 X 是常量，不能赋值」。
+     * 真语料判据 = `core/proc/ChatActionRealCorpusReproTest`（4.981
+     * `ERB/DLC/AI对话补丁/对话调用.erb:35` 的三个 `#DIMS CONST` 实参）与
+     * `core/proc/CallSharpConstWriteBackTest`（本地方法故意改写常量槽 ⇒ 变值）。
+     */
+    private fun writeBackNativeArg(ref: VarRef, param: NativeParam, ctx: ExecContext) {
+        if (ref.operandType == OperandType.STR) writeVarRefStr(ref, param.strValue, ctx)
+        else writeVarRef(ref, param.intValue, ctx)
     }
 
     /** 实参 → 参数槽。spec: `PluginMethodParameterBuilder.cs:8-15` + `PluginMethodParameter.cs:5-24`。 */
@@ -4629,20 +5129,76 @@ class StatementExecutor {
 
     private fun evalStr(e: Expr?, ctx: ExecContext): String = e?.getStrValue(ctx.eval) ?: ""
 
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * HTML_PRINTC / HTML_PRINTLC 的像素制表：把 [text] 补齐到一列宽（[rightAlign] 时补在前面）。
+     *
+     * **补齐段 = 半角空格**（fork 同形：右对齐前补、左对齐后补，fork-src
+     * `EmueraConsole.Print.cs:521-574`，语义登记 `specs/isa.yaml:2444`「右对齐前补空格、
+     * 左对齐后补空格」）。旧实现写的是 `<shape type='space' param='Npx'>`，而折行侧的
+     * 可见宽把标签剥掉（[CellWidth.visibleHtmlCells]），补齐段因此在折行眼里是 **0 格** ——
+     * 一列在折行侧只剩文本本身那几格，逐项制表的行要攒到两三倍密度才折，
+     * 渲染出来整行超宽被右沿裁掉、列位逐格漂移（2026-11-04 玩家反馈的
+     * 「选项左右斜斜的 + 中途换行」；4.980 语料时代网格由脚本侧
+     * `HTML_PRINTC_MANAGER` 自排整行 HTML_PRINT，不经过本语句，所以那是 4.981
+     * 升版才现形的回归）。空格是折行、渲染格点、命中区三方天然同宽的唯一补齐段形态。
+     *
+     * 补齐格数按**格**计：`printCLength - CellWidth.visibleHtmlCells(text)`。fork 按
+     * GDI 像素算空格数（`像素宽 → 填充空格数`，verify-notes §23.5），等宽日文字体下
+     * `textPx = 格数 × FontSize/2` ⇒ 两者逐值相同（PC 基准 199 列 × PRINTCLENGTH 25 ⇒
+     * 每行 7 项，两侧一致）；这里选格数而不是量像素，是因为端口的绘制面是**整格网格**
+     * （`render` 的 `CellMetrics`，ADR-001 重设计区）——量像素的补齐额会随设备字体
+     * 逐列漂移，格数补齐则每列恒等 `printCLength` 格，与折行、命中区永久同尺。
+     * 与 `LineBufferConsoleSink.padC`（普通 PRINTC，sink 层按格补）同构。
+     *
+     * 空串 / 取不到 [BuiltinContext]（纯 sem 假体单测）/ 文本已占满一列时不补，原样返回 ——
+     * 对应原版「`num >= printCLength` 就不补」（fork 的像素分支；文本超列时 fork 不截断，
+     * 这里同样不截断，超宽文本由折行侧按整段移行处理）。
+     * TODO(verify)：fork 的第 2 参（可选单元格像素宽）端口不消费（语料 0 处传参，
+     * `SpHtmlPrint` 第 2 槽是 HTML_PRINT 的 toPrintBuffer 位）；接语料传参前先对 fork-src 取证。
+     * 另：fork 在补齐前有「当前行 + 列宽超 DrawableWidth 则先 Flush 再写」的预折；
+     * 端口靠折行侧整段移行（HTML 段原子、ButtonWrap 同判）落到**同一行分布**，差异只在
+     * 「行何时落进显示行表」（fork 逐项预折、端口 PRINTL 时一次折）。等价性已全语料核实
+     * （2026-11-05）：直接使用 HTML_PRINTC/LC 的文件 3 个、经 `HTML_PRINTBUTTONC` /
+     * `PRINTBUTTON_EXC` 间接使用的调用方文件 6 个，其中含中途读行原语
+     * （LINECOUNT/HTML_GETPRINTEDSTR/LINEISEMPTY）的 **0 个**，含 CLEARLINE 的只有
+     * `QOL_USERCOM.ERB` 一处 `CLEARLINE 1`（:270，在 `@COM_OPTION` 弹窗函数里、与
+     * :115 的网格序列不在同一函数）——「预折与折叠落表时机」在语料全部网格屏上
+     * 不可观测，无需复刻预折。
+     */
+    private fun padHtmlColumn(ctx: ExecContext, text: String, rightAlign: Boolean): String {
+        if (text.isEmpty()) return text
+        val c = ctx.eval as? BuiltinContext ?: return text
+        val columnCells = c.host.printCLength
+        if (columnCells <= 0L) return text
+        val textCells = CellWidth.visibleHtmlCells(text, c.host.fontSize)
+        val padCells = columnCells - textCells
+        if (padCells <= 0L) return text
+        val filler = " ".repeat(padCells.toInt())
+        return if (rightAlign) filler + text else text + filler
+    }
+
+
+    /**
+     * 对象树通道辅助（Android 生产默认）；扁平侧经 [argTerm] / [argExpressions] 取同一批 [Expr]，不需要本函数。
+     */
     private fun evalStrArg(arg: Argument, ctx: ExecContext): String = when (arg) {
         is ExpressionArgument -> evalStr(arg.term, ctx)
         else -> arg.constStr
     }
 
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * 对象树通道辅助（Android 生产默认）；扁平侧经 [argTerm] / [argExpressions] 取同一批 [Expr]，不需要本函数。
+     */
     private fun evalIntArg(arg: Argument, ctx: ExecContext): Long = when (arg) {
         is ExpressionArgument -> arg.term?.getIntValue(ctx.eval) ?: 0L
         else -> arg.constInt
     }
 
-    /** FORM_STR_ANY / INT_ANY 之类多参数形态的项列表。 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * FORM_STR_ANY / INT_ANY 之类多参数形态的项列表。
+     *
+     * 对象树通道辅助（Android 生产默认）；扁平侧读同一批 [Expr] 的重载入参是 [FlatArgs] 与 [FunctionCode]。
+     */
     private fun argTerms(arg: Argument): List<Expr> = when (arg) {
         is ExpressionArrayArgument -> arg.terms.filterNotNull()
         is ExpressionsArgument -> arg.terms.filterNotNull()
@@ -4650,8 +5206,11 @@ class StatementExecutor {
         else -> emptyList()
     }
 
-    /** SETCOLOR/SETBGCOLOR 参数。spec: Process.cs:1409-1439 */
-@Deprecated("T2-64 波次 C 收尾删除：旧对象树路径，仅供双路对拍装置对照")
+    /**
+     * SETCOLOR/SETBGCOLOR 参数。spec: Process.cs:1409-1439
+     *
+     * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [evalColorFlat]。
+     */
     private fun evalColor(arg: Argument, ctx: ExecContext): Triple<Int, Int, Int> {
         val a = arg as SpColorArgument
         return if (a.rgb != null) {
@@ -4667,8 +5226,13 @@ class StatementExecutor {
         }
     }
 
-    /** spec: ExpressionMediator.cs:130-159 CreateBar（文案 spec: Lang zhs；填充字符归 M4 样式层）。 */
-    private fun createBar(v: Long, max: Long, length: Long): String {
+    /**
+     * spec: ExpressionMediator.cs:130-159 CreateBar（文案 spec: Lang zhs）。
+     * 实部/空部字符取 `Config.BarChar1/BarChar2`（:155-156；出厂 `'*'`/`'.'`，
+     * ConfigData.cs:164-165，`_Replace.csv` 条目经 `Config.cs:730-731` 生效），
+     * 由两处调用点从 `ctx.config` 喂入 —— 不再硬编码缺省字符。
+     */
+    private fun createBar(v: Long, max: Long, length: Long, barChar1: Char, barChar2: Char): String {
         if (max <= 0) throw CodeEE("BAR的最大值不为正值")
         if (length <= 0) throw CodeEE("BAR的长度不为正值")
         if (length >= 100) throw CodeEE("BAR过长")
@@ -4677,8 +5241,8 @@ class StatementExecutor {
         if (filled > length) filled = length.toInt()
         val sb = StringBuilder()
         sb.append('[')
-        repeat(filled) { sb.append('*') }
-        repeat((length - filled).toInt()) { sb.append('.') }
+        repeat(filled) { sb.append(barChar1) }
+        repeat((length - filled).toInt()) { sb.append(barChar2) }
         sb.append(']')
         return sb.toString()
     }
@@ -4723,10 +5287,100 @@ class StatementExecutor {
         /** 随机数状态全局数组（625 元素）。spec: VariableEvaluator.cs:117 RANDDATA、variables.yaml:60 */
         const val RANDDATA = "RANDDATA"
         const val RESULTS = "RESULTS"
+
+        /**
+         * `RESULTF` —— 4.981 fork 的浮点结果寄存器（`RESULT`/`RESULTS` 的第三型）。
+         *
+         * 存储面在 [com.eratw.port.core.vars.VariableStore] 的内建浮点列
+         * （依据 fork-src `VariableData.cs:182` 的 `dataFloat[1]`，转引
+         * specs/variables.yaml 的 float_vars.scalars）。
+         */
+        const val RESULTF = "RESULTF"
+
+        /** 0 维访问的空下标（`RESULTF` 不带下标；口径同存储层的 0 维校验）。 */
+        val NO_INDICES: LongArray = LongArray(0)
         const val SAVEDATA_TEXT = "SAVEDATA_TEXT"
         const val STAIN = "STAIN"
 
         /** `Lang.Error.NotExistFromCopyChara.Text`（spec: lang.emuera-zhs.xml:316）。 */
         const val COPY_CHARA_SOURCE_NOT_EXIST = "复制的原角色不存在"
+    }
+}
+
+// ======================================================================
+// 4.981 上游两条语句的运行期状态（一律挂 store.aux，见 AGENTS.md 铁律 4）
+// ======================================================================
+
+/** SETIMAGELAYERL 图层表的 aux 槽名（与 sprite 池同一条 aux 路，前缀 `sprite`）。 */
+internal const val IMAGE_LAYER_SLOT: String = "sprite.layer"
+
+/** SEQUENCEINPUT 待消费序列的 aux 槽名。 */
+internal const val SEQUENCE_INPUT_SLOT: String = "input.sequence"
+
+/**
+ * SETIMAGELAYERL 的图层登记表。spec: `Instraction.Child.cs:4161-4209` = fork-src 行号不可本机取证
+ * （TODO(verify)：待 fork-src 就位后复核；本机整文件缺失）。可达依据：`specs/verify-notes.md` 23.16
+ * 与 `specs/isa.yaml` 的 `SETIMAGELAYERL` 条（按 depth 索引同表、followScroll 恒 true）。
+ *
+ * 原版 `Console.SetImageLayer` 按 depth 索引同一张图层表（同 depth 覆盖）；本表同键。
+ * 本仓 `GraphicsSink` 尚无图层接口，故先登记在 aux，由渲染层接线时消费。
+ * TODO(verify)：接线后应改为直接写渲染层的图层表（见交付报告「需组长接线」）。
+ */
+internal class ImageLayerRegistry {
+
+    /** 一条已登记的图层（坐标与尺寸口径见 `execSetImageLayerL` 的 KDoc）。 */
+    class Layer(
+        val spriteName: String,
+        val depth: Long,
+        /** 锚定的**显示行**索引（原版 `GetLineNo`，非 LINECOUNT）。 */
+        val lineNo: Int,
+        val xpos: Int,
+        val ypos: Int,
+        val width: Int,
+        val height: Int,
+        val opacity: Int,
+        /** L 版恒 true（`Instraction.Child.cs:4207` 的最后一个实参）。 */
+        val followScroll: Boolean = true,
+    )
+
+    private val byDepth = LinkedHashMap<Long, Layer>()
+
+    /** 登记/覆盖同 depth 的图层。 */
+    fun set(layer: Layer) {
+        byDepth[layer.depth] = layer
+    }
+
+    fun get(depth: Long): Layer? = byDepth[depth]
+
+    /** 按登记顺序的图层快照（渲染层接线用）。 */
+    val layers: List<Layer> get() = byDepth.values.toList()
+}
+
+/**
+ * SEQUENCEINPUT 的待消费输入序列。
+ *
+ * 语义锚：原版 `Process.sequenceInputValue` / `hasSequenceInput`
+ * （Process.SystemProc.cs:117-118）由 `SequenceInputMethod` 整段覆盖（Creator.Method.cs:9690-9705），
+ * 下一次等待时被取走并按 `\n` 拆段消费（EmueraConsole.cs:699-722 + :1419-1530）。
+ */
+internal class SequenceInputState {
+    private var pending: MutableList<String> = ArrayList()
+
+    /** 原版 `hasSequenceInput`。 */
+    var hasValue: Boolean = false
+        private set
+
+    /** 整段覆盖（原版 `SequenceInputMethod` 的函数体两行）。 */
+    fun submit(raw: String) {
+        pending = raw.split('\n').toMutableList()
+        hasValue = true
+    }
+
+    /** 取一段；队列取空即清 [hasValue] 并返回 null。 */
+    fun poll(): String? {
+        if (!hasValue) return null
+        val v = if (pending.isEmpty()) "" else pending.removeAt(0)
+        if (pending.isEmpty()) hasValue = false
+        return v
     }
 }

@@ -27,13 +27,14 @@ data class DefKey(val file: String, val line: Int)
  * `CorpusValidator.prescan`，见该文件 189-415 行；本 CLI 不能依赖 core-vm 的测试源）。
  *
  * 提供三件事：
- * 1. [funcTypes] —— `#FUNCTION`(INT) / `#FUNCTIONS`(STR) 的返回类型表：
- *    `FuncSig.returnsStr`（决定 RETURNF 编 `_RET` 还是 `_RETS`，合同 M3-A §3 A7）与
- *    `buildExprCallTable` 的 methodTypes 都只有这一个来源（LabelDef 已合并二者，
- *    无 int/str 之辨，spec 侧证据 Symbols.kt 的 scanLabels）。
- * 2. [privateVars] —— 按**定义身份**的私有 `#DIM/#DIMS` 表：函数内私有名（含中文名、
+ * 1. [funcTypes] —— `#FUNCTION`(INT) / `#FUNCTIONS`(STR) / `#FUNCTIONF`(FLOAT, 4.981 fork)
+ *    的返回类型表：`FuncSig.returnsStr`/`returnsFloat`（决定 RETURNF 编 `_RET`/`_RETS`/`_RETF`）
+ *    与 `buildExprCallTable` 的 methodTypes 都只有这一个来源（LabelDef 已合并 isMethod，
+ *    无 int/str/float 之辨，spec 侧证据 Symbols.kt 的 scanLabels）。
+ * 2. [privateVars] —— 按**定义身份**的私有 `#DIM/#DIMS/#DIMF` 表：函数内私有名（含中文名、
  *    `VARSET 私有名`）不是未定义标识符（spec: IdentifierDictionary.cs:429-447 私有表优先；
- *    漏切作用域曾把 5,345 切片误判成解析失败，A13）。
+ *    漏切作用域曾把 5,345 切片误判成解析失败，A13）。`#DIMF`（4.981 fork 浮点声明）与
+ *    `#DIM` 同一条预扫描通道（spec: variables.yaml:105-111 的 float_vars）。
  * 3. [global] —— 全局符号表（全局 `#DIM` + `#FUNCTION` 方法名），resolveVariable/
  *    resolveFunction 的兜底层。**不登记两类幽灵**：
  *    - `#DEFINE` 宏名：宏已在词法层展开（[com.eratw.port.core.lexer.LexerConfig.macros]）；
@@ -164,7 +165,7 @@ class CorpusScan(
                         val body = line.substring(1).trim()
                         val kw = body.takeWhile { !it.isWhitespace() }.uppercase(Locale.ROOT)
                         val rest = body.substring(kw.length).trim()
-                        if (kw == "FUNCTION" || kw == "FUNCTIONS") {
+                        if (kw == "FUNCTION" || kw == "FUNCTIONS" || kw == "FUNCTIONF") {
                             val label = pendingLabel
                             // spec: LogicalLineParser.cs:151-213 —— 三类声明无效（IsMethod 不置位）：
                             //   ① 函数名数字开头（:153-158）；② 事件/系统标签（:178-182 Depth==0，
@@ -173,13 +174,17 @@ class CorpusScan(
                                 !label[0].isDigit() &&
                                 !Symbols.isEventLabelName(label) && !Symbols.isSystemLabelName(label)
                             ) {
-                                funcTypes[label.uppercase(Locale.ROOT)] =
-                                    if (kw == "FUNCTIONS") OperandType.STR else OperandType.INT
+                                funcTypes[label.uppercase(Locale.ROOT)] = when (kw) {
+                                    "FUNCTIONS" -> OperandType.STR
+                                    // fork-src LogicalLineParser.cs:175-183：FUNCTIONF = EraType.Float
+                                    "FUNCTIONF" -> OperandType.FLOAT
+                                    else -> OperandType.INT
+                                }
                                 pendingDeclared = true
                             }
                             continue
                         }
-                        if (kw == "DIM" || kw == "DIMS") {
+                        if (kw == "DIM" || kw == "DIMS" || kw == "DIMF") {
                             var head = rest
                             var isConst = false
                             var isChara = false
@@ -188,20 +193,34 @@ class CorpusScan(
                             while (changed) {
                                 changed = false
                                 for (mod in MODIFIERS) {
-                                    // 修饰符后允许任意空白（原版按 WordCollection 的 IdentifierWord 边界分词，
-                                    // spec: UserDefinedVariableData.cs:54-58；语料实况 UpdateMenus.ERB:216 有 TAB）
-                                    if (head.length > mod.length && head.startsWith(mod) && head[mod.length].isWhitespace()) {
-                                        head = head.substring(mod.length).trim()
-                                        if (mod == "CONST") isConst = true
-                                        if (mod == "CHARADATA") isChara = true
-                                        if (mod == "REF") isRef = true
-                                        changed = true
-                                    }
+                                    // A2（挖虫波第三批）：词级判定 + 忽略大小写。
+                                    // 原版的关键字循环按 `WordCollection` 的 IdentifierWord 取词
+                                    // （spec: UserDefinedVariableData.cs:54-58），词界之后用
+                                    // `text2.Equals(mod, Config.StringComparison)` 比 ——
+                                    // emuera.config:1 `IGNORE CASE:YES` ⇒ StringComparison =
+                                    // OrdinalIgnoreCase（loader.md §6 注），故 `const`/`Const` 同样
+                                    // 是修饰符；而 `CONSTX`/`CHARADATA_TYPES` 整词是**名字**
+                                    // （UserDefinedVariableData.cs:262-263，loader.md D.8.1
+                                    // 「关键字与名字间须有分隔符」）。
+                                    // 旧实现三处都不对：① `startsWith(mod)` 大小写敏感；
+                                    // ② 词界只认空白（`,`/`=`/`;` 之后也是词界）；
+                                    // ③ 循环之后还有 `contains("CHARADATA")` / `startsWith("CONST")`
+                                    //    两个**无词边界**的兜底，把名字里带 CHARADATA 的
+                                    //    `#DIMS CONST CHARADATA_TYPES`（fromEN/DEBUG_TRANSLATIONS.ERB:126-127）
+                                    //    误判成角色数据变量、把 `#DIM const X = 5` 的 X 误当 CONST。
+                                    //    兜底整体删除：词级判定已经覆盖其唯一合法场景。
+                                    if (head.length < mod.length) continue
+                                    if (!head.regionMatches(0, mod, 0, mod.length, ignoreCase = true)) continue
+                                    val nextIsIdentChar = head.length > mod.length &&
+                                        (head[mod.length].isLetterOrDigit() || head[mod.length] == '_')
+                                    if (nextIsIdentChar) continue
+                                    head = head.substring(mod.length).trim()
+                                    if (mod == "CONST") isConst = true
+                                    if (mod == "CHARADATA") isChara = true
+                                    if (mod == "REF") isRef = true
+                                    changed = true
                                 }
                             }
-                            val upHead = head.uppercase(Locale.ROOT)
-                            if (upHead.contains("CHARADATA")) isChara = true
-                            if (upHead.startsWith("CONST")) isConst = true
                             val name = head.takeWhile { it != ',' && it != '=' && it != ';' && !it.isWhitespace() }.trim()
                             if (name.isEmpty()) continue
                             // `#DIM X = 1, 25, 50` 的逗号后是初始值，不是维度（spec: UserDefinedVariableData.cs:344-427）
@@ -213,7 +232,17 @@ class CorpusScan(
                             } else {
                                 tail.split(',').map { it.trim() }.count { it.isNotEmpty() }.coerceIn(1, 3)
                             }
-                            declare(name, if (kw == "DIMS") OperandType.STR else OperandType.INT, dims, isChara, isConst)
+                            // 类型：`#DIMS` → STR，`#DIMF` → FLOAT（4.981 fork；spec:
+                            // variables.yaml:99-100）。`#DIMF CHARADATA` 是 fork 的已知 quirk：
+                            // CreateUserDefCharaVariable 只有 TypeIsStr / 整数两支，浮点声明
+                            // 掉进整数分支（fork-src VariableData.cs:410-429，ADR-005 原样复刻）
+                            // ⇒ 与 `DimParser.parse` 的 `floatType = isFloat && !chara` 同口径。
+                            val type = when {
+                                kw == "DIMS" -> OperandType.STR
+                                kw == "DIMF" && !isChara -> OperandType.FLOAT
+                                else -> OperandType.INT
+                            }
+                            declare(name, type, dims, isChara, isConst)
                             continue
                         }
                         continue
@@ -355,6 +384,9 @@ class CompileResolver(private val scan: CorpusScan) : DefinitionScopedResolver {
         scan.funcTypes[name.uppercase(Locale.ROOT)] ?: scan.global.resolveFunction(name)
 
     override fun canBeReferencedBare(name: String): Boolean = scan.global.canBeReferencedBare(name)
+
+    /** `POWER` 一类实参浮点晋升（spec: FunctionMethodTerm.cs:44-56）：随全局符号表同口径。 */
+    override fun canReturnFloat(name: String): Boolean = scan.global.canReturnFloat(name)
 
     override fun isUserMethod(name: String): Boolean = scan.global.isUserMethod(name)
 }

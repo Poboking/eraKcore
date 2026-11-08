@@ -355,6 +355,7 @@ class VariableSizeCouplingTest {
     fun `真实语料 VariableSize csv 全行零告警`() {
         val csvDir = findRealCsvDir()
         assumeTrue(csvDir != null, "未设置 ERATW_CORPUS 或找不到 CSV/VariableSize.csv")
+        val profile = com.eratw.port.boot.CorpusProfile.detect(csvDir)
         val sizes = VariableSizes()
         val warnings = ArrayList<String>()
         VariableSizeLoader.load(csvDir!!, sizes, warnings)
@@ -365,9 +366,9 @@ class VariableSizeCouplingTest {
             assertFalse(warnings.any { it.contains(old) }, "旧告警残留：$old")
         }
 
-        // ITEMNAME,1000：名字表槽 6 与 ITEMPRICE 主数组同步
-        assertEquals(1000, sizes.maxDataList[6])
-        assertEquals(1000, sizes.int1D[60])
+        // ITEMNAME（根档案列：4.980=1000 / 4.981 VariableSize.csv:74=1200）：名字表槽 6 与 ITEMPRICE 主数组同步
+        assertEquals(profile.itemNameSize, sizes.maxDataList[6])
+        assertEquals(profile.itemNameSize, sizes.int1D[60])
         // 契约 16 组（语料两侧都写的按同值、只写一侧的按跟随）
         assertEquals(100, sizes.maxDataList[0]); assertEquals(100, sizes.charaInt1D[2])      // ABL
         assertEquals(1000, sizes.maxDataList[2]); assertEquals(1000, sizes.charaInt1D[3])    // TALENT
@@ -415,7 +416,7 @@ class VariableSizeCouplingTest {
         assertEquals(100, registry.def("ARGS")!!.dims[0])
         // 常规 1 维读数抽查
         assertEquals(100, sizes.int1D[0])       // DAY
-        assertEquals(1000, sizes.int1D[2])      // ITEM
+        assertEquals(profile.itemSize, sizes.int1D[2])      // ITEM（根档案列：4.980=1000 / 4.981 VariableSize.csv:17=1200）
         assertEquals(500, sizes.int1D[10])      // RESULT
         assertEquals(200, sizes.int1D[30])      // A（low=30）
         assertEquals(200, sizes.int1D[55])      // Z（low=55）

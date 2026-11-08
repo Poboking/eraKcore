@@ -123,7 +123,7 @@ class PrintRectColorTest {
         val env = Env()
         // Process.cs:1409-1437 的 RGB 分支：从 0xRRGGBB 拆三段
         run(env, "SETCOLOR 0x00FF00")
-        run(env, "PRINT_RECT 5px")
+        run(env, "PRINT_RECT 5 px")
 
         assertEquals(listOf(0x00FF00), env.sink.rectCalls.map { it.rgb })
         assertEquals(0, env.sink.legacyRectCalls)

@@ -97,7 +97,15 @@ class SoundChannelTable(
     fun playSound(name: String, repeat: Int, source: SoundSourceResolver): Int {
         // spec: :2625-2628 —— 文件不存在直接 return，不建声道、不改状态
         val decoder = source.resolve(name) ?: return NOT_PLAYED
-        val channel = selectFreeChannel() ?: return NOT_PLAYED
+        val channel = selectFreeChannel()
+        if (channel == null) {
+            // 原版**先选道后开文件**（FunctionIdentifier.cs:2629-2644 选道、Sound.cs:83-96 开流），
+            // 表长为 0 时根本走不到开流；移植侧的 resolve 在选道之前，已开的解码流必须在这里
+            // 释放，否则每次 PLAYSOUND 泄漏一个解码器/文件句柄（2026-11-01 稳定性复查）。
+            // release 失败也吞掉：这条路径在原版不存在，平台异常不该变成脚本可见的 CodeEE。
+            runCatching { decoder.release() }
+            return NOT_PLAYED
+        }
         // spec: Sound.cs:64 + :97-105 —— repeat 逐值透传，表侧不做 Max 夹取（夹法属 :2621）
         channel.play(decoder, repeat)
         return slots.indexOf(channel)
@@ -234,10 +242,27 @@ class SoundChannelTable(
     /**
      * 退出清场（Program.cs:97-103）：Bgm 与所有已建声道逐个 close。
      * 不置 null（原版退出时数组仍持有对象）。
+     *
+     * **本方法不抛，逐声道隔离**（2026-10-31 复查）。`close()` 最终会下发到平台侧，
+     * 而 `MediaPlayer.release()` 在部分 OEM 上会抛 `IllegalStateException`
+     * （「release() called on a player in invalid state」）。旧写法是一条裸 for 循环：
+     * 第一个声道抛了，**后面九个声道与 Bgm 一个都不释放**，异常还会继续上抛到
+     * `GameHost.shutdownForExit`，把本该必达的 `session.close()` 与 `session = null`
+     * 一起带走 —— 那正是「返回键退出再进 `used=215MiB`」那条链的形状。
+     *
+     * @return 本次释放失败的声道数（0 = 全部干净）。用返回值而不是异常把读数交给调用方，
+     *   是因为清场链的契约是「走完」，不是「报错」。脚本可见的 [SoundChannel.stop] 不动：
+     *   那条路上平台异常仍按语句层的 `CodeEE` 口径上抛（SoundChannel.kt 类头）。
      */
-    fun closeAll() {
-        bgm?.close()
-        for (channel in slots) channel?.close()
+    fun closeAll(): Int {
+        var failed = 0
+        fun closeOne(channel: SoundChannel?) {
+            if (channel == null) return
+            if (runCatching { channel.close() }.isFailure) failed += 1
+        }
+        closeOne(bgm)
+        for (channel in slots) closeOne(channel)
+        return failed
     }
 
     /**

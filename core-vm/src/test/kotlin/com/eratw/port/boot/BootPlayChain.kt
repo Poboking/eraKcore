@@ -163,6 +163,9 @@ object BootPlayChain {
         )
         val inputSink = QueueInputSink()
         val beginHost = ConsoleBeginHost(inputSink, console)
+        // 键入回显与 GameSession 同一条装配线（ECHO-INPUT，2026-11-04）：交付生效文本 →
+        // console 正常打印路径（时机与形态矩阵见 QueueInputSink.onEchoInput 的 KDoc）。
+        inputSink.onEchoInput = { console.printLine(it) }
         val host = ConsoleBuiltinHost(gameRoot, console)
         val configStore = EmueraConfigParser.loadChainFromDisk(gameRoot).store
         val effective = EffectiveConfig.of(configStore)

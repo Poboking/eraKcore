@@ -1,0 +1,45 @@
+@Z_PLAIN
+	PRINTL z-plain
+	RETURN
+
+@EVENTCOM
+	PRINTL z-event-normal
+
+@EVENTCOM
+#PRI
+	PRINTL z-event-pri
+
+@G12_DUP
+#FUNCTION
+	PRINTL z-dup
+	RETURNF 1
+
+@G12_ARGS(A, B$)
+#LOCALSIZE 宏一
+#LOCALSSIZE 3
+#DIM 局所 10, 5
+#DIM DYNAMIC dynvar
+#DIMS 标语$ 1 = "带引号"
+	PRINTL args
+	RETURN
+
+@G12_ONLY
+#ONLY
+	PRINTL only-flag
+	RETURN
+
+@G12_SINGLE
+#SINGLE
+	PRINTL single-flag
+	RETURN
+
+@G12_PATH
+#DIMS 路径$ 1 = "C:\DIR\文件"
+#DIM REF 引用
+#DIM 无尺寸
+	PRINTL backslash
+	RETURN
+
+@日本語ラベル
+	PRINTL cjk-key
+	RETURN

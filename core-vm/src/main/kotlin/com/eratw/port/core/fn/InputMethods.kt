@@ -156,11 +156,11 @@ internal fun registerInputMethods(r: BuiltinRegistry) {
     // （:7826-7833）。keytoggle 表是原版静态字段（:9035-9039）——本移植放每 VM 附属状态
     // （aux 槽 "keytoggle"），保证多 VM/测试并行不串味（CONTRACT-M3-B §2）。
     r.register(BuiltinMethod("GETKEY", I, 1, 1) { c, a ->
-        val vk = iv(a[0]!!)
+        val vk = requiredIntArg(a, 0, "GETKEY")
         Value.IntV(keyStateOf(c, "GETKEY", vk, triggered = false))
     })
     r.register(BuiltinMethod("GETKEYTRIGGERED", I, 1, 1) { c, a ->
-        val vk = iv(a[0]!!)
+        val vk = requiredIntArg(a, 0, "GETKEYTRIGGERED")
         Value.IntV(keyStateOf(c, "GETKEYTRIGGERED", vk, triggered = true))
     })
 

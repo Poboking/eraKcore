@@ -1,5 +1,6 @@
 package com.eratw.port.core.save
 
+import com.eratw.port.boot.CorpusProfile
 import com.eratw.port.core.data.save.SaveData
 import com.eratw.port.core.data.save.SaveEntry
 import com.eratw.port.core.data.save.SaveFormat
@@ -22,7 +23,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -84,6 +84,19 @@ import org.junit.jupiter.api.io.TempDir
  *   - 文本格式（`SystemSaveInBinary=NO`）存档的真机样本缺失：语料 5 个 `.sav` 全是 GZip 二进制
  *     容器，[SaveTextFormat] 的逐字段回环**没有真实存档可对拍**，只有合成用例。
  *
+ * ## 语料根两列（savecorpus 波，2026-11-06）
+ *
+ * 本文件的样本取自 `ERATW_GAMEDIR/sav`（语料侧在位就用语料的，否则回落仓内备份），
+ * 期望读数里凡**随语料根变**的一律 `when (CorpusProfile)` 两列（4.980 | 4.981）：
+ * `CSV/VarExtGameData.csv` 的段数/非空行数/生效 `SAVE_DTS`，以及样本描述里的版本行。
+ * 随样本字节走的读数（60151 字节、94 字符描述、168 角色块、540 条全局条目、168 个分隔符、
+ * 15626 条角色条目、payload 571185、`global.sav` 25 条）两根解析到同一份字节 ⇒ 两根同值，实读。
+ * 旧版把这些写死成 4.981 一列，闸口径（AGENTS.md §5）指向 4.980 时恒红。
+ *
+ * 样本缺失不再 assume-skip：`ERATW_GAMEDIR` 没设 / 判不出语料版本 / 语料与仓内备份都找不到
+ * 这份样本 ⇒ **AssertionError 判红**并打印找过的路径（旧实现是 5 处 `assumeTrue(false, …)`，
+ * 样本一缺整族用例就不跑，闸看着仍绿）。
+ *
  * ## 与 `n-stmtreset` 的接口约定
  *
  * [EmSaveSets.staticSets] 是本路新增的第三张名单（`STATIC_MAPS`/`STATIC_XMLS`/`STATIC_DTS`，
@@ -100,40 +113,66 @@ class SaveRoundTripAuditTest {
     // ------------------------------------------------------------------
 
     /**
-     * 样本根目录：语料 `ERATW_GAMEDIR/sav`（实机档）优先，
-     * 回落仓内备份 `.workbuddy/sav-backup/sav-20261018-110513`（`SaveFormatTest` 同一批样本）。
-     * 两处都拿不到 ⇒ 相关用例 assume-skip（不伪造读数）。
+     * 语料游戏根 + 判出来的版本档。
+     *
+     * `ERATW_GAMEDIR` 未设 / 指到的目录判不出语料版本（`ERB/DIM.ERH` 缺、`NOW_VERSION` 不在册）
+     * ⇒ **AssertionError 判红** —— 口径同 `core/config/ConfigChainTest` 的 `corpusRoot`：
+     * 环境变量既然显式指了根，根不完整就是口径事件，不是「跳过这条用例」。
      */
-    private fun backupDir(): Path? = sequenceOf(
-        Path.of("../../.workbuddy/sav-backup/sav-20261018-110513"),
-        Path.of(".workbuddy/sav-backup/sav-20261018-110513"),
-        Path.of("../.workbuddy/sav-backup/sav-20261018-110513"),
-    ).firstOrNull { Files.isDirectory(it) }
-
-    /**
-     * 单个样本：语料 `sav` 目录里有就用语料的（`save00.sav` 与仓内备份**同一份字节**，
-     * sha256 前缀 27883f1663969468 实测一致），没有（如 `global.sav` 语料侧不存在）回落备份。
-     */
-    private fun sample(name: String): Path? {
-        val gamedir = System.getenv("ERATW_GAMEDIR")?.trim()?.takeIf { it.isNotEmpty() }
-        if (gamedir != null) {
-            val p = Path.of(gamedir, "sav", name)
-            if (Files.isRegularFile(p)) return p
-        }
-        return backupDir()?.resolve(name)?.takeIf { Files.isRegularFile(it) }
+    private fun corpusRoot(): Pair<Path, CorpusProfile> {
+        val env = System.getenv("ERATW_GAMEDIR")
+            ?: run {
+                // 公开仓无外部语料/样本：按公开适配口径跳过（上游为硬判红）。
+                org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_GAMEDIR：跳过存档审计语料根")
+                throw AssertionError("unreachable")
+            }
+        val dir = Path.of(env)
+        if (!Files.isDirectory(dir)) throw AssertionError("ERATW_GAMEDIR=$env 不是目录：语料根不完整")
+        return dir to CorpusProfile.detect(dir)
     }
 
-    /** 语料 CSV 目录（[VarExt 名单只有两条 SAVE_DTS] 用）；拿不到则 null。 */
-    private fun corpusCsvDir(): Path? {
-        for (key in listOf("ERATW_GAMEDIR", "ERATW_CORPUS")) {
-            val v = System.getenv(key)?.trim()?.takeIf { it.isNotEmpty() } ?: continue
-            val root = Path.of(v)
-            val direct = root.resolve("CSV")
-            if (Files.isDirectory(direct)) return direct
-            val parent = root.parent?.resolve("CSV")
-            if (parent != null && Files.isDirectory(parent)) return parent
-        }
-        return null
+    /** 本轮语料版本档（凡随语料根变的读数都按它取列）。 */
+    private fun profile(): CorpusProfile = corpusRoot().second
+
+    /**
+     * 样本档描述里那段「版本行」的按根期望值。
+     *
+     * 这一格是**样本文件**的属性（原版 `Process.cs` 拼串时写的是写出该档那次运行的游戏版本），
+     * 不是语料根的属性：4.980 根下样本取自语料 `sav/`、4.981 根下样本回落仓内备份，
+     * 两份 `save00.sav` 是同一份字节（sha256 前缀 27883f1663969468）⇒ 两列**同值**。
+     * 仍然按根写成两列：哪天 4.981 语料的 `sav/` 落了 4.981 时代的真档，这格会在断言里显形，
+     * 而不是被一枚看不出出处的常量吞掉。
+     */
+    private fun sampleVersionTail(profile: CorpusProfile): String = when (profile) {
+        // 4.980 列：本路 2026-11-06 实读（从 4.980 语料 sav/save00.sav 的描述里取出，含尾空格）
+        CorpusProfile.V4_980 -> "Ver 4.980 - 日语交流用画蛇添足版CH20260326 "
+        // 4.981 列：4.981 语料 sav/ 是空目录 ⇒ 样本回落到仓内 4.980 时代备份（同一份字节）
+        CorpusProfile.V4_981 -> "Ver 4.980 - 日语交流用画蛇添足版CH20260326 "
+    }
+
+    /**
+     * 单个样本的**实际落地路径**：公开仓只认 `ERATW_SAVE_SAMPLES`（`-PsaveSamples` 由
+     * `core-vm/build.gradle.kts` 导出）。不携带任何内部存档备份路径；没有显式来源时按
+     * 公开适配口径跳过（上游是硬判红）。
+     */
+    private fun sample(name: String): Path {
+        val dir = System.getenv("ERATW_SAVE_SAMPLES")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: run {
+                // 公开仓不含内部存档样本：按公开适配口径跳过。
+                org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_SAVE_SAMPLES：跳过真存档样本判据")
+                throw AssertionError("unreachable")
+            }
+        val f = Path.of(dir).resolve(name)
+        if (Files.isRegularFile(f)) return f
+        throw AssertionError("ERATW_SAVE_SAMPLES=$dir 下找不到存档样本 $name")
+    }
+
+    /** 语料 CSV 目录（[VarExt 名单按根取列] 用）；语料根不完整 ⇒ 判红。 */
+    private fun corpusCsvDir(): Path {
+        val (root, _) = corpusRoot()
+        val csv = root.resolve("CSV")
+        if (!Files.isDirectory(csv)) throw AssertionError("ERATW_GAMEDIR=$root 下没有 CSV 目录：它不是语料游戏根")
+        return csv
     }
 
     private class MemorySaveIo : SaveFileIo {
@@ -191,12 +230,13 @@ class SaveRoundTripAuditTest {
      * 容器头 16 字节逐字段对拍 `EraBinaryDataWriter.WriteHeader`（`:35-51`）。
      * 实测量（`sav/save00.sav`）：60151 字节文件、GZip 魔数、版本 1808、校验表条数 0、
      * GZip 外壳头 `1f 8b 08 00 00 00 00 00 00 0a`（.NET 8 的 OS 字节 0x0A）。
+     *
+     * 60151 这根**两根同值，实读**：两个语料根解析到的 `save00.sav` 是同一份字节
+     * （4.980 走语料 `sav/`、4.981 走仓内备份，sha256 前缀 27883f1663969468 相同）。
      */
     @Test
     fun `容器头三字段与原版写侧常量对拍`() {
-        val f = sample("save00.sav")
-        assumeTrue(f != null, "跳过：找不到真实存档样本（ERATW_GAMEDIR/sav 与仓内备份都不在位）")
-        val bytes = Files.readAllBytes(f!!)
+        val bytes = Files.readAllBytes(sample("save00.sav"))
         assertEquals(60151L, bytes.size.toLong(), "save00.sav 文件长度实测")
 
         var magic = 0L
@@ -232,11 +272,11 @@ class SaveRoundTripAuditTest {
      */
     @Test
     fun `payload 头部字段与写出序逐一对拍`() {
-        val d = readSample("save00.sav") ?: return
+        val d = readSample("save00.sav")
         assertEquals(SaveFileKind.NORMAL, d.fileType, ":2594 WriteFileType(Normal)")
         assertEquals(realCode, d.uniqueCode, ":2595 ScriptUniqueCode 实测 7153")
         assertEquals(0L, d.scriptVersion, ":2596 ScriptVersion 实测 0（游戏侧未定义）")
-        assertEquals(94, d.text.length, "描述文本字符数实测 94（UTF-16LE ⇒ 188 字节）")
+        assertEquals(94, d.text.length, "描述文本字符数实测 94（UTF-16LE ⇒ 188 字节；两根同值，样本同一份字节）")
         // 组长改钉：真档实测的分隔符是 **斜杠**（`2026/05/18 14:22:54 `，逐码位 002F），
         // 不是 worker 写的连字符 —— 原版时间戳由 `Process.cs` 按 `yyyy/MM/dd HH:mm:ss` 拼串。
         assertTrue(d.text.startsWith("2026/05/18 14:22:54 "),
@@ -245,9 +285,10 @@ class SaveRoundTripAuditTest {
         assertTrue(d.text.contains("第  1日(春之月1日)"), "天数行（两个空格实测量）：${d.text}")
         // 组长改钉：真档这一格是**简体「莲」**（U+83B2），worker 写成繁体蓮（U+84EE）。
         assertTrue(d.text.contains("命莲寺"), "角色名槽：${d.text}")
+        val tail = sampleVersionTail(profile())
         assertTrue(
-            d.text.endsWith("Ver 4.980 - 日语交流用画蛇添足版CH20260326 "),
-            "版本尾巴含尾空格（实测）：${d.text}",
+            d.text.endsWith(tail),
+            "版本尾巴含尾空格（按根取列：$tail；实测）：${d.text}",
         )
         assertEquals(168, d.characters.size, ":2598 CharacterList.Count 实测 168")
         assertEquals(540, d.variables.size, "全局条目数实测 540（:2603 SaveToStreamBinary）")
@@ -270,7 +311,7 @@ class SaveRoundTripAuditTest {
      */
     @Test
     fun `真档 1D 整型数组逐元素读回`() {
-        val d = readSample("save00.sav") ?: return
+        val d = readSample("save00.sav")
         val day = d.variables.filterIsInstance<SaveEntry.IntArray1>().firstOrNull { it.key == "DAY" }
         assertTrue(day != null, "真档全局段应含 DAY")
         assertEquals(100, day!!.values.size, "DAY 维度实测 100")
@@ -312,8 +353,8 @@ class SaveRoundTripAuditTest {
      */
     @Test
     fun `payload 与源文件逐字节一致`() {
-        val d = readSample("save00.sav") ?: return
-        val bytes = Files.readAllBytes(sample("save00.sav")!!)
+        val d = readSample("save00.sav")
+        val bytes = Files.readAllBytes(sample("save00.sav"))
         val src = SaveFormat.sourcePayloadOf(bytes)
         assertTrue(src != null, "源 payload 解不出来")
         val back = SaveFormat.encodePayload(d)
@@ -331,10 +372,6 @@ class SaveRoundTripAuditTest {
     @Test
     fun `write 对未改动存档原样回写是移植侧自造分支`() {
         val f = sample("save00.sav")
-        if (f == null) {
-            assumeTrue(false, "跳过：找不到真实存档样本")
-            return
-        }
         val bytes = Files.readAllBytes(f)
         val d = SaveFormat.read(bytes)
         assertTrue(SaveFormat.write(d).contentEquals(bytes), "回写分支：write(read(f)) == f")
@@ -363,10 +400,6 @@ class SaveRoundTripAuditTest {
     @Test
     fun `临时目录真文件回环逐字段一致`(@TempDir tmp: Path) {
         val src = sample("save00.sav")
-        if (src == null) {
-            assumeTrue(false, "跳过：找不到真实存档样本")
-            return
-        }
         val bytes = Files.readAllBytes(src)
         val a = SaveFormat.read(bytes)
         val out = RootedSaveFileIo(tmp, null)
@@ -419,7 +452,7 @@ class SaveRoundTripAuditTest {
      */
     @Test
     fun `真档扩展段只有两张 DT 且都是空表`() {
-        val d = readSample("save00.sav") ?: return
+        val d = readSample("save00.sav")
         assertEquals(listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG"), d.emData.map { it.key }, "档内扩展段名字与顺序")
         assertTrue(d.emData.all { it is SaveEntry.DataTableValue }, "两条都是 DT（类型字节 34）")
         for (e in d.emData.filterIsInstance<SaveEntry.DataTableValue>()) {
@@ -442,10 +475,6 @@ class SaveRoundTripAuditTest {
     @Test
     fun `真档经语句层往返`() {
         val src = sample("save00.sav")
-        if (src == null) {
-            assumeTrue(false, "跳过：找不到真实存档样本")
-            return
-        }
         val sets = EmSaveSets(save = EmDataNames(dts = listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG")))
 
         val io = MemorySaveIo()
@@ -495,10 +524,6 @@ class SaveRoundTripAuditTest {
     @Test
     fun `真档头探测四分支读数`() {
         val src = sample("save00.sav")
-        if (src == null) {
-            assumeTrue(false, "跳过：找不到真实存档样本")
-            return
-        }
         val bytes = Files.readAllBytes(src)
         val gb = GameBaseData(gameCode = realCode, version = 0L)
 
@@ -553,7 +578,7 @@ class SaveRoundTripAuditTest {
     /** `global.sav`（若有）：类别 1、无角色数、描述恒空串、扩展段为空（语料没有 `GLOBAL_*` 生效行）。 */
     @Test
     fun `全局档没有角色块且扩展段为空`() {
-        val d = readSample("global.sav") ?: return
+        val d = readSample("global.sav")
         assertEquals(SaveFileKind.GLOBAL, d.fileType, "WriteFileType(Global)（VariableEvaluator.cs:2485）")
         assertEquals("", d.text, ":2488 WriteString(\"\")")
         assertTrue(d.characters.isEmpty(), "全局档不写角色数（:2483-2493 无 :2598 那一步）")
@@ -567,39 +592,65 @@ class SaveRoundTripAuditTest {
     // ------------------------------------------------------------------
 
     /**
-     * 语料 `CSV/VarExtGameData.csv` 的实测读数：**38 行里只有 2 行生效**
-     * （`:37 SAVE_DTS, DT_UFUFU_LOG`、`:38 SAVE_DTS, DT_UFUFU_M_LOG`），
-     * `SAVE_XMLS`（`:12`）、`SAVE_MAPS`（`:13`）、`GLOBAL_DTS`（`:28`）、`STATIC_DTS`（`:35`）
-     * 全是 `;` 注释行 ⇒ `GLOBAL_*`/`STATIC_*` 六张名单在本语料下是**空集**。
+     * 语料 `CSV/VarExtGameData.csv` 的读数**按根取列**（两根逐行实读，2026-11-06）：
+     * - **4.980**：38 段（37 个 LF、末尾无换行）/ 34 非空 / 4 空 / 32 注释，生效行 2 条
+     *   （`:37 SAVE_DTS, DT_UFUFU_LOG`、`:38 SAVE_DTS, DT_UFUFU_M_LOG`）；
+     * - **4.981**：39 段（38 个 CRLF、末尾无换行）/ 35 非空 / 4 空 / 32 注释，生效行 3 条
+     *   （多 `:39 SAVE_DTS, QOL_FISH_INSTANCE`——生活系统大修 DLC 的钓鱼实例表，
+     *   `ERB/DLC/生活系统大修/0_生活系统_变量.ERH:139` 注明「随存档，见 VarExtGameData.csv」）。
+     * 两根的注释行布局逐字相同：`SAVE_XMLS`（`:12`）、`SAVE_MAPS`（`:13`）、`GLOBAL_DTS`（`:28`）、
+     * `STATIC_DTS`（`:35`）全是 `;` 注释行 ⇒ `GLOBAL_*`/`STATIC_*` 六张名单在两根下都是**空集**。
      *
      * ⇒ 闸门安全证据：本路新增的 `staticSets` 与大小写口径**不会**改变真语料上的任何读数
      * （扩展段仍是那两张 DT，`loadAccept` 不变，回环与 RESETGLOBAL 读数不变）。
+     *
+     * 语料根不在位 / 判不出 ⇒ `corpusRoot`/`corpusCsvDir` 直接判红（旧版两枚 `assumeTrue` 跳过）。
      */
     @Test
-    fun `VarExt 名单只有两条 SAVE_DTS`() {
-        val maybe = corpusCsvDir()
-        assumeTrue(maybe != null, "跳过：未设置 ERATW_GAMEDIR/ERATW_CORPUS 或找不到 CSV 目录")
-        val dir = maybe!!
+    fun `VarExt 名单按根取列`() {
+        val dir = corpusCsvDir()
         val csv = dir.resolve("VarExtGameData.csv")
-        assumeTrue(Files.isRegularFile(csv), "跳过：缺少 $csv")
+        if (!Files.isRegularFile(csv)) throw AssertionError("语料缺 $csv：VarExt 判据无根可对")
+        val profile = profile()
+        // 落一行到 build/save-round-trip-audit.txt：本轮实际取的是哪一列（闸复盘时对着看，免得「两根都绿」分不清）
+        report("VarExt 语料根：$dir（NOW_VERSION=${profile.nowVersion}）⇒ 取 $profile 列")
+        // 两列读数（上表；4.980 列为本路实读，4.981 列为合流头实测的原钉值）
+        val segments = when (profile) {
+            CorpusProfile.V4_980 -> 38
+            CorpusProfile.V4_981 -> 39
+        }
+        val nonEmpty = when (profile) {
+            CorpusProfile.V4_980 -> 34
+            CorpusProfile.V4_981 -> 35
+        }
+        val enabledLines = when (profile) {
+            CorpusProfile.V4_980 -> listOf("SAVE_DTS, DT_UFUFU_LOG", "SAVE_DTS, DT_UFUFU_M_LOG")
+            CorpusProfile.V4_981 -> listOf(
+                "SAVE_DTS, DT_UFUFU_LOG", "SAVE_DTS, DT_UFUFU_M_LOG", "SAVE_DTS, QOL_FISH_INSTANCE",
+            )
+        }
+        val dts = when (profile) {
+            CorpusProfile.V4_980 -> listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG")
+            CorpusProfile.V4_981 -> listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG", "QOL_FISH_INSTANCE")
+        }
 
-        // 实测：该文件是 LF 换行、无尾换行、UTF-8 BOM；按 '\n' 切出 38 段
+        // 该文件是 UTF-8 BOM、末尾无换行（4.980 用 LF、4.981 用 CRLF，故按 LF 切段后削 CR）
         val raw = String(Files.readAllBytes(csv), Charsets.UTF_8)
-        val lines = raw.trimStart(Char(0xFEFF)).split('\n').map { it.trimEnd('\r') }
-        assertEquals(38, lines.size, "按 LF 切分的段数实测 38（37 个 LF、文件末尾无换行）")
+        val lines = raw.trimStart(Char(0xFEFF)).split(Char(0x0A)).map { it.trimEnd(Char(0x0D)) }
+        assertEquals(segments, lines.size, "按 LF 切分的段数（语料 ${profile.nowVersion}，末尾无换行）")
         val trimmed = lines.map { it.trim() }
-        assertEquals(34, trimmed.count { it.isNotEmpty() }, "非空行实测 34")
-        assertEquals(4, trimmed.count { it.isEmpty() }, "空行实测 4")
-        assertEquals(32, trimmed.count { it.startsWith(";") }, "分号注释行实测 32")
+        assertEquals(nonEmpty, trimmed.count { it.isNotEmpty() }, "非空行（语料 ${profile.nowVersion}）")
+        assertEquals(segments - nonEmpty, trimmed.count { it.isEmpty() }, "空行（两根同值，实读：差恒为 4）")
+        assertEquals(32, trimmed.count { it.startsWith(";") }, "分号注释行（两根同值，实读）")
         val enabled = trimmed.filter { it.isNotEmpty() && !it.startsWith(";") }
-        assertEquals(listOf("SAVE_DTS, DT_UFUFU_LOG", "SAVE_DTS, DT_UFUFU_M_LOG"), enabled, "生效行实测原文（仅 2 条）")
+        assertEquals(enabledLines, enabled, "生效行原文（按根取列，语料 ${profile.nowVersion}）")
 
         val p = EmSaveSets.parse(dir)
-        assertEquals(listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG"), p.save.dts, "SAVE_DTS 两条")
-        assertTrue(p.save.maps.isEmpty() && p.save.xmls.isEmpty(), "SAVE_MAPS/SAVE_XMLS 全是注释行")
-        assertTrue(p.global.isEmpty, "GLOBAL_* 三张名单为空（语料 :23-:28 全注释）")
-        assertTrue(p.staticSets.isEmpty, "STATIC_* 三张名单为空（语料 :31-:35 全注释）")
-        assertEquals(listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG"), p.loadAccept.dts, "接受集 = Save* ∪ Global*（VariableData.cs:4099）")
+        assertEquals(dts, p.save.dts, "SAVE_DTS（按根取列，语料 ${profile.nowVersion}）")
+        assertTrue(p.save.maps.isEmpty() && p.save.xmls.isEmpty(), "SAVE_MAPS/SAVE_XMLS 全是注释行（两根同值，实读）")
+        assertTrue(p.global.isEmpty, "GLOBAL_* 三张名单为空（语料 :23-:28 全注释；两根同值，实读）")
+        assertTrue(p.staticSets.isEmpty, "STATIC_* 三张名单为空（语料 :31-:35 全注释；两根同值，实读）")
+        assertEquals(dts, p.loadAccept.dts, "接受集 = Save* ∪ Global*（VariableData.cs:4099）")
     }
 
     /**
@@ -711,14 +762,8 @@ class SaveRoundTripAuditTest {
     // 工具
     // ------------------------------------------------------------------
 
-    private fun readSample(name: String): SaveData? {
-        val f = sample(name)
-        if (f == null) {
-            assumeTrue(false, "跳过：找不到真实存档样本 $name")
-            return null
-        }
-        return SaveFormat.read(Files.readAllBytes(f))
-    }
+    /** 读样本；样本不在位由 [sample] 直接判红（不再有「读不到就跳过」的支）。 */
+    private fun readSample(name: String): SaveData = SaveFormat.read(Files.readAllBytes(sample(name)))
 
     /** 去掉「原样回写」依据，逼出真实压缩分支（构造参数的默认值就是 null）。 */
     private fun withoutSource(d: SaveData): SaveData = SaveData(
@@ -758,6 +803,16 @@ class SaveRoundTripAuditTest {
             is SaveEntry.IntArray3 -> b is SaveEntry.IntArray3 && a.dim0 == b.dim0 && a.dim1 == b.dim1 &&
                 a.dim2 == b.dim2 && a.values.contentEquals(b.values)
 
+            // 浮点用 contentEquals/toRawBits 比：`DoubleArray.contentEquals` 走 Arrays.equals，
+            // 把两个同尾数 NaN 判等、把 `-0.0` 与 `0.0` 判不等 ⇒ 与「逐位一致」的口径一致
+            is SaveEntry.FloatValue -> b is SaveEntry.FloatValue && a.value.toRawBits() == b.value.toRawBits()
+            is SaveEntry.FloatArray1 -> b is SaveEntry.FloatArray1 && a.values.contentEquals(b.values)
+            is SaveEntry.FloatArray2 -> b is SaveEntry.FloatArray2 && a.dim0 == b.dim0 && a.dim1 == b.dim1 &&
+                a.values.contentEquals(b.values)
+
+            is SaveEntry.FloatArray3 -> b is SaveEntry.FloatArray3 && a.dim0 == b.dim0 && a.dim1 == b.dim1 &&
+                a.dim2 == b.dim2 && a.values.contentEquals(b.values)
+
             is SaveEntry.StrValue -> b is SaveEntry.StrValue && a.value == b.value
             is SaveEntry.StrArray1 -> b is SaveEntry.StrArray1 && a.values.contentEquals(b.values)
             is SaveEntry.StrArray2 -> b is SaveEntry.StrArray2 && a.dim0 == b.dim0 && a.dim1 == b.dim1 &&
@@ -783,4 +838,5 @@ class SaveRoundTripAuditTest {
         }
         println(line)
     }
+
 }

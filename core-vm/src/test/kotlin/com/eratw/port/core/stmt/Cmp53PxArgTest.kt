@@ -23,13 +23,15 @@ import kotlin.test.assertTrue
  *    （spec: ArgumentParser.cs:77-90、:126-140）。
  *
  * 因此 `100 px` 合法（`px` 是独立 IdentifierWord，数字与 px 之间的空格由词法层吃掉），
- * 而 `100px` 粘连形在**纯词法层**根本产生不了 px 词：ReadInt64 把数字后的 `p` 当二进制
- * 指数、指数位不是数字时直接抛错（spec: LexicalAnalyzer.cs:66-73、:216-221）。
- * 移植侧既有图形语句用例与自产快照全是粘连形 ⇒ `ArgBuilders.spaceOutPxUnit` 在引号外先拆成
- * `100 px` 再交给词法层（保持既有读数；原版是否会放行粘连形无 PC 样本可证，见下方用例）。
+ * 而 `100px` 粘连形**词法必拒**（B4，2026-11-06 翻案落定）：数字字面量由 `ReadInt64` 吃进
+ * （LexicalAnalyzer.cs:765），`readDigits` 吃完数字后游标停在 `p`，:66-68 把它当 2 进制
+ * 指数标记，ShiftNext 后指数位是 `x`，第二次 `readDigits` 得空串 → `long.Parse("")` 抛
+ * FormatException → :149-152 转 CodeEE(CanNotConvertToInt)，上屏 `""を整数値に変換できません`。
+ * 移植侧词法器同链条复刻（core/lexer/LexicalAnalyzer.kt readInt64/readDigits），曾有的
+ * 「引号外拆成 `100 px`」放行近似（spaceOutPxUnit）已撤销 —— 粘连文本原样进词法层即同形拒绝。
  * 旧实现按原文剥末两字符的另一处偏离（把 `100 px + 1` 静默当单位）已按原版收掉。
  *
- * 语料 PRINT_IMG / PRINT_RECT / PRINT_SPACE 实测 0 处 ⇒ 本次接线对语料字节中性。
+ * 语料 PRINT_IMG / PRINT_RECT / PRINT_SPACE 实测 0 处 ⇒ 本次翻案对语料字节中性。
  */
 class Cmp53PxArgTest {
 
@@ -104,22 +106,24 @@ class Cmp53PxArgTest {
     }
 
     @Test
-    fun `粘连写法的 px 与空格式读数相同`() {
-        // 原版词法上 px 必须自成一词，`20px` 粘连形进不了 px 关键字位（ReadInt64 把 `p`
-        // 当二进制指数，指数位不是数字即抛，spec: LexicalAnalyzer.cs:216-221）。移植侧既有
-        // 图形语句测试与自产快照用的全是粘连形 ⇒ ArgBuilders 在**引号外**先拆成 `20 px`
-        // 再交给词法层（spaceOutPxUnit），于是两式同解；不改这条既有读数属保守口径，
-        // TODO(verify)：原版对 `20px` 报错还是接受，需 PC 侧 oracle 实跑（语料 0 处，无样本）。
-        val glued = assertIs<SpPrintShapeArgument>(parse("PRINT_RECT 10, 10, 20px, 20").args)
-        val spaced = assertIs<SpPrintShapeArgument>(parse("PRINT_RECT 10, 10, 20 px, 20").args)
-        assertEquals(listOf(false, false, true, false), glued.param.map { it.isPx })
-        assertEquals(spaced.param.map { it.isPx }, glued.param.map { it.isPx }, "粘连形与空格式逐位同解")
+    fun `粘连写法的 px 词法必拒`() {
+        // 翻案依据（B4，原「与空格式同解」断言撤销）：数字字面量由 ReadInt64 吃进
+        // （LexicalAnalyzer.cs:765），readDigits 吃完 `20` 后游标停在 p，:66-68 当 2 进制
+        // 指数标记，ShiftNext 后指数位是 x，第二次 readDigits 得空串 → long.Parse("") 抛
+        // FormatException → :149-152 转 CodeEE(CanNotConvertToInt)。移植侧词法器同链条
+        // （core/lexer/LexicalAnalyzer.kt readInt64/readDigits），报同一句日文原文。
+        val e = assertFailsWith<StmtParseException> { parse("PRINT_RECT 10, 10, 20px, 20") }
+        // 内层词法错误文案 = CanNotConvertToInt 空串形（LexError 被 LineParser 包成 StmtParseException）
+        assertTrue(e.message!!.contains("\"\"を整数値に変換できません"), e.message)
+        // 大写粘连形同拒：ReadInt64 的指数判定对 p/P 都生效（LexicalAnalyzer.cs:66）
+        assertFailsWith<StmtParseException> { parse("PRINT_SPACE 5PX") }
     }
 
     @Test
-    fun `拆词只认数字尾巴的 px，不吃文件后缀与标识符`() {
-        // `a.webp` 在引号内（p 后不是 x 也不是单位位）、`50` 无单位 —— 都不该被动到
-        val arg = assertIs<SpPrintImgArgument>(parse("PRINT_IMG \"a.webp\", 10, 10, 20px").args)
+    fun `文件后缀的 webp 不受 px 词法影响`() {
+        // `a.webp` 在引号内（串字面量不经 ReadInt64）、`20 px` 是空格分词的合法单位 ——
+        // 词法层只对「数字后直接粘连 p/P」报错
+        val arg = assertIs<SpPrintImgArgument>(parse("PRINT_IMG \"a.webp\", 10, 10, 20 px").args)
         assertNotNull(arg.name, "第 1 参（含 .webp 的串）照常交出")
         val params = assertNotNull(arg.param)
         assertEquals(listOf(false, false, true), params.map { it.isPx })

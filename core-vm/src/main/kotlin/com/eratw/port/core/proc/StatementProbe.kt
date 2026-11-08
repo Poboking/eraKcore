@@ -27,16 +27,20 @@ import java.util.BitSet
  *
  * ## 为什么给 op / index 而不是语句实例（T2-64 波次 C）
  *
- * 波次 C 起运行期主路径是扁平语句池（[com.eratw.port.core.sem.FlatStmtSource]），语句树
- * 在装载期压扁后即弃；探针若是「按实例」的签名，桥里每条回调都得 `Program.statement(index)`
- * 物化一次树（真语料 171.7 万条池），等于把刚弃置的常驻开销按调试开关重新买回来。
- * 只传两个 int 后：**要计数的探针零取用**（`env.pc` 就够），要树的探针自己
- * `program.statement(index)` 按需还原（vmdbg 的 trace 摘要就是这条口径）。
+ * 生产默认通道是**对象树**（[ProcessRuntime.executeStatement] 的 `Statement` 重载：
+ * Android 侧 `GameHost` 的 flatStatements 缺省 false ⇒ `Program.flatStmtSource` 恒 null ⇒
+ * `Vm.kt:1866-1874` 走 `statementOf(index)`），那条通道上语句实例本来就在手边。
+ * 扁平语句池（[com.eratw.port.core.sem.FlatStmtSource]）是 `files/flat-statements.on` /
+ * `--ez eratwFlatStatements true` 打开的**归因装置通道**，走它时语句树不保证常驻；
+ * 若探针签名是「按实例」的，桥里每条回调都得 `Program.statement(index)` 物化一次树
+ * （真语料 171.7 万条池），等于把归因开关的开销再买一遍。
+ * op/index 两个 int 对两条通道都成立：**要计数的探针零取用**（`env.pc` 就够），要树的探针
+ * 自己 `program.statement(index)` 按需还原（vmdbg 的 trace 摘要就是这条口径）。
  *
  * [op] = 语句的 `FunctionCode.ordinal`（与 [com.eratw.port.core.sem.FlatStmtSource.opAt]
  * 同口径，见 `code/FlatStatements.kt` 编码表的槽 1）；[index] = 语句池下标。
- * 旧树通道（`VmHost.executeStatement(stmt, env)`，只在没有扁平池的装置里走到）拿不到下标，
- * 按 [NO_STMT_INDEX] 回调。
+ * 对象树通道（`VmHost.executeStatement(stmt, env)`，**Android 生产默认**：没有扁池就走它）
+ * 拿不到下标，按 [NO_STMT_INDEX] 回调；扁平通道给真实下标。
  */
 fun interface StatementProbe {
     fun onStatement(op: Int, index: Int, env: StmtEnv, outcome: StmtOutcome?, error: Throwable?, elapsedNs: Long)
@@ -62,7 +66,7 @@ fun interface StatementProbe {
 
     companion object {
         /**
-         * [onStatement] 的 `index` 哨兵：旧树通道（非扁平池）拿不到语句池下标时使用。
+         * [onStatement] 的 `index` 哨兵：对象树通道（非扁平池，Android 生产默认）拿不到语句池下标时使用。
          * 探针实现不得把它当下标去查池（`Program.statement(-1)` 抛越界）。
          */
         const val NO_STMT_INDEX: Int = -1

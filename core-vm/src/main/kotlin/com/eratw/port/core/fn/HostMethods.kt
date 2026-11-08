@@ -56,7 +56,7 @@ internal fun registerHostMethods(r: BuiltinRegistry) {
     // 大小写不敏感，语料里 `bad-apple-audio.MP3` 对磁盘 `bad-apple-audio.mp3`，两条若各判各的
     // 就会出现「EXISTSOUND=0 但能播出声」的自相矛盾。
     r.register(BuiltinMethod("EXISTSOUND", I, 1, 1) { c, a ->
-        val name = sv(a[0]!!)
+        val name = requiredStrArg(a, 0, "EXISTSOUND")
         val root = c.host.soundDir ?: File("sound")
         Value.IntV(if (SoundResourcePaths.resolve(root, name) != null) 1L else 0L)
     })
@@ -217,7 +217,7 @@ internal fun registerFileMethods(r: BuiltinRegistry) {
     // Directory.Exists(file)=False），故目录要先被 [isDirectoryOf] 认出来再扣掉。
     r.register(BuiltinMethod("EXISTFILE", I, 1, 1) { c, a ->
         val ops = c.host.fileOps ?: throw CodeEE("函数 EXISTFILE 需要宿主接线 FileOps")
-        val p = getValidPath(sv(a[0]!!)) ?: return@BuiltinMethod Value.IntV(0L)
+        val p = getValidPath(requiredStrArg(a, 0, "EXISTFILE")) ?: return@BuiltinMethod Value.IntV(0L)
         val isDir = isDirectoryOf(ops, p)
         Value.IntV(if (ops.exists(p) && !isDir) 1L else 0L)
     })
@@ -227,10 +227,13 @@ internal fun registerFileMethods(r: BuiltinRegistry) {
     // `force ? ForceSavDir : SavDir`（:7978）——见 [saveDataTextPath]。
     r.register(BuiltinMethod("SAVETEXT", I, 2, 4) { c, a ->
         val ops = c.host.fileOps ?: throw CodeEE("函数 SAVETEXT 需要宿主接线 FileOps")
-        val text = sv(a[0]!!)
+        val text = requiredStrArg(a, 0, "SAVETEXT")
         val force = optInt(a, 2, 0L) != 0L
+        // 位置 3（可省位）空位：原版 CheckArgumentTypeEx 静默放行后 `arguments[3].GetIntValue`
+        // 解引用崩溃（FunctionMethod.cs:198-205 continue → FunctionMethodCreator.cs:7965），
+        // Kotlin `!!` NPE 同形复刻（ADR-005），故不用 argInt 收敛。
         if (a.size > 3) iv(a[3]!!) // 原版求值即丢弃（:7963-7968）
-        val path = when (val target = a[1]!!) {
+        val path = when (val target = requiredValueArg(a, 1, "SAVETEXT")) { // 位置 1 < OmitStart=2 ⇒ 必填（:7952）
             is Value.IntV -> {
                 val n = target.v
                 if (n < 0 || n > Int.MAX_VALUE) return@BuiltinMethod Value.IntV(0L) // :7973-7976
@@ -257,8 +260,10 @@ internal fun registerFileMethods(r: BuiltinRegistry) {
     r.register(BuiltinMethod("LOADTEXT", S, 1, 3) { c, a ->
         val ops = c.host.fileOps ?: throw CodeEE("函数 LOADTEXT 需要宿主接线 FileOps")
         val force = optInt(a, 1, 0L) != 0L
+        // 位置 2（可省位）空位：同 SAVETEXT 位置 3，原版放行后解引用崩溃（:8048-8051），
+        // NPE 同形复刻（ADR-005）。
         if (a.size > 2) iv(a[2]!!) // 原版求值即丢弃（:8046-8051）
-        val path = when (val target = a[0]!!) {
+        val path = when (val target = requiredValueArg(a, 0, "LOADTEXT")) {
             is Value.IntV -> {
                 val n = target.v
                 if (n < 0 || n > Int.MAX_VALUE) return@BuiltinMethod Value.StrV("") // :8056-8059
@@ -270,10 +275,18 @@ internal fun registerFileMethods(r: BuiltinRegistry) {
                 p
             }
         }
-        val text = ops.readText(path) ?: return@BuiltinMethod Value.StrV("") // :8076-8079（File.Exists）
-        // :8082 `File.ReadAllText(path, EncodingHandler.DetectEncoding(path))`：解码三段回退
-        // （BOM → UTF-16/32 BOM → 严格 UTF-8 → CP932，EncodingHandler.cs:15-41）在宿主
-        // `RootedFileOps.readText`；解码失败 ⇒ 该重载抛 ⇒ 原版 :8084-8087 的 catch 给 ""。
+        // :8082 `File.ReadAllText(path, EncodingHandler.DetectEncoding(path))` 整段包在
+        // `try { … } catch { return ""; }`（:8081-8087）——**任何**读/解码异常都折成空串：
+        // 权限、坏盘、文件在枚举与读取之间被删、宿主实现直接抛，一条都不许冒到语句层。
+        // `RootedFileOps.readText` 自己已把失败收成 null，但 [FileOps] 的契约只承诺
+        // 「读不到给 null」、没有承诺「不抛」，这里补上原版那道 catch，异常与 null 同路。
+        // 解码三段回退（BOM → UTF-16/32 BOM → 严格 UTF-8 → CP932，EncodingHandler.cs:15-41）
+        // 在宿主 `RootedFileOps.readText`。
+        val text = try {
+            ops.readText(path)
+        } catch (_: Exception) {
+            null // :8084-8087
+        } ?: return@BuiltinMethod Value.StrV("") // :8076-8079
         // 解出来的串里理论上不会有编码前导符（StreamReader 消费它），但内存宿主/旧宿主可能把
         // U+FEFF 当正文交上来，故仍按原版口径剥掉**唯一的前导** U+FEFF，随后做 :8088 的 \r 去除。
         Value.StrV(stripLeadingBom(text).replace("\r", "")) // :8082 / :8088
@@ -446,14 +459,7 @@ private fun hasValidExtension(p: String, valid: List<String>): Boolean = valid.c
  * `Config.CreateSavDir()` / `Directory.CreateDirectory`，:7996-8007）。
  */
 private fun saveDataTextPath(c: BuiltinContext, index: Int, force: Boolean): String =
-    (if (force) "sav/" else saveFolderPrefix(c)) + "txt%02d.txt".format(java.util.Locale.ROOT, index)
-
-/** `Config.SavDir` 的相对前缀（`Config.cs:471-481`）：`UseSaveFolder` 真 ⇒ `sav/`，假 ⇒ 根目录。 */
-private fun saveFolderPrefix(c: BuiltinContext): String {
-    val useSaveFolder = SaveWiring.of(c.store)?.config?.useSaveFolder
-        ?: ConfigMethods.useSaveFolder(c)
-    return if (useSaveFolder) "sav/" else ""
-}
+    (if (force) "sav/" else ConfigMethods.saveFolderPrefix(c)) + "txt%02d.txt".format(java.util.Locale.ROOT, index)
 
 /**
  * epoch 毫秒 → [年, 月(1-12), 日, 时, 分, 秒, 毫秒]，按 [zone] 取日历字段。

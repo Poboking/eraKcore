@@ -6,7 +6,7 @@ import com.eratw.port.core.vars.DimVarSizes
 import com.eratw.port.erbcc.DimKeyword
 import com.eratw.port.erbcc.DimSpec
 import com.eratw.port.erbcc.LabelDef
-import com.eratw.port.erbcc.SymbolTable
+import com.eratw.port.erbcc.LabelTable
 import org.junit.jupiter.api.Assumptions
 import java.nio.file.Files
 import java.nio.file.Path
@@ -132,7 +132,7 @@ class DimSpecValidationTest {
         Assumptions.assumeTrue(!raw.isNullOrBlank(), "未提供语料路径，跳过全量读数")
         val corpus = Path.of(raw!!)
         Assumptions.assumeTrue(Files.isDirectory(corpus), "语料目录不存在: $corpus")
-        val table = SymbolTable.build(corpus)
+        val table = LabelTable.build(corpus, sizeConsts = ::sizeConsts)
         val consts = sizeConsts(table)
         val folder = DimFunctionFolders.pureStatic(DimVarSizes.systemSnapshot(corpus.parent?.resolve("CSV")))
         var total = 0

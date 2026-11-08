@@ -2,6 +2,7 @@ package com.eratw.port.core.stmt
 
 import com.eratw.port.core.expr.Binary
 import com.eratw.port.core.expr.Expr
+import com.eratw.port.core.expr.FloatLiteral
 import com.eratw.port.core.expr.FormConversion
 import com.eratw.port.core.expr.FormPart
 import com.eratw.port.core.expr.FormStringTerm
@@ -48,19 +49,21 @@ import java.lang.reflect.Modifier
  *
  * ## 语义边界
  *
- * - `Expr` 的 `line`/`col` **不参与结构比较**：运行期零读者（求值/sem/Vm 都不读，只有
- *   编译期报错定位与 `.erbc` 落盘用；`ExprCanonicalizer` 已在编译期把它们归一）。
- *   因此合并后结点取**代表实例**的 `line`/`col`；重建（重建走的是同一结点的子结点替换）
- *   则原样保留本结点的 `line`/`col`。落盘路径不受影响：erbcc 在**去重之前**写 `.erbc`，
- *   装载后不再回写；去重后再编码只可能在 `line`/`col` 列上与原件不同。
+ * - `Expr` 的 `line`/`col` **参与结构比较**（INTERN-STMT）：规约 `specs/erbc-format.md` §5.3 钉了
+ *   「`line`/`col` 必须逐字往返……两条只差行列号的表达式会被错误合并」，而 `ErbcWriter` 的
+ *   `RecordSink.memo` 正是按 `Expr` 的 data class 相等（含行列号）去重节点记录。因此折叠的判据是
+ *   **逐字段全等（含行列号）**：合并前后读回的 `Expr` 值一字不差 ⇒ 装载后再编码逐字节不变。
+ *   行列号仍在运行期零读者（求值/sem/Vm 都不读），参与比较只为落盘与相等性这两个读者服务。
+ *   跨语句折叠的收益没有被关掉：源码直编产物在发射 marker 前已由
+ *   `com.eratw.port.core.compile.ExprCanonicalizer` 把语句树的 `line`/`col` 归一为 -1，
+ *   同一形态的结点在折叠表里仍然逐字段全等 ⇒ 照样收敛为单实例；`.erbc` 装载侧的同一形态结点
+ *   本就来自同一张节点表（同下标恒同一实例），折叠退化为幂等，省下的只是「同形异行列号」
+ *   那一笔**本就不该省**的合并。
  * - **池根例外**（CMP-15）：表达式池根（`Program.internStatementArgs` / `LazyStatementRecords`
  *   的种子段）走**只登记、不替换** —— 池根实例与池内子树一个都不换，只让语句侧让位。
- *   不能把 `line`/`col` 塞进全局形状表来修这件事：语句参数在每条语句上带自己的行号，
- *   一旦它们参与比较，跨语句折叠（`PoolExprShareTest` 钉死的 M6-MEMCODE 行为）会整个失效；
- *   而真正需要保真的只有「池根能被 `program.expr(k)` 逐字段读回」这一处。
- *   种子段的「不替换」只是**一半**：语句侧去重会把池内代表写进语句的参数列表，之后
- *   再次走到这些结点时若就地改写列表字段，同样会改掉池内结点。因此 `Expr` 的列表字段
- *   （`VarRef.indices` / `FuncCall.args` / `FormStringTerm.parts`）一律走
+ *   这条模式仍然必须留着：语句侧的**容器列表**（`Argument` 家族的 `terms` 等）由
+ *   [internElements] 就地改写，池根列表一旦在那里被写回，就等于就地顶掉池根。
+ *   `Expr` 的列表字段（`VarRef.indices` / `FuncCall.args` / `FormStringTerm.parts`）一律走
  *   [canonicalizeElements] 的**写时复制**；只有语句自己的容器列表（`Argument` 家族等）
  *   才由 [internElements] 就地改写。缺了这条，`MmapLoaderTest` 的真语料差分会在
  *   `program.expr(k)` 的 `line`/`col` 上红（2026-10-24 合流后实测）。
@@ -155,9 +158,11 @@ internal class ArgInterner(
     /**
      * 种子段标记（见 [internStatement]）：表达式池根**只登记、不替换**。
      *
-     * 这条模式存在的唯一理由：`Expr` 的 `line`/`col` 不进形状表（跨语句折叠必须忽略它们），
-     * 而表达式池根的实例身份与逐字段值必须保真（`program.expr(k)` 的 data class 相等 +
-     * `.erbc` 再编码逐字节）。两者只能靠「对谁生效」分开 —— 见类 KDoc 的「池根例外」。
+     * 这条模式存在的原因：表达式池根的实例身份与逐字段值必须保真（`program.expr(k)` 的
+     * data class 相等 + `.erbc` 再编码逐字节），而语句侧的容器列表是**就地改写**的
+     * （[internElements]）—— 种子段一旦允许替换，池根就会被同形态的更早实例顶掉（CMP-15）。
+     * `Expr` 的 `line`/`col` 已进形状表（INTERN-STMT），所以「同形异行列号」的结点不再互相
+     * 折叠；「同值异实例」的折叠仍然只让语句侧让位，池根一个不换。
      */
     private var seedMode = false
 
@@ -415,7 +420,7 @@ internal class ArgInterner(
 
     @Suppress("UNCHECKED_CAST")
     private fun rebuildExpr(e: Expr): Expr = when (e) {
-        is IntLiteral, is NullTerm -> e
+        is IntLiteral, is NullTerm, is FloatLiteral -> e
         is StrLiteral -> {
             val v = internString(e.value)
             if (v === e.value) e else StrLiteral(v, e.line, e.col)
@@ -684,7 +689,7 @@ internal class ArgInterner(
      * 反射形状表（每类一次）。
      *
      * - 跳过静态字段与 `Statement.rawSlot`（原文槽，与参数树无关）；
-     * - `Expr` 的 `line`/`col` 跳过（运行期零读者，见类 KDoc）；
+     * - `Expr` 的 `line`/`col` 作为**原子参与比较**（INTERN-STMT，见类 KDoc 的「语义边界」）；
      * - 基本类型 / 装箱 / String / 枚举 / **全部数组** 是原子（[isAtomFieldType]），
      *   其余对象字段是子结点。
      *
@@ -736,7 +741,15 @@ internal class ArgInterner(
                 //    （2026-10-26 实测 e2e 全量执行后反射进 `java.util.HashSet` 内部字段抛
                 //    `InaccessibleObjectException`）。新加运期缓存请一律挂 `@Transient`。
                 if (Modifier.isTransient(f.modifiers)) continue
-                if (isExpr && (f.name == "line" || f.name == "col")) continue
+                // `Expr` 的 `line`/`col` **参与结构比较**（INTERN-STMT，规约 `specs/erbc-format.md` §5.3
+                // 「line/col 必须逐字往返……两条只差行列号的表达式会被错误合并」）：
+                // 折叠只允许发生在「逐字段全等（含行列号）」的结点之间，合并后的代表实例读回的值
+                // 与被换掉的结点一字不差 ⇒ `.erbc` 再编码逐字节不变（`ErbcWriter` 的 `RecordSink.memo`
+                // 正是按 `Expr` 的 data class 相等去重）。
+                // 旧口径把行列号整体跳过，于是「同形异行列号」的结点会被折进先登记的那个代表：
+                // 全读档（`Program.internStatementArgs` 的种子段 + 语句段）因此把语句侧结点换成
+                // 池内代表，落盘行列号随之漂移 ⇒ 与映射档的再编码不再逐字节相同
+                // （`MappedCodeSourceTest` 真实产物用例，首差偏移 26 = 段表 FUNCTION_TABLE 起点）。
                 // isAccessible 是 Java 1.1 API（桌面/ART 全版本可用）。原实现 trySetAccessible()
                 // （Java 9+）在 Android 反射面缺失：core-vm 以 JVM 模块编译出的调用在真机上抛
                 // NoSuchMethodError，被 runCatching 吞成 false ⇒ **所有字段被静默 continue 跳过**

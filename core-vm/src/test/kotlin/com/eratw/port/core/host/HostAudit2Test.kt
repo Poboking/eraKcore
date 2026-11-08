@@ -53,8 +53,9 @@ class HostAudit2Test {
         for (cp in intArrayOf(0x0000, 0x0009, 0x001F, 0x007F, 0x0080)) {
             assertEquals(1, CellWidth.ofCodePoint(cp), "控制符 U+%04X".format(cp))
         }
-        // 4. ¥ 走 932 的 best-fit 回 0x5C
+        // 4. ¥ 走 932 的 best-fit 回 0x5C；‾（U+203E）是 0x7E 的真实单字节映射（W8 刀五补档）
         assertEquals(1, CellWidth.ofCodePoint(0x00A5), "U+00A5")
+        assertEquals(1, CellWidth.ofCodePoint(0x203E), "U+203E")
         // 全角侧：全角空格、CJK、全角标点
         for (cp in intArrayOf(0x3000, 0x4E00, 0xFF01, 0x2501)) {
             assertEquals(2, CellWidth.ofCodePoint(cp), "全角 U+%04X".format(cp))
@@ -82,13 +83,13 @@ class HostAudit2Test {
      * `U+203E`：CP932 的 0x7E 真实单字节映射（`windows-31J` 实测 `E2 80 BE` → `7e`），
      * 与 `U+00A5` ↔ `0x5C` 对称 ⇒ 按 `EmueraConsole.cs:3255` 的字节数口径应为 **1 格**。
      *
-     * 本表暂按 2 格（唯一表补它会撞 `render` 的 D 类表 35 个码点断言，见 `CellWidth`
-     * 末尾的 TODO(verify)）—— 这里钉住**现状**，等跨模块同批改完把期望改成 1。
+     * W8 刀五落地：本表已把它补进第 4 档；`render` 的 D 类表同批改 4 段 36 个
+     * （`GridWidthSingleSourceTest`），跨模块锚点已交代。
      */
     @Test
-    fun `U+203E 现状按全角计（已登记的缺口）`() {
-        assertEquals(2, CellWidth.ofCodePoint(0x203E))
-        assertEquals(3, CellWidth.of("a\u203E"))
+    fun `U+203E 走单字节真实映射档`() {
+        assertEquals(1, CellWidth.ofCodePoint(0x203E))
+        assertEquals(2, CellWidth.of("a\u203E"))
     }
 
     // ------------------------------------------------------------------
@@ -303,7 +304,8 @@ class HostAudit2Test {
         assertEquals(listOf(0x1F), bytes(0x001F))
         assertEquals(listOf(0x7F), bytes(0x007F))
         assertEquals(1, bytes(0x0080).size, "U+0080 替换回退仍 1 字节")
-        // 第 4 档 ¥ ↔ 0x5C；待补的 U+203E ↔ 0x7E 是同一条口径的另一半
+        // 第 4 档 ¥ ↔ 0x5C 与 U+203E ↔ 0x7E 是同一条口径的两个真实单字节映射
+        // （W8 刀五把后者补进表内；前者的字节读数本来就钉着）
         assertEquals(listOf(0x5C), bytes(0x00A5))
         assertEquals(listOf(0x7E), bytes(0x203E))
         // 全角侧双字节 ⇒ 2 格（基准 :61 的 99 个 `━` 钉住的就是这一档）
@@ -316,17 +318,18 @@ class HostAudit2Test {
     }
 
     /**
-     * 表外字（含组合符 `Mn`、emoji、`U+203E`）的**当前**读数一律 2 格。
+     * 表外字（组合符 `Mn`、emoji、`U+301C` 这类替换回退 `3F` 的字形）的**当前**读数一律 2 格。
      * 上面那条用例给出字节数口径（1 字节）与像素口径（组合符并进基字簇）都不是 2 ——
-     * 分叉的登记与卡点见 `CellWidth.isFullWidth` 末尾三个 TODO(verify)；本用例只钉现状，
+     * 分叉的登记与卡点见 `CellWidth.isFullWidth` 末尾两个 TODO(verify)；本用例只钉现状，
      * 谁改判必须同时动 `render` 的 D 类表与本用例。
+     * （`U+203E` 不属于本族：它是真实 `0x7E` 单字节映射，W8 刀五已补进第 4 档。）
      *
      * `e` + `U+0301` = 3 格正是 `core/fn/GraphicsGfxAuditTest.kt:294` 那条
      * 「PC 8 像素 vs 移植侧 24 像素」里 24 的来源（退化网格 = 格数 x sizePx / 2，size=16）。
      */
     @Test
     fun `表外字与组合符当前一律 2 格`() {
-        for (cp in intArrayOf(0x0300, 0x0301, 0x0344, 0x1F600, 0x301C, 0x203E)) {
+        for (cp in intArrayOf(0x0300, 0x0301, 0x0344, 0x1F600, 0x301C)) {
             assertEquals(2, CellWidth.ofCodePoint(cp), "U+%04X".format(cp))
         }
         assertEquals(3, CellWidth.of("e\u0301"), "e(1) + 组合符 U+0301(2) —— 字簇步进缺失的直接读数")

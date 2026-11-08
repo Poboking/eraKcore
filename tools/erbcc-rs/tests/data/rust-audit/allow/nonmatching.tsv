@@ -1,0 +1,2 @@
+# 越权放行档：把 2 列写成不存在的 functionKey 形状（3 列），必须不匹配
+VAR_UNBOUND	AUDIT_NOT_A_FUNC	AUDIT_NO_SUCH_VAR_A1

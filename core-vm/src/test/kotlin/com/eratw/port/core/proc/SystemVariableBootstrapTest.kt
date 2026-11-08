@@ -93,6 +93,31 @@ class SystemVariableBootstrapTest {
     }
 
     @Test
+    fun `位运算常量初值注册成功（COMF641 能力卡 BIT 配列实形）`() {
+        // 上报端点 1793715846086：`未定义的变量 COM641_AC_カードタイプ付与BIT配列`。
+        // 语料 `COMF641 アビリティカード_カードパラメータ.ERH:225-260` 的 CONST 初值
+        // 用 `1 << … | 1 << …`，折叠器原先不认 `|` ⇒ 整条声明失败、变量不进池。
+        val store = VariableStore()
+        val result = SystemVariableBootstrap.install(
+            store,
+            listOf(
+                decl("#DIM CONST COM641_AC_カードIDX_特殊効果 = 4", "COMF641.ERH", 10),
+                decl(
+                    "#DIM CONST COM641_AC_カードタイプ付与BIT配列 = " +
+                        "1 << COM641_AC_カードIDX_特殊効果 | 1 << 0, 1 << 2",
+                    "COMF641.ERH",
+                    20,
+                ),
+            ),
+        )
+
+        assertEquals(2, result.declared, "失败：${result.failures}")
+        assertEquals(17L, store.readInt("COM641_AC_カードタイプ付与BIT配列", longArrayOf(0L)))
+        assertEquals(4L, store.readInt("COM641_AC_カードタイプ付与BIT配列", longArrayOf(1L)))
+        assertTrue(store.isConst("COM641_AC_カードタイプ付与BIT配列"))
+    }
+
+    @Test
     fun `重名声明记失败但不中断后续`() {
         val store = VariableStore()
         val result = SystemVariableBootstrap.install(

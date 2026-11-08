@@ -7,7 +7,6 @@ import com.eratw.port.core.proc.RootedBuiltinHost
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -34,10 +33,11 @@ import kotlin.test.assertTrue
  *   两侧分区都是官方行为，原样保留（ADR-005）。
  *
  * 语料判据（画蛇添足版 4.980 实测，只读）：三层全在位 —— `CSV/_default.config` 17 行、
- * `emuera.config` 97 行、`CSV/_fixed.config` 8 行；default 的 17 键与 fixed 的 8 键都被
+ * 4.981 `emuera.config` 103 行（4.980 为 97，多出 6 条未知新键）、`CSV/_fixed.config` 8 行；default 的 17 键与 fixed 的 8 键都被
  * `emuera.config` 的 96 键覆盖且值一致 ⇒ 链合并值与单层相同、差别只有 `fixed` 层钉位；
  * 真语料**没有** `debug/` 目录 ⇒ debug 层恒 ABSENT、DEBUG 七条保持注册默认。
- * 语料用例吃 `ERATW_GAMEDIR` 环境变量，未设置或缺文件时按 skipped 计。
+ * 语料用例吃 `ERATW_GAMEDIR` 环境变量；未设置、指到的不是语料根、或缺任一层 ⇒ 判红
+ * （不按 skipped 计 —— 跳过会让这道闸静默失效）。
  */
 class ConfigChainWireTest {
 
@@ -197,23 +197,27 @@ class ConfigChainWireTest {
     }
 
     // ------------------------------------------------------------------
-    // 语料真实文件（吃 ERATW_GAMEDIR，缺失按 skipped 计）
+    // 语料真实文件（吃 ERATW_GAMEDIR，缺失即判红，不跳过）
     // ------------------------------------------------------------------
 
     @Test
     fun `语料三层经宿主接线全在位且合并值与单层一致`() {
         val gameDir = corpusGameDir()
+        // 按根取列（configroot 波 2026-11-05）：尺子复用 corpusroot 路的 CorpusProfile.detect，
+        // 认不出根 / 版本不在册由它自己判红。旧实现把 4.981 的 103 行写死，于是 §5 标准闸
+        // （ERATW_GAMEDIR 恒指 4.980）下这一枚恒红。
+        val profile = com.eratw.port.boot.CorpusProfile.detect(gameDir)
         val host = RootedBuiltinHost(gameDir)
         val load = host.configChain
 
         assertEquals(ConfigLayerPresence.PRESENT, load.layer(ConfigChainRole.DEFAULT).presence)
         assertEquals(ConfigLayerPresence.PRESENT, load.layer(ConfigChainRole.EMUERA).presence)
         assertEquals(ConfigLayerPresence.PRESENT, load.layer(ConfigChainRole.FIXED).presence)
-        assertEquals(17, load.defaultLineCount, "CSV/_default.config 17 行")
-        assertEquals(97, load.emueraLineCount, "emuera.config 97 行")
-        assertEquals(8, load.fixedLineCount, "CSV/_fixed.config 8 行")
-        assertEquals(listOf(17, 96, 8), load.perLayerKeys.map { it.size }, "emuera 层 96 = 97 行 − 1 行 CLIPBOARD- ANYKEY WAIT TRIGGER 匹配不上（EditorArgument 空值行按 DIRECT_ASSIGNED 计，ConfigData.cs:564-568）")
-        assertEquals(96, load.touchedKeys.size, "default 的 17 键与 fixed 的 8 键都被 emuera 的 96 键覆盖")
+        assertEquals(17, load.defaultLineCount, "CSV/_default.config 17 行（两根同值）")
+        assertEquals(profile.emueraConfigLineCount, load.emueraLineCount, "$gameDir/emuera.config 行数：认到 $profile ⇒ 期望 ${profile.emueraConfigLineCount}")
+        assertEquals(8, load.fixedLineCount, "CSV/_fixed.config 8 行（两根同值）")
+        assertEquals(listOf(17, 96, 8), load.perLayerKeys.map { it.size }, "emuera 层恒 96 = 行数 − 匹配不上的行数（4.980 为 97−1、4.981 为 103−7；4.981 多出的 6 行全是未知键行，不落条目）。EditorArgument 空值行按 DIRECT_ASSIGNED 计，ConfigData.cs:564-568")
+        assertEquals(96, load.touchedKeys.size, "default 的 17 键与 fixed 的 8 键都被 emuera 的 96 键覆盖（两根同值）")
 
         // 链合并值与单层相同：把 emuera 层单独读进新表，逐条比全量快照
         val emueraOnly = ConfigStore()
@@ -303,16 +307,31 @@ class ConfigChainWireTest {
 
     /**
      * 语料游戏根目录（`ERATW_GAMEDIR` 指向的那层，含 `emuera.config` 与 `CSV` 两层配置）。
-     * 不猜路径：环境变量未设置或三层缺一即 assumeTrue 跳过（按 skipped 计数）。
+     * 口径与 `ConfigChainTest.corpusRoot()` 同源：不猜路径；环境变量未设置、或三层缺一
+     * **一律 AssertionError 判红**（并打印已经认到的证据）。
+     * 旧实现是四枚 `assumeTrue`：没导出变量 ⇒ 用例静默 skipped，闸是假的（cfgolden 波 2026-11-06 拆掉）。
      */
     private fun corpusGameDir(): Path {
         val env = System.getenv("ERATW_GAMEDIR")
-        assumeTrue(env != null, "ERATW_GAMEDIR 未设置：跳过三层链接线判据")
-        val dir = Paths.get(env!!)
+            ?: run {
+                // 公开仓无外部语料/样本：按公开适配口径跳过（上游为硬判红）。
+                org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_GAMEDIR：跳过三层链接线判据")
+                throw AssertionError("unreachable")
+            }
+        val dir = Paths.get(env)
         val csv = EmueraConfigParser.resolveCsvDir(dir)
-        assumeTrue(Files.isRegularFile(dir.resolve(EMUERA_CONFIG_FILE_NAME)), "语料缺 emuera.config：跳过")
-        assumeTrue(Files.isRegularFile(csv.resolve("_default.config")), "语料缺 CSV/_default.config：跳过")
-        assumeTrue(Files.isRegularFile(csv.resolve("_fixed.config")), "语料缺 CSV/_fixed.config：跳过")
+        assertTrue(
+            Files.isRegularFile(dir.resolve(EMUERA_CONFIG_FILE_NAME)),
+            "ERATW_GAMEDIR=$env 下没有 $EMUERA_CONFIG_FILE_NAME：它不是语料游戏根",
+        )
+        assertTrue(
+            Files.isRegularFile(csv.resolve("_default.config")),
+            "语料缺 $csv/_default.config：三层链判据无根可对（ERATW_GAMEDIR=$env）",
+        )
+        assertTrue(
+            Files.isRegularFile(csv.resolve("_fixed.config")),
+            "语料缺 $csv/_fixed.config：三层链判据无根可对（ERATW_GAMEDIR=$env）",
+        )
         return dir
     }
 }

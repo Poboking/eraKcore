@@ -5,6 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -30,7 +31,7 @@ class BeginFlowTest {
         var selectComValue: Long = 7L
         var ct: Boolean = false
         var pending: BeginType? = null
-        var trainCount: Int? = null
+        var trainCount: Int = 0
         val trainNames = HashMap<Int, String>()
         var afterCall: ((String) -> Unit)? = null
 
@@ -94,7 +95,7 @@ class BeginFlowTest {
         }
 
         override fun trainName(code: Int): String? = trainNames[code]
-        override fun trainNameCount(): Int? = trainCount
+        override fun trainNameCount(): Int = trainCount
 
         override fun pendingBegin(): BeginType? = pending
         override fun takePendingBegin(): BeginType? = pending.also { pending = null }
@@ -113,6 +114,9 @@ class BeginFlowTest {
         var autoSaveEnabled = false
         var temporaryLine = false
         var resetStyleCount = 0
+
+        /** `setWait()`（`Process.cs:2047-2050`）被调到的次数：一次指令至多等一次按键。 */
+        var anyKeyCalls = 0
 
         /** `awaitUserComInput` 被调到的次数：一条指令只许吃一次提交（`Process.cs:426-430`）。 */
         var userComInputCalls = 0
@@ -139,6 +143,27 @@ class BeginFlowTest {
         override fun awaitAblupInput(): Long? = ablupInput
         override fun awaitShopInput(): Long? = shopInput
         override fun lastLineIsTemporary(): Boolean = temporaryLine
+
+        override fun readAnyKey() {
+            anyKeyCalls++
+        }
+
+        /**
+         * 本假体默认模拟「控制台上真有 `getTrainComString` 打出来的 `前戯[  0]` 这类下标按钮」
+         * （`Process.cs:2257-2261`），即原版口径 —— 与接口缺省 true 一致。
+         * 生产宿主 [ConsoleBeginHost] 覆写成 false（它从不渲染这组按钮，
+         * 按钮值是训练码），见 [BeginHost.systemResultIsComAbleIndex]。
+         */
+        var comAbleIndexInput: Boolean = true
+        override val systemResultIsComAbleIndex: Boolean get() = comAbleIndexInput
+
+        /**
+         * [BeginHost.shouldWaitAfterCommand] 的假体口径：null = 接口缺省（每条指令都等，
+         * 原版口径）；非 null = 记下判定输入并按其返回值走。
+         */
+        var waitPolicy: ((Int, Long) -> Boolean)? = null
+        override fun shouldWaitAfterCommand(comCode: Int, result: Long): Boolean =
+            waitPolicy?.invoke(comCode, result) ?: true
     }
 
     // ------------------------------------------------------------------
@@ -278,9 +303,22 @@ class BeginFlowTest {
         assertEquals(SystemStateCode.Train_CallShowStatus, flow.state)
     }
 
+    /**
+     * 真机 0.2.35 红（2026-11-01 玩家「接任务时多点了两下，过一会儿弹启动失败」）：
+     * `Train_CallComAbleXX` 一度把「读不到 TrainName 长度」判成 `HOST_MISSING` 终局，
+     * 而原版在 `TrainName.Length == 0` 时**整趟枚举不进**、直接 `SHOW_USERCOM`
+     * （`Process.cs:2263` 的 `while (++lastCalledComable < TrainName.Length)` 一次不成立
+     * → `:2312` 的 `lastCalledComable >= TrainName.Length` 成立）。
+     * 本例钉住：表空 = 照常走 SHOW_USERCOM，不是 BLOCKED。
+     */
     @Test
-    fun `TrainName 未接宿主时 COM_ABLE 枚举报告阻塞点`() {
-        val calls = FakeCalls().apply { functions += "SHOW_STATUS" }
+    fun `TrainName 表为空时跳过整表枚举直接 SHOW_USERCOM`() {
+        val calls = FakeCalls().apply {
+            functions += "SHOW_STATUS"
+            // 表空时原版照样 force 调 SHOW_USERCOM（Process.cs:2317），语料缺它会抛
+            // FuncIsNotFound —— 那是另一条语义，本例不测。
+            functions += "SHOW_USERCOM"
+        }
         val flow = BeginFlow(calls, FakeHost())
         flow.select(BeginType.TRAIN)
         flow.step() // beginTrain: EVENTTRAIN 缺失
@@ -288,12 +326,12 @@ class BeginFlowTest {
         flow.step() // endCallShowStatus → Train_CallComAbleXX
 
         val step = flow.step()
-        assertEquals(StepOutcome.BLOCKED, step.outcome)
-        assertEquals(SystemStateCode.Train_CallComAbleXX, step.to)
-        val blocker = assertNotNull(step.blocker)
-        assertEquals(BlockerKind.HOST_MISSING, blocker.kind)
-        assertEquals("SHOW_USERCOM", blocker.function)
-        assertTrue(blocker.message.contains("TrainName"))
+        assertEquals(StepOutcome.CALLED, step.outcome)
+        assertEquals("SHOW_USERCOM", step.calledFunction)
+        assertEquals(SystemStateCode.Train_CallShowUserCom, step.to)
+        assertNull(step.blocker)
+        // 一格 COM_ABLE 都不许枚举（原版 0 长度数组）。
+        assertEquals(emptyList<String>(), calls.called.filter { it.startsWith("COM_ABLE") })
     }
 
     @Test
@@ -410,6 +448,85 @@ class BeginFlowTest {
     }
 
     /**
+     * 生产口径回归（玩家报「时停 + 咲夜 + 扒光但内裤未脱 + 乳交/啪啪啪 → 点了没反应」）：
+     * **语料按钮值就是训练码**时，绝不能拿它去查 `comAble`。
+     *
+     * 证据链：
+     * - 画蛇添足版 `@BUILD_COM_BUTTON_HTML`（`魔改内容/PRINT系/HTML_PRINT_Components.ERB:200`）
+     *   打的是 `<button value='{COM_VAL}'>%COM_TEXT%[{COM_VAL,3}]</button>`，菜单上写 `乳交[ 82]`；
+     * - `comAble` 是「菜单位置 → 训练码」，因为 `CSV/Train.csv` 有空档、`lastAddCom` 只对**非空**
+     *   名字自增（`Process.cs:2263-2282`）⇒ 实测 `comAble[82] = 180`、`comAble[60]` 无此项；
+     * - 于是点 `乳交[ 82]` 走反查会派发 `COM180`（潤滑液）；而语料 `USERCOM.ERB:84-86`
+     *   （`SELECTCOM = RESULT` / `TFLAG:3 = SELECTCOM`）明写「输入值就是训练码」，
+     *   `@SOURCE_CHECK`（`SOURCE.ERB:25`）再把它还原回来抵消 `DOTRAIN 999` —— 两处都指向
+     *   「按钮值当 `RESULT` 交 `USERCOM`」这一条支。
+     *
+     * 生产宿主不渲染 `乳交[ 51]` 这类下标按钮（`ConsoleBeginHost.onComAble` 缺省 no-op），
+     * 故 `systemResultIsComAbleIndex` 为 false。本组用例把**两条口径**各自钉死。
+     */
+    private fun flowAtWaitInput(
+        trainNames: Map<Int, String>,
+        trainCount: Int,
+        comAbleIndexInput: Boolean,
+        userComInput: Long,
+    ): Triple<FakeCalls, FakeHost, BeginFlow> {
+        val calls = FakeCalls().apply {
+            functions += "SHOW_STATUS"
+            functions += "SHOW_USERCOM"
+            functions += "USERCOM"
+            events += "EVENTCOM"
+            this.trainCount = trainCount
+            this.trainNames.putAll(trainNames)
+        }
+        val host = FakeHost().apply {
+            this.comAbleIndexInput = comAbleIndexInput
+            this.userComInput = userComInput
+        }
+        val flow = BeginFlow(calls, host)
+        flow.select(BeginType.TRAIN)
+        flow.step() // beginTrain -> EVENTTRAIN
+        flow.step() // endCallEventTrain -> SHOW_STATUS
+        flow.step() // endCallShowStatus -> COM_ABLE 逐个登记
+        while (flow.state == SystemStateCode.Train_CallComAbleXX) flow.step()
+        flow.step() // endCallShowUserCom -> Train_WaitInput
+        assertEquals(SystemStateCode.Train_WaitInput, flow.state, "前置：应停在等指令输入")
+        return Triple(calls, host, flow)
+    }
+
+    @Test
+    fun `生产口径：按钮值是指令号时一律交 USERCOM 不查 comAble`() {
+        // 训练名表留一个空档（真语料 `CSV/Train.csv` 就有：`;10` `;14` …）⇒
+        // `lastAddCom` 只对非空名自增（Process.cs:2263-2282），`comAble` 因此错位成 {0:0, 1:2, 2:3}。
+        val (calls, _, flow) = flowAtWaitInput(
+            trainNames = mapOf(0 to "愛撫", 2 to "乳交", 3 to "正常位"),
+            trainCount = 4,
+            comAbleIndexInput = false,
+            userComInput = 2L,
+        )
+        val step = flow.step()
+        assertEquals("USERCOM", step.calledFunction, "生产口径下按钮值必须当 RESULT 交 USERCOM，不得查 comAble")
+        assertEquals(SystemStateCode.Train_CallEventComEnd, flow.state)
+        assertEquals(2L, calls.resultValue, "RESULT 必须是按钮上的训练码本身（USERCOM.ERB:15/85）")
+        assertEquals(2L, calls.systemResultValue, "systemResult 槽另存同一个值（两槽语义不同，不得合并）")
+        assertEquals(7L, calls.selectComValue, "不得反查 comAble（若反查，这里会变成 3 = 正常位）")
+    }
+
+    @Test
+    fun `下标口径：宿主渲染下标按钮时仍按 comAble 反查派发 EVENTCOM`() {
+        // 同一张错位表：菜单位置 2 上登记的是指令 3（正常位）
+        val (calls, _, flow) = flowAtWaitInput(
+            trainNames = mapOf(0 to "愛撫", 2 to "乳交", 3 to "正常位"),
+            trainCount = 4,
+            comAbleIndexInput = true,
+            userComInput = 2L,
+        )
+        val step = flow.step()
+        assertEquals("EVENTCOM", step.calledFunction, "下标口径照原版走 EVENTCOM（Process.cs:2344-2349）")
+        assertEquals(SystemStateCode.Train_CallEventCom, flow.state)
+        assertEquals(3L, calls.selectComValue, "SELECTCOM = comAble[2] = 3")
+    }
+
+    /**
      * 红 O 回归钉桩：真机「点移动[400] 零输出静默退回」的根因是 `trainWaitInput` 的
      * else 支漏写脚本变量 `RESULT`（`Process.cs:2372` 的 `vEvaluator.RESULT = systemResult`）。
      *
@@ -454,8 +571,8 @@ class BeginFlowTest {
         val calls = FakeCalls().apply {
             functions += "SHOW_STATUS"
             functions += "SHOW_USERCOM"
-            // COM_ABLE 枚举要有 TrainName 表可遍历，否则流程停在 endCallComAbleXX 的
-            // HOST_MISSING 阻塞，走不到 Train_WaitInput（那步的阻塞消息里没有 CTrain）。
+            // 给一张有一格的 TrainName 表，让 endCallComAbleXX 真走一遍枚举再落到
+            // SHOW_USERCOM（表空时原版也照样落到那里，见上面的用例；这里要的是枚举那一步）。
             trainCount = 1
             trainNames[0] = "前戯"
         }
@@ -523,6 +640,140 @@ class BeginFlowTest {
         assertEquals(
             listOf("afterShowUserCom", "afterInputCom", "afterSourceCheck"), calls.resets,
         )
+    }
+
+    /**
+     * `NeedWaitToEventComEnd` 的三条口径（`Process.cs:2417` 置位、`:2450-2454` 消费并清位、
+     * `setWait()` = `Process.cs:2047-2050` → `EmueraConsole.cs:876-895` 的 `ReadAnyKey()`）。
+     *
+     * 玩家侧症状（画蛇添足版清掃 = `COM410`）：语料自己判定「还不该扫」时只 `DRAWLINE` +
+     * 打一行提示就 `RETURN -1`，零状态变化（`COMF410 掃除.ERB:18-26`）。PC 紧接着就是这次
+     * 等待，提示被钉在屏上；本仓此前没接，手机上一次回合整帧一次刷屏 ⇒ 提示行一冒出来就滚进
+     * 历史 ⇒ 玩家只看到「点了没反应」。
+     */
+    @Test
+    fun `指令走 SOURCE_CHECK 之后回菜单前恰好等一次按键`() {
+        val calls = refusedCommandCalls()
+        val host = FakeHost().apply { userComInput = 0L }
+        val flow = BeginFlow(calls, host)
+        flow.select(BeginType.TRAIN)
+        repeat(9) { flow.step() } // beginTrain … endCallSourceCheck
+        assertEquals(SystemStateCode.Train_CallEventComEnd, flow.state, "到位才谈等待")
+        assertEquals(0, host.anyKeyCalls, "等待只在 endCallEventComEnd 发起，不在 endCallSourceCheck")
+
+        flow.step() // endCallEventComEnd：setWait() 之后才 endCallEventTrain
+        assertEquals(1, host.anyKeyCalls, "RESULT!=0 经 SOURCE_CHECK 的指令必须等一次（Process.cs:2450-2453）")
+        assertEquals(SystemStateCode.Train_CallEventTrain, flow.state)
+
+        // 清位一次即生效：同一条链再走一遍仍是「每条指令一次」，不是每步累加。
+        repeat(9) { flow.step() }
+        assertEquals(2, host.anyKeyCalls, "第二条指令再等一次，不多不少")
+    }
+
+    /**
+     * 收尾等待**可被宿主策略否掉**（[BeginHost.shouldWaitAfterCommand]，2026-11-02「点击移动卡顿」）：
+     * 状态机照常推进，只是不发起 `readAnyKey`。
+     */
+    @Test
+    fun `宿主策略否掉收尾等待时状态机照常推进`() {
+        val calls = refusedCommandCalls()
+        val host = FakeHost().apply {
+            userComInput = 0L
+            waitPolicy = { _, _ -> false }
+        }
+        val flow = BeginFlow(calls, host)
+        flow.select(BeginType.TRAIN)
+        repeat(9) { flow.step() } // beginTrain … endCallSourceCheck
+        assertEquals(SystemStateCode.Train_CallEventComEnd, flow.state, "策略只影响等待，不影响状态迁移")
+
+        flow.step() // endCallEventComEnd
+        assertEquals(0, host.anyKeyCalls, "策略说不等就不等")
+        assertEquals(SystemStateCode.Train_CallEventTrain, flow.state)
+    }
+
+    /**
+     * 判定输入必须是**指令自己的**训练码与返回值：`SOURCE_CHECK` 一返回就把 `RESULT` 覆盖成
+     * 自己的返回值、`SELECTCOM` 也要靠它还原（`ステータス計算関連/SOURCE/SOURCE.ERB:1`），
+     * 到收尾点再读会读到别人的值。
+     */
+    @Test
+    fun `收尾等待的判定拿到的是指令自己的训练码与返回值`() {
+        val seen = ArrayList<Pair<Int, Long>>()
+        // 移动（训练码 400）成功：`QOL_COM400` 每走一步 `RETURN 1`（魔改内容/qol/qol_MAP.ERB:59-66）
+        val calls = refusedCommandCalls()
+        val host = FakeHost().apply {
+            userComInput = 0L
+            waitPolicy = { code, result ->
+                seen += code to result
+                false
+            }
+        }
+        val flow = BeginFlow(calls, host)
+        flow.select(BeginType.TRAIN)
+        repeat(7) { flow.step() } // beginTrain … endEventCom
+        assertEquals(SystemStateCode.Train_CallComXX, flow.state)
+        // 指令体（COM400）跑完，SELECTCOM 停在被调用的训练码上；RESULT = 它自己的 RETURN。
+        calls.selectComValue = 400L
+        calls.resultValue = 1L
+        flow.step() // endCallComXX：判定就在这一步算
+
+        assertEquals(listOf(400 to 1L), seen, "判定输入 = SOURCE_CHECK 之前的 SELECTCOM 与 RESULT")
+    }
+
+    /** `endCallComXX` 的 RESULT==0 支直接跳 `endCallEventComEnd`（`Process.cs:2404-2407`），不经 `endCallSourceCheck` ⇒ 不等待。 */
+    @Test
+    fun `指令 RESULT 为 0 时不经 SOURCE_CHECK 因而不等待`() {
+        val calls = refusedCommandCalls().apply { resultValue = 0L }
+        val host = FakeHost().apply { userComInput = 0L }
+        val flow = BeginFlow(calls, host)
+        flow.select(BeginType.TRAIN)
+        repeat(8) { flow.step() } // 少一步：endCallComXX 自己就把状态切成 Train_CallEventComEnd
+        assertEquals(SystemStateCode.Train_CallEventComEnd, flow.state)
+
+        flow.step() // endCallEventComEnd
+        assertEquals(0, host.anyKeyCalls, "原版这条支没有 setWait，不得凭空多一个等待点")
+        assertEquals(SystemStateCode.Train_CallEventTrain, flow.state)
+    }
+
+    /**
+     * 生产口径（[BeginHost.systemResultIsComAbleIndex] = false）下指令走 `USERCOM` 支
+     * （`Process.cs:2366-2373`），状态直接落 `Train_CallEventComEnd`。这条没经 `SOURCE_CHECK`
+     * ⇒ 不该等待；也顺带钉住「闩锁不会从开局就粘着真」。
+     */
+    @Test
+    fun `USERCOM 支进入 EventComEnd 不经 SOURCE_CHECK 因而不等待`() {
+        val calls = FakeCalls().apply {
+            functions += "SHOW_STATUS"
+            functions += "SHOW_USERCOM"
+            functions += "USERCOM"
+            trainCount = 1
+            trainNames[0] = "前戯"
+            resultValue = 0L
+        }
+        val host = FakeHost().apply {
+            userComInput = 410L // 训练码，不在 comAble 表里
+            comAbleIndexInput = false
+        }
+        val flow = BeginFlow(calls, host)
+        flow.select(BeginType.TRAIN)
+        repeat(6) { flow.step() } // … endCallShowUserCom -> trainWaitInput -> USERCOM
+        assertEquals(SystemStateCode.Train_CallEventComEnd, flow.state)
+
+        flow.step() // endCallEventComEnd
+        assertEquals(0, host.anyKeyCalls)
+        assertEquals(SystemStateCode.Train_CallEventTrain, flow.state)
+    }
+
+    /** 一条「被拒的指令」：COM0 存在、SOURCE_CHECK 存在、EVENTCOMEND 缺失（派发即返回，状态机照常走到 EventComEnd）。 */
+    private fun refusedCommandCalls() = FakeCalls().apply {
+        functions += "SHOW_STATUS"
+        functions += "SHOW_USERCOM"
+        functions += "COM0"
+        functions += "SOURCE_CHECK"
+        events += "EVENTCOM"
+        trainCount = 1
+        trainNames[0] = "前戯"
+        resultValue = 1L // endCallComXX 走 SOURCE_CHECK 分支（Process.cs:2404-2410）
     }
 
     /** `endCallEventTrain` 走 NEXTCOM 时同样经 `callEventCom`（`Process.cs:2233 → :2386`）复位 NOWEX。 */

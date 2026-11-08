@@ -415,3 +415,31 @@ object PngDecoder {
             ((bytes[at + 2].toInt() and 0xFF) shl 8) or
             (bytes[at + 3].toInt() and 0xFF)
 }
+
+/**
+ * 无损降级档的**压缩载荷载体**：一份 PNG 字节，同时充当「解回像素」的延迟闭包。
+ *
+ * [com.eratw.port.core.host.GraphicsBuffer.demotePixelsToPng] 把画过的合成缓冲压成 PNG 后，
+ * 把字节藏在 `pendingPixels` 闭包里；core 侧 [com.eratw.port.core.host.GraphicsBuffer.pixels]
+ * 是有状态读：一旦有人读，就把 PNG 解回 `IntArray(w*h)` 并发布新的一代 Surface（透明晋升）。
+ * 渲染侧本该是纯消费者，却借这个读口取图 ⇒ 每遇一次位图缓存 miss 就把刚压下去的 1.44 MiB
+ * 重新钉回 Dalvik 堆（2026-11-08 玩家 0.2.43「查看其他人的位置」OOM 的根因）。
+ *
+ * 修法 = 让渲染侧拿到**字节本身**、由平台侧直接解成 native 位图，全程不碰 `pixels`。
+ * 于是 `pendingPixels` 的载体必须同时可被查询 `bytes`；匿名 lambda 做不到这一点。
+ *
+ * 放在 `core.image` 而不是 `core.host`：[com.eratw.port.core.host.GraphicsBuffer] 的实例字段
+ * 会被 L3 `StateHash` 按字段名反射混入 aux:gfx 簇，加字段就要重落链常量；本载体不新增字段，
+ * 只顶替原 lambda 在 `pendingPixels` 槽里的位置，且 `core.image` 不在 StateHash 的包白名单里
+ * （按 opaque 只混类名），既不会把 PNG 字节灌进链，也不会让链值随对象布局漂移。
+ *
+ * 解码失败一律折成 null：调用方 `pixels` 的延迟解码路径本就 `catch (t: Throwable)` 并按
+ * 「读不出这张图」退化成同尺寸全透明，口径逐字一致。
+ */
+class DemotedPngPixels(val bytes: ByteArray) : () -> IntArray? {
+    override fun invoke(): IntArray? = try {
+        PngDecoder.decode(bytes).pixels
+    } catch (t: Throwable) {
+        null
+    }
+}

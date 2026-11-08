@@ -104,6 +104,7 @@ class XmlDocument : XmlNode() {
             for (c in children) {
                 when (c) {
                     is XmlText -> sb.append(c.text)
+                    is XmlWhitespace -> sb.append(c.text)
                     is XmlCData -> sb.append(c.data)
                     is XmlElement -> c.appendInnerText(sb)
                     else -> {}
@@ -264,6 +265,7 @@ class XmlElement(override val name: String) : XmlNode() {
         for (c in children) {
             when (c) {
                 is XmlText -> sb.append(c.text)
+                is XmlWhitespace -> sb.append(c.text)
                 is XmlCData -> sb.append(c.data)
                 is XmlElement -> c.appendInnerText(sb)
                 else -> {}
@@ -331,6 +333,40 @@ class XmlText(var text: String) : XmlNode() {
     }
 }
 
+/**
+ * 纯空白节点（.NET `XmlWhitespace`，`Name` = `#whitespace`，XML-FIVE X4）。
+ *
+ * 唯一产生路径 = `InnerXml` 赋值的**纯空白片段**（[XmlParser.parseFragment]）：
+ * dotnet 8.0.425 实测 `e.InnerXml = "  "` 后唯一子节点 Name=`#whitespace`
+ * （NodeType=Whitespace）、`InnerXml=''`、`Value`/`InnerText` 即空白串、元素的
+ * `OuterXml`/`InnerXml` 原样写空白（`<r>  </r>`）。注意两条**不是** #whitespace 的路径
+ * （同轮探针实测，台账 §27.4④ 的原登记方向写反，已翻案）：
+ * - `InnerText` 赋值：值是纯空白（甚至空串）也**一律**建普通 `#text`（fn/XmlMethods
+ *   `setXmlNode` style=1 恒走 XmlText，无需判空白）；
+ * - `LoadXml` 解析整篇文档：`PreserveWhitespace=false` 把纯空白文本节点直接丢弃
+ *   （`<r> </r>` 子节点数 0）；`&#32;` 字符引用解码出的空白是普通 `#text`。
+ *
+ * XPath 面与 [XmlText] 同族：`text()` 与 `node()` 都选中它（dotnet 实测
+ * `/r/text()` 对 `InnerXml="  "` 命中 1、`//node()` 命中 2），但「有子元素」谓词
+ * `[*]` 不计它（`/r[*]` = 0）。
+ */
+class XmlWhitespace(var text: String) : XmlNode() {
+    override val name: String get() = "#whitespace"
+
+    override val value: String get() = text
+
+    override val innerText: String get() = text
+
+    override fun writeInnerXml(sb: StringBuilder) {
+        // .NET XmlWhitespace.InnerXml 是空串（dotnet 8.0.425 实测，与 XmlText 同口径）
+    }
+
+    override fun writeOuterXml(sb: StringBuilder) {
+        // 纯空白串里没有可转义字符（& < > 不会出现在空白里），走同一转义通道即原样写出
+        appendEscapedText(sb, text)
+    }
+}
+
 /** CDATA 节点。`innerText` 计入文本，`outerXml` 原样包 `<![CDATA[...]]>`，`innerXml` 为空串。 */
 class XmlCData(var data: String) : XmlNode() {
     override val name: String get() = "#cdata-section"
@@ -392,34 +428,46 @@ class XmlProcessingInstruction(override val name: String, var data: String) : Xm
 
 /**
  * 文本节点转义。`>` 也转义成 `&gt;`（.NET `XmlTextEncoder` 对 `>` 无条件转义，
- * 比 XML 规范要求的更宽）；`\t`/`\n`/`\r` 原样写出（dotnet 8 实测 `OuterXml` 不转义它们）。
+ * 比 XML 规范要求的更宽）；`\t`/`\n`/`\r` 原样写出（dotnet 8 实测 `OuterXml` 不转义它们）；
+ * 其余 `<0x20` 控制符写成大写十六进制字符引用（`&#x1;`/`&#x1F;`，XML-FIVE X1：
+ * dotnet 8.0.425 实测 `<r>a&#x1;b</r>` 的 OuterXml 是 `<r>a&#x1;b</r>`、`&#x1F;`/`&#x1A;`/
+ * `&#xB;` 均为大写十六进制——只对**字符引用**放行进 DOM 的控制符才有机会走到这里，
+ * 源文本裸控制符在解析层与 .NET 同抛，见 XmlParser.appendCharacterRef KDoc）。
  */
 internal fun appendEscapedText(sb: StringBuilder, s: String) {
     for (ch in s) {
-        when (ch) {
-            '&' -> sb.append("&amp;")
-            '<' -> sb.append("&lt;")
-            '>' -> sb.append("&gt;")
+        when {
+            ch == '&' -> sb.append("&amp;")
+            ch == '<' -> sb.append("&lt;")
+            ch == '>' -> sb.append("&gt;")
+            ch < ' ' && ch != '\t' && ch != '\n' && ch != '\r' -> appendCharRef(sb, ch)
             else -> sb.append(ch)
         }
     }
 }
 
 /**
- * 属性值转义：文本规则 + `"` → `&quot;`；`\n`/`\r` 写成字符引用，`\t` 原样
- * （dotnet 8 `XmlDocument.OuterXml` 实测：`<r a="x&#10;y<TAB>z&#13;w"/>` 的输出
- * 里 TAB 是字面量、LF/CR 是 `&#xA;`/`&#xD;`）。
+ * 属性值转义：文本规则 + `"` → `&quot;`；`\n`/`\r` 写成字符引用，`\t` 原样，
+ * 其余 `<0x20` 控制符写大写十六进制字符引用（XML-FIVE X1：dotnet 8.0.425 实测
+ * `<r a="p&#x1F;q" />`；旧实测 `<r a="x&#10;y<TAB>z&#13;w"/>` 的输出里 TAB 是字面量、
+ * LF/CR 是 `&#xA;`/`&#xD;`）。
  */
 internal fun appendEscapedAttribute(sb: StringBuilder, s: String) {
     for (ch in s) {
-        when (ch) {
-            '&' -> sb.append("&amp;")
-            '<' -> sb.append("&lt;")
-            '>' -> sb.append("&gt;")
-            '"' -> sb.append("&quot;")
-            '\r' -> sb.append("&#xD;")
-            '\n' -> sb.append("&#xA;")
+        when {
+            ch == '&' -> sb.append("&amp;")
+            ch == '<' -> sb.append("&lt;")
+            ch == '>' -> sb.append("&gt;")
+            ch == '"' -> sb.append("&quot;")
+            ch == '\r' -> sb.append("&#xD;")
+            ch == '\n' -> sb.append("&#xA;")
+            ch < ' ' && ch != '\t' -> appendCharRef(sb, ch)
             else -> sb.append(ch)
         }
     }
+}
+
+/** `<0x20`（除 `\t`/`\n`/`\r`）控制符的回写形态：`&#x` + 大写十六进制 + `;`（dotnet 8 实测）。 */
+private fun appendCharRef(sb: StringBuilder, ch: Char) {
+    sb.append("&#x").append(ch.code.toString(16).uppercase()).append(';')
 }

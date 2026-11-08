@@ -51,14 +51,22 @@ import com.eratw.port.core.save.SaveDataProbe
  *      `RESULTS` 的 setter 只写 `DataStringArray[2][0]`，VariableEvaluator.cs:75-78）。
  *
  *   文案常量与 `CHKDATA` 共用同一取值点 [SaveDataProbe]（MES_NOT_FOUND / MES_CORRUPTED /
- *   MES_DIFFERENT_GAME / MES_DIFFERENT_VERSION），不再在本文件各写一份（SAVE-05：改前这里是
- *   自造措辞「存档文件已损坏」「存档的游戏代码不同」；「存档版本不同」那条本来就与官方一致）。
+ *   MES_DIFFERENT_GAME / MES_DIFFERENT_VERSION / MES_LOAD_ERROR），不再在本文件各写一份
+ *   （SAVE-05：改前这里是自造措辞「存档文件已损坏」「存档的游戏代码不同」；「存档版本不同」
+ *   那条本来就与官方一致）。
  *   已知残余差异（状态码同为 `ETC_ERROR`，只有文案差）：原版「容器读不出」走的是
  *   `catch (FileEE)` / `catch (Exception)` 两支（VariableEvaluator.cs:2220-2229），文案是
  *   `FileEE.Message` 或 `Error.LoadError`「加载时发生错误」（语言包 :329）；本层与
  *   [SaveDataProbe.checkBytes] 同口径统一给 MES_CORRUPTED。触发条件是「既不是二进制容器、
  *   文本前三行又读不出两个数字」的畸形/截断档（含 <16 字节档，即 SAVE-06），
  *   与 [com.eratw.port.core.save.SaveDataProbe] 类 KDoc 记的是同一处，修法归那一侧。
+ *
+ *   另一支「文件在、字节读不出」（权限 / 坏盘 / 宿主读失败）**不再抛 CodeEE**：原版这一支
+ *   与上面同属 `catch (Exception)` ⇒ `ETC_ERROR` + `Error.LoadError`（VariableEvaluator.cs:2226-2229），
+ *   且 `CHKDATA` 走的 [SaveDataProbe.check] 早已按此口径给
+ *   [SaveDataProbe.MES_LOAD_ERROR]（`core/save/SaveDataProbe.kt:203-204`）。两个函数在原版里
+ *   是**同一个** `CheckDataByFilename`（:2159-2229），移植侧不能一族静默折码、另一族把
+ *   「宿主没接线」的 CodeEE 甩到屏上并中止脚本。
  *
  * 基准：`fixtures/golden/baseline/pc-golden-root.txt:493-498`
  * （`FIND_CHARADATA=1 F0=GOLDEN_CHARA.dat` / `CHKCHARADATA=0`）。文案只在**非 OK 支**变化，
@@ -103,7 +111,7 @@ internal fun registerCharaFileMethods(r: BuiltinRegistry) {
     r.register(BuiltinMethod("CHKCHARADATA", I, 1, 1) { c, a ->
         val ops = c.host.fileOps
             ?: throw CodeEE("函数 CHKCHARADATA 需要宿主接线 FileOps（fileOps == null）")
-        val name = sv(a[0]!!)
+        val name = requiredStrArg(a, 0, "CHKCHARADATA")
         val result = checkCharaData(c, ops, name)
         if (c.store.getLength("RESULTS", -1) > 0) {
             c.store.writeStr("RESULTS", longArrayOf(0), result.mes) // :3557
@@ -120,7 +128,14 @@ private const val CHARA_PREFIX = "chara_"
  * （VariableEvaluator.cs:2159-2229），文案常量与 `CHKDATA` 同一取值点 [SaveDataProbe]；
  * 判据与差异说明见 [registerCharaFileMethods] 的类 KDoc。
  *
- * @throws CodeEE 宿主没有二进制读能力（`readFileBytes` 未接线）——不静默答「损坏」。
+ * 读盘失败（`readFileBytes` 给 null **或直接抛异常**：权限 / 坏盘 / 宿主没装二进制读）**不抛错**：
+ * 文件已由 [FileOps.exists] 判过存在，剩下的失败按原版 `catch (Exception)`
+ * （VariableEvaluator.cs:2226-2229）折成 `ETC_ERROR` + `Error.LoadError`
+ * 「加载时发生错误」，与 [SaveDataProbe.check] 的同名分支一字不差
+ * （`core/save/SaveDataProbe.kt:203-204`）。抛 CodeEE 会把「一个坏档」升级成
+ * 「本条脚本整体中止 + 红字上屏」，而原版只是让 CHKCHARADATA 返回 4。
+ *
+ * 唯一的宿主能力缺口（`fileOps == null`）在调用方已先行拦下。
  */
 private fun checkCharaData(
     c: BuiltinContext,
@@ -133,9 +148,22 @@ private fun checkCharaData(
     if (!ops.exists(path)) {
         return SaveDataCheck(EraDataState.FILENOTFOUND, SaveDataProbe.MES_NOT_FOUND) // :2162-2166
     }
-    val bytes = c.host.readFileBytes(path)
-        ?: throw CodeEE("函数 CHKCHARADATA 需要宿主接线二进制读（readFileBytes == null）")
-    val head = SaveFormat.peek(bytes)
+    val bytes = try {
+        c.host.readFileBytes(path)
+    } catch (_: Exception) {
+        null // :2226-2229 —— 与原版 catch (Exception) 同路：读失败不冒到语句层
+    } ?: return SaveDataCheck(EraDataState.ETC_ERROR, SaveDataProbe.MES_LOAD_ERROR) // :2226-2229
+    // 列表/单格探测只要头：`CHKDATA`/`CHKCHARADATA` 在存档列表里成批调用，
+    // 不在这里为读几个头字段把整份角色档解压一遍（2026-10-31 性能修）。
+    // 代价：头完好、GZip 尾部损坏的档在这里仍显示为 OK；真正 `LOADCHARA` 由
+    // CharaFileIO.isBinaryContainer 全量校验后静默 `RESULT = 0`（与原版同一结局）。
+    //
+    // 合并取舍（2026-11-01）：`readFileBytes` 返回 null 一律折成 MES_LOAD_ERROR，
+    // 不再像 origin 侧那样 `throw CodeEE("需要宿主接线")` —— L4 稳定性波的口径是
+    // 「读失败不冒到语句层」（原版 :2226-2229 就是 catch 后折 ETC_ERROR），而宿主
+    // 未接线在装机链上不可达、在测试夹具里由 `Builtins.readFileBytes` 的默认 null
+    // 直接覆盖。两处口径不能并存，取折码这一侧。
+    val head = SaveFormat.peekHeader(bytes)
         ?: return SaveDataCheck(EraDataState.ETC_ERROR, SaveDataProbe.MES_CORRUPTED) // :2199-2201 口径，见类 KDoc
 
     // :2196-2202 —— 类别只在**二进制容器**里比；文本格式分支（:2176-2195）没有类别可比，

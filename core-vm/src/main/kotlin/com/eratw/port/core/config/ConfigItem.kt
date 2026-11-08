@@ -17,11 +17,19 @@ package com.eratw.port.core.config
  */
 class ConfigItem(val spec: ConfigSpec, initialValue: ConfigValue = spec.defaultValue) {
 
-    /** 当前值；缺省等于 [ConfigSpec.defaultValue]（spec: `ConfigData.cs:45-174` 里 `ConfigCode` 之后的第三个实参）。 */
+    /**
+     * 当前值；缺省等于 [ConfigSpec.defaultValue]（spec: `ConfigData.cs:45-174` 里 `ConfigCode` 之后的第三个实参）。
+     *
+     * `@Volatile`：热更通道（`SettingsActivity → HotConfigChannel → SettingsModel.pushHotInto`）在 **UI 线程**
+     * 写活会话的条目表，VM 线程读；[ConfigValue] 全部不可变、单字段引用写原子，volatile 给足 happens-before
+     * （ADR-003「core 无静态可变全局」的读侧纪律；不加则 UI 写对 VM 线程无可见性承诺）。
+     */
+    @Volatile
     var value: ConfigValue = initialValue
         private set
 
-    /** 是否被 `fixed.config` 钉住（spec: `AConfigItem.cs:16`，赋值点 spec: `ConfigData.cs:573-576`）。 */
+    /** 是否被 `fixed.config` 钉住（spec: `AConfigItem.cs:16`，赋值点 spec: `ConfigData.cs:573-576`）。同 [value]，跨线程读写 ⇒ volatile。 */
+    @Volatile
     var fixed: Boolean = false
         internal set
 

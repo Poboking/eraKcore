@@ -1,0 +1,17 @@
+# INPUTANY 的字符串支：long.TryParse 失败 ⇒ 只 process.InputString(ABC)（写 RESULTS:0），
+# **不写 RESULT**（:1256-1274 二选一）。脚本先把 RESULT 预置成 11，因此
+# ANY_RESULT=11 就是「RESULT 没被动过」的实测证据。
+case: input_any
+target: REPLAY_INPUT_ANY
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:2095-2110
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1256-1274
+--- inputs
+submit ABC
+--- expect-console
+START-INPUT-ANY
+ANY_RESULT=11
+ANY_RESULTS=ABC
+END-INPUT-ANY
+--- expect-vars
+RESULT:0 = 11
+RESULTS:0 = "ABC"

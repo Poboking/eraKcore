@@ -56,6 +56,7 @@ private fun iv(v: Value): Long = (v as Value.IntV).v
 private fun sv(v: Value): String = (v as Value.StrV).v
 private fun iArg(v: Long): Value = Value.IntV(v)
 private fun sArg(v: String): Value = Value.StrV(v)
+private fun fArg(v: Double): Value = Value.FloatV(v)
 
 /** 引用参数调用（SUMARRAY/FINDCHARA 等的入口形态）。 */
 private fun refCall(ctx: BuiltinEvalContext, name: String, vararg args: Any?): Value =
@@ -103,6 +104,13 @@ class BuiltinPureTest {
         assertEquals(1024L, iv(call(ctx, "POWER", iArg(2), iArg(10))))
         assertEquals(1L, iv(call(ctx, "POWER", iArg(0), iArg(0))))
         assertFailsWith<CodeEE> { call(ctx, "POWER", iArg(2), iArg(100)) }
+        // 4.981 fork：任一实参浮点 ⇒ 返回 Float（CanReturnFloat，spec: FunctionMethodCreator.cs:5418-5436；
+        // GetFloatValue :5456-5468 只查 NaN/Inf，整型分支的 Int64 越界检查不适用于浮点返回）。
+        // 语料实况 SOURCE_EXTRA.ERB:625 `POWER(0.95,ITEM:清扫魔法)`（2026-11-03 上报端点）。
+        assertEquals(0.5987369392383787, (call(ctx, "POWER", fArg(0.95), iArg(10)) as Value.FloatV).v, 1e-12)
+        assertEquals(1.0, (call(ctx, "POWER", iArg(2), fArg(0.0)) as Value.FloatV).v, 0.0)
+        // 浮点分支的 NaN 仍按原版文案抛（:5459-5462）。
+        assertFailsWith<CodeEE> { call(ctx, "POWER", fArg(-1.0), fArg(0.5)) }
         assertEquals(3L, iv(call(ctx, "SQRT", iArg(10))))
         assertEquals(3L, iv(call(ctx, "CBRT", iArg(27))))
         assertFailsWith<CodeEE> { call(ctx, "SQRT", iArg(-1)) }
@@ -391,12 +399,19 @@ class BuiltinPureTest {
             .filter { it.startsWith("- name: ") }
             .map { it.removePrefix("- name: ").trim() }
             .toSet()
-        assertEquals(271, yamlNames.size)
-        assertEquals(271, Builtins.registry.size())
+        // specs 已在 76325d9e 补到 4.981 口径（1.824 的 271 + fork 新增 28 = 299 条），
+        // 2026-11-06 fixcore 再补 1 条 `SPRITEANIMEFRAME`（fork 更新记录
+        // 画蛇又添足版自改emuera相关说明.txt:236-239；无 C# 源）⇒ 300 条；
+        // 注册表 297 条，缺的 3 条是尚未落成表达式内建的条目：MAP_VALUES 未实现，
+        // DISABLE_INPUT_MACRO / ENABLE_INPUT_MACRO 在 fork 里是 DO_NOTHING 语句别名
+        // （OpcodeTable.kt 的 StatementAlias），本就不该进表达式内建表。
+        val notBuiltinFunctions = setOf("MAP_VALUES", "DISABLE_INPUT_MACRO", "ENABLE_INPUT_MACRO")
+        assertEquals(300, yamlNames.size)
+        assertEquals(297, Builtins.registry.size())
         val missing = yamlNames - Builtins.registry.names()
         val extra = Builtins.registry.names() - yamlNames
-        assertTrue(missing.isEmpty(), "注册表缺少: $missing")
-        assertTrue(extra.isEmpty(), "注册表多出: $extra")
+        assertEquals(notBuiltinFunctions, missing, "注册表缺少的只应是尚未落地的上游条目")
+        assertTrue(extra.isEmpty(), "注册表多出的不在 specs 里: $extra")
     }
 }
 
@@ -518,6 +533,47 @@ class BuiltinVarTest {
         val (ctx, _) = env()
         val e = assertFailsWith<CodeEE> { refCall(ctx, "SUMARRAY", ref("FLAG"), -1L, 3L) }
         assertEquals("SUMARRAY命令的第2个参数(-1)超出数组\"FLAG\"的范围", e.message)
+    }
+
+    /**
+     * MAX/MINARRAY 的空区间：**无条件先读 start 元素**，与 SUMARRAY 的 0 起点不同。
+     *
+     * 判据：`GetMaxArray`（spec: VariableEvaluator.cs:637-656）把 `num = arr[start]` 写在
+     * 循环**之外**，循环从 `start+1` 起；而 `IsArrayRangeValid`（spec: VariableData.cs:87-100）
+     * 只校验两个端点各自落在 `[0, 长度]`，**不要求 start <= end**。
+     * ⇒ `start == end` 返回 `arr[start]`，`start > end` 同样返回 `arr[start]`（不报错、不返回 0）。
+     * SUM/SUMC 版（`GetSumArray`，spec: VariableEvaluator.cs:418-427）从 0 起累加，空区间得 0。
+     */
+    @Test
+    fun maxMinArrayEmptyRangeReturnsStartElement() {
+        val (ctx, store) = env()
+        store.writeInt("FLAG", longArrayOf(0), 5)
+        store.writeInt("FLAG", longArrayOf(1), 7)
+        store.writeInt("FLAG", longArrayOf(2), 5)
+        val len = store.getLength("FLAG", -1).toLong()
+
+        assertEquals(7L, iv(refCall(ctx, "MAXARRAY", ref("FLAG"), 1L, 1L)))
+        assertEquals(7L, iv(refCall(ctx, "MINARRAY", ref("FLAG"), 1L, 1L)))
+        // start > end：区间为空，循环一次不跑，仍是 arr[start]
+        assertEquals(5L, iv(refCall(ctx, "MAXARRAY", ref("FLAG"), 2L, 1L)))
+        assertEquals(5L, iv(refCall(ctx, "MINARRAY", ref("FLAG"), 2L, 1L)))
+        // 对照组：SUMARRAY 空区间得 0（起点是累加器，不是元素）
+        assertEquals(0L, iv(refCall(ctx, "SUMARRAY", ref("FLAG"), 1L, 1L)))
+        assertEquals(0L, iv(refCall(ctx, "SUMARRAY", ref("FLAG"), 2L, 1L)))
+        // start == 长度：端点校验放行（VariableData.cs:92-99 允许等于长度），但读的是越界元素。
+        // 原版这里冒 IndexOutOfRange（.NET 裸越界），移植侧按 readInt 口径报 CodeEE。
+        assertFailsWith<CodeEE> { refCall(ctx, "MAXARRAY", ref("FLAG"), len, len) }
+    }
+
+    /** MAXC/MINCARRAY 同理：无条件读位置 start 的角色值（spec: VariableEvaluator.cs:658-677）。 */
+    @Test
+    fun maxMinCArrayEmptyRangeReturnsStartCharacter() {
+        val (ctx, _) = setupWithChara()
+        // CFLAG:*=1 下，位置 0 = 11、位置 1 = 22（见 charaRangeFunctions）
+        assertEquals(11L, iv(refCall(ctx, "MAXCARRAY", ref("CFLAG", 0, 1), 0L, 0L)))
+        assertEquals(22L, iv(refCall(ctx, "MINCARRAY", ref("CFLAG", 0, 1), 1L, 1L)))
+        assertEquals(22L, iv(refCall(ctx, "MAXCARRAY", ref("CFLAG", 0, 1), 1L, 0L)))
+        assertEquals(0L, iv(refCall(ctx, "SUMCARRAY", ref("CFLAG", 0, 1), 1L, 0L)))
     }
 
     @Test
@@ -831,12 +887,19 @@ class BuiltinVarTest {
         val (ctx, store) = env()
         store.writeInt("FLAG", longArrayOf(3), 42)
         assertEquals(42L, iv(refCall(ctx, "GETVAR", "FLAG:3")))
-        // ERB 口径：FLAG:1+2 解析为 (FLAG:1)+2，不是 FLAG:(1+2)
+        // 原版闸门在**变量项**上：`aExpression is VariableTerm` 且 `Identifier != null`，
+        // 否则 `Lang.Error.IsNotVar`（spec: FunctionMethodCreator.cs:392-405 / :418-430）。
+        // `FLAG:1+2` 解析成 CalcTerm（(FLAG:1)+2），原版直接抛，不做算术；此前移植侧
+        // 先求值再判类型，会把 GETVAR 变成计算器并多做副作用。
         store.writeInt("FLAG", longArrayOf(1), 5)
-        assertEquals(7L, iv(refCall(ctx, "GETVAR", "FLAG:1+2")))
+        val calc = assertFailsWith<CodeEE> { refCall(ctx, "GETVAR", "FLAG:1+2") }
+        assertEquals("FLAG:1+2不是变量", calc.message)
         store.writeStr("STR", longArrayOf(0), "你好")
         assertEquals("你好", sv(refCall(ctx, "GETVARS", "STR:0")))
         assertFailsWith<CodeEE> { refCall(ctx, "GETVAR", "NOSUCH:0") }
+        // 类型闸门：IsNotInt / IsNotStr（spec: FunctionMethodCreator.cs:398/:424，文案 zhs.xml:908-909）
+        assertEquals("STR:0不是整型", assertFailsWith<CodeEE> { refCall(ctx, "GETVAR", "STR:0") }.message)
+        assertEquals("FLAG:3不是字符串型", assertFailsWith<CodeEE> { refCall(ctx, "GETVARS", "FLAG:3") }.message)
     }
 
     @Test

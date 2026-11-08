@@ -328,8 +328,34 @@ class FontAdvanceTable private constructor(
  *
  * ## 确定性
  *
- * 缓存用 `HashMap<String, FontAdvanceTable?>` 但**只按键查、从不读迭代序**，候选顺序由
- * 上面那条链（显式列表）决定，所以同输入必同输出；不读时间、不用随机。
+ * 缓存是**有界 LRU**（`LinkedHashMap` accessOrder 序）但**只按键查、结果从不读迭代序**，
+ * 候选顺序由上面那条链（显式列表）决定，所以同输入必同输出；逐出只按「最久未碰」的迭代序
+ * 挑非钉住条目，被逐出的条目下次查询按同一路径重建 —— 迭代序只影响「逐谁」，不影响任何读数。
+ *
+ * ## 纯缓存论据（fix-varcapacity：为什么加界不动语义）
+ *
+ * - `resolved` 的每个值都是「按 [FontSidecarReader] 现读现解」或「装配层 [put] 直挂」的确定性
+ *   结果：`load` 的产物是 `FontAdvanceTable.parse(reader.read(sidecarPath(family)))` 的纯函数，
+ *   重建得到**内容逐字段相同**的新实例（`advance`/`lsb` 映射逐键等值）。
+ * - **实例身份的唯一跨条目用途**是 [chainFor] 里 `out.contains(table)` 的同链去重
+ *   （[FontAdvanceTable] 未覆写 equals ⇒ 身份判等）；去重少命中一次只让链里多出**内容相同**的
+ *   第二份，全部消费方（`GraphicsMethods.measureTextPixels`/`TextMetrics` 的逐跳取
+ *   advance/lsb/covers）都按内容取值、首命中语义不变。render/core 全量 grep 过：没有任何
+ *   `IdentityHashMap`/映射以 [FontAdvanceTable] 实例为键。
+ * - **例外（所以 [put] 条目钉住不逐）**：读取口为 null 的夹具/装配世界里，`put` 挂的表无从
+ *   重建，逐出会把「可解析」（[hasOwnTable] 真）打成「缺失」⇒ 那是语义变化，被钉住排除在外。
+ *   钉住条目数量由装配层自己给（随包 sidecar 家族数量级），不属脚本输入面，不构成无界。
+ * - `store.aux` 侧的本对象在 L3 哈希装置按 opaque 止步（`StateHash.kt` 的 ALLOW_PACKAGES 不含
+ *   core.font 包），缓存内容从不进状态哈希。
+ *
+ * ## 缓存上界
+ *
+ * 缓存键来自脚本（`GDRAWTEXT` / `GGETTEXTSIZE` 的字体名、`GSETFONT` 的请求名），数量
+ * 没有上界；每次请求一个不存在的名字都会留下一条「查过且没有」，每次请求一个**能 slug 到
+ * 随包文件**的变体名（「黑体」「 黑体」「黑-体」…）都会留下一份**整表副本** —— 两类都收进
+ * [MAX_RESOLVED_ENTRIES] 的 LRU：负缓存仍先按 [MAX_MISS_CACHE_ENTRIES] 自限（超限后只更新
+ * [lastReason] 不入表），正表条目超限后按最久未碰逐出、再查再重建。代价只有一个：超限之后
+ * 同一个名字再查要重新问一次读取口/重新 parse 一遍，**读数不变**。
  *
  * ## 缺失 vs 畸形（两种处理，都不静默）
  *
@@ -352,8 +378,54 @@ class FontSidecarCatalog(
     var reader: FontSidecarReader? = null,
 ) {
 
-    private val resolved = HashMap<String, FontAdvanceTable?>()
+    /**
+     * 解析缓存：**有界 LRU**（fix-varcapacity，accessOrder 序，上限 [MAX_RESOLVED_ENTRIES]）。
+     * 装配期 [put] 直挂的键在 [pinnedKeys] 里登记，**从不逐出**（见类文档「纯缓存论据」——
+     * 读取口为 null 时它们无从重建，逐出会把「可解析」打成「缺失」，那就动了语义）。
+     */
+    private val resolved: MutableMap<String, FontAdvanceTable?> =
+        object : LinkedHashMap<String, FontAdvanceTable?>(64, 0.75f, true) {}
+    private val pinnedKeys = HashSet<String>()
     private val missReasons = HashMap<String, String>()
+
+    /**
+     * 超上限时按 LRU（最久未碰优先）逐出**正表里非钉住**的条目。两类条目刻意不碰：
+     * - 钉住条目（[put] 直挂）：读取口缺席时无从重建，逐出会把「可解析」打成「缺失」——语义变化；
+     * - null（负缓存）条目：条目与 [missReasons] 的成对关系、`reasonFor` 的诊断读数都保持
+     *   逐字不变；负缓存本身已由 [MAX_MISS_CACHE_ENTRIES] 自限，且一条只是两个小字符串，
+     *   真正会刷爆内存的是「脚本造变体名 → 每个名字一份整表副本」这一面。
+     * 表内全是钉住条目时允许越上限 —— 钉住条目由装配层自己控量（随包 sidecar 家族数量级），
+     * 不属脚本输入面。
+     */
+    private fun trimResolved() {
+        if (resolved.size <= MAX_RESOLVED_ENTRIES) return
+        val it = resolved.entries.iterator()
+        while (resolved.size > MAX_RESOLVED_ENTRIES && it.hasNext()) {
+            val e = it.next()
+            if (e.value == null || e.key in pinnedKeys) continue
+            it.remove()
+        }
+    }
+
+    /**
+     * 记一条「查过且没有」并返回 null（负缓存唯一入口）。
+     *
+     * [missReasons] 的条目数与 `resolved` 里的 null 条目一一对应（[put] 与 [clearCache] 都成对
+     * 清理；[trimResolved] 从不逐出 null 条目，成对关系在逐出后照旧），所以用它当负缓存计数
+     * 即可。键由脚本给、没有上界：超过
+     * [MAX_MISS_CACHE_ENTRIES] 之后只刷新 [lastReason] 与已有键的原因，不再新增键。
+     */
+    private fun cacheMiss(family: String, reason: String): FontAdvanceTable? {
+        if (resolved.containsKey(family)) {
+            missReasons[family] = reason
+        } else if (missReasons.size < MAX_MISS_CACHE_ENTRIES) {
+            resolved[family] = null
+            missReasons[family] = reason
+            trimResolved()
+        }
+        lastReason = reason
+        return null
+    }
 
     /** 最近一次"没拿到表"的可读原因（验收/首差从这里读，不许把退化当真实度量宣称）。 */
     var lastReason: String? = null
@@ -375,11 +447,14 @@ class FontSidecarCatalog(
      */
     fun put(table: FontAdvanceTable, alias: String? = null): FontAdvanceTable {
         resolved[table.family] = table
+        pinnedKeys.add(table.family)
         missReasons.remove(table.family)
         if (alias != null && alias.isNotEmpty() && alias != table.family) {
             resolved[alias] = table
+            pinnedKeys.add(alias)
             missReasons.remove(alias)
         }
+        trimResolved()
         return table
     }
 
@@ -443,6 +518,7 @@ class FontSidecarCatalog(
     /** 丢掉已解析的表与原因（RESTART / 换宿主文件口之后重建）。 */
     fun clearCache() {
         resolved.clear()
+        pinnedKeys.clear()
         missReasons.clear()
         lastReason = null
     }
@@ -464,43 +540,48 @@ class FontSidecarCatalog(
             // classpath），core 不能假定读取口自己会做 canonical 归一（目录形态的 `RootedFileOps`
             // 在 `resolvePath` 里 normalize + startsWith 拒越界，BootHosts.kt:409-415，但那只是
             // 其中一种读取口）。越界条目按「缺失」处理并告警，不去碰读取口。
-            missReasons[family] = "sidecar 路径越界：family「$family」归一出非法条目路径 $path，按缺失退化"
-            lastReason = missReasons[family]
-            resolved[family] = null
-            return null
+            return cacheMiss(family, "sidecar 路径越界：family「$family」归一出非法条目路径 $path，按缺失退化")
         }
         val text = try {
             r.read(path)
         } catch (e: Exception) {
-            missReasons[family] = "sidecar 读取抛错：$path（${e::class.simpleName}: ${e.message}）"
-            lastReason = missReasons[family]
-            resolved[family] = null
-            return null
+            return cacheMiss(family, "sidecar 读取抛错：$path（${e::class.simpleName}: ${e.message}）")
         }
         if (text == null) {
-            missReasons[family] = "sidecar 缺失：$path 不存在（c-fontsub 成品未随包，或该家族没有度量表）"
-            lastReason = missReasons[family]
-            resolved[family] = null
-            return null
+            return cacheMiss(family, "sidecar 缺失：$path 不存在（c-fontsub 成品未随包，或该家族没有度量表）")
         }
         val table = try {
             FontAdvanceTable.parse(text, origin = path)
         } catch (e: FontSidecarFormatException) {
-            missReasons[family] = "sidecar 畸形：${e.message}"
-            lastReason = missReasons[family]
-            resolved[family] = null
-            return null
+            return cacheMiss(family, "sidecar 畸形：${e.message}")
         }
         resolved[family] = table
         if (table.family != family && !resolved.containsKey(table.family)) {
             resolved[table.family] = table
         }
+        trimResolved()
         return table
     }
 
     companion object {
         /** §3 的目录：render 模块 resources 下的 fonts 目录（classpath 侧同样叫 fonts）。 */
         const val DEFAULT_SIDECAR_DIR: String = "fonts"
+
+        /**
+         * 负缓存（「查过且没有」）的条目上限：键来自脚本给的字体名，必须与脚本输入量解耦。
+         * 取 256 是「远大于真实装配规模（随包 sidecar 家族数）又足够小」的保守值；超限后
+         * 缺失仍返回 null、[lastReason] 仍更新，只是不再入表（见 [cacheMiss]）。
+         */
+        const val MAX_MISS_CACHE_ENTRIES: Int = 256
+
+        /**
+         * 解析缓存（`resolved`）的**总条目上限**（fix-varcapacity）：负缓存由
+         * [MAX_MISS_CACHE_ENTRIES] 自限，正表此前无界 —— 脚本能造任意多个「slug 得进随包文件」
+         * 的变体名，每个变体都留一份整表副本。超限后按 LRU 逐出非钉住条目（[put] 直挂的装配
+         * 条目永不逐出，论据见类文档「纯缓存论据」）。取 512 = 负缓存上限的 2 倍：真实装配
+         * （随包家族数量级 + 脚本真实用到的名字）远够不着，只有恶意/病态输入会触发逐出。
+         */
+        const val MAX_RESOLVED_ENTRIES: Int = 512
 
         /**
          * 空字体名的归一目标取**基准环境**的 `Config.FontName`

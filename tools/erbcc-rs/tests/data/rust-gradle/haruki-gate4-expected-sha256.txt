@@ -1,0 +1,12 @@
+# erbcc-rs / rust-gradle 车道登记：闸 4 复现基准（Haruki 机，2026-11-01 组长实测）
+# 语料 = tools/erbcc-rs/tests/data/rust-manifest/corpus（3 文件小档）
+# 用途 = 「现成 Rust CLI（cargo 真二进制腿）vs JVM/Gradle 腿」四件套 sha256 全等，
+#        组长在 rust-kernel 收口时实测一次；本驱动的 parity 腿跑同一条语料必须复现这四个值：
+#   python devtools/erbcc_rs_parity.py parity --expect tools/erbcc-rs/tests/data/rust-gradle/haruki-gate4-expected-sha256.txt
+# 机相关性：manifest.txt 那行含 corpus-root 绝对路径，**换机红是预期**（口径 = CONTRACT-RUST1 §7.1/7.2，
+#   不做「仓库前缀替换后比对」的放宽）；换机后先 `python devtools/erbcc_rs_parity.py regen --lane rust-manifest`
+#   重落基准，再以新 manifest.txt 的 sha 刷新本行的登记值。其余三件与机器无关。
+program.erbc 950 152f8d4430ce5a5b0e2ead87696608a603ff1cc0f4396fb7c54949439a4db9e3
+program.meta 680 4a0a02a801aa3d53f32420784b2e30d9a8d39d74a6183799c922048b2388a01b
+program.stmt.idx 48 7f1575abc2b0242ba476b19db48681ef4c443eb8aea080a3c78c374e94d95827
+manifest.txt 1199 3d274dd48897b2ad70189a8fa275057d954f86e7a30c98f5957a4a8e11aedeeb

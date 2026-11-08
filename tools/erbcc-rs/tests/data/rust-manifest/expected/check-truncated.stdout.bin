@@ -1,0 +1,3 @@
+cases\truncated: 2 条新鲜度问题
+  ARTIFACT_SIZE: erbc.v1/program.erbc 实际 570 字节，清单登记 950 字节（写一半或被截断）
+  CONTAINER_INVALID: erbc.v1/program.erbc 段表不可信: ErbcDecodeException: 偏移 42: 段 4 偏移(677)越过文件尾(570)

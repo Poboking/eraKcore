@@ -81,7 +81,7 @@
 [结论] 三选一取 ①：**可以随包再分发，成品可入仓，族名保持 `Saitamaar`（不必改名）**。
   PD 不主张署名/不限制子集/无 RFN；源与成品的 fsType=0 与缺失 ID13/14 与该结论无冲突。
   附带口径修正：本仓 `tools/fontsubset/build_subset.py:15-16`、`core/.../font/PortFonts.kt`（c-glyphmetrics 路）、
-  `.workbuddy/CONTRACT-M4-C.md:73` 把授权写成「OFL」，应改为 public domain（这三处不属本路文件面，未改）。
+  `<internal-workdir>/CONTRACT-M4-C.md:73` 把授权写成「OFL」，应改为 public domain（这三处不属本路文件面，未改）。
 
 [遗留 TODO(verify)] 作者原站 http://keage.sakura.ne.jp 本机 DNS 不可解析（curl: Could not resolve host），
   web.archive.org 本机 80/443 均连接超时（curl exit 28）⇒ 未做「语料件 vs 原站分发件」的逐字节比对，

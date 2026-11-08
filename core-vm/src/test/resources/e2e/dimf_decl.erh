@@ -1,0 +1,14 @@
+; ---------------------------------------------------------------------------
+; #DIMF 存档通道 · 全局声明（ERH 口径，worker f4）。
+;
+; 真实装载里全局 #DIM/#DIMF 来自 ERH 头文件（ErhLoader），不是 ERB 函数体；ERB 内的
+; `#DIMF` 一律是私有声明（LineParser 恒按 isPrivate=true 解析）。所以本装置把全局声明
+; 单列成这一个无 @label 的文件，与 `SystemVariableBootstrap` 装载 ERH 的口径分开表达。
+;
+; 语义出处：specs/variables.yaml 的 float_vars 段（save_note_classic / save_note_extended）。
+; 真实语料全量只有 1 条 #DIMF（魔法相关函数.ERB:3190，DYNAMIC 私有），故存档通道
+; 用 SAVEDATA 全局变量取证（私有 DYNAMIC 本就不进任何存档）。
+; ---------------------------------------------------------------------------
+
+#DIMF SAVEDATA 倍率
+#DIMF SAVEDATA 样本, 5

@@ -5,7 +5,10 @@ import com.eratw.port.core.code.ErbcFormat
 import com.eratw.port.core.code.ErbcFormatException
 import com.eratw.port.core.code.ErbcHeader
 import com.eratw.port.core.code.ErbcReader
+import com.eratw.port.core.code.FlatPoolBudget
 import com.eratw.port.core.code.Program
+import com.eratw.port.core.code.ProgramBase
+import com.eratw.port.core.host.MemoryTier
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -237,8 +240,11 @@ object ProgramLoader {
      * @param artifactBytes `program.erbc` 字节数（[MappedErbc.byteSize]）。
      * @param metaBytes `program.meta` 字节数（`Files.size`）。
      * @param instructionCount CODE 段声明条数（只读段表 + 一个 u32，不解码）。
-     * @param requiredBytes 估算的常驻堆需求（[ProgramLoader.estimatedHeapBytes]）。
+     * @param requiredBytes 估算的常驻堆需求（[ProgramLoader.estimatedHeapBytes]；已含 [flatReserveBytes]）。
      * @param maxMemoryBytes 判定用的堆上限：`Runtime.maxMemory()`，测试用 `maxMemoryOverride` 注入。
+     * @param flatReserveBytes 分摊语句池（[com.eratw.port.core.code.FlatPoolBudget]）的预留；
+     *   0 = 本局不开 flat（或堆预算 [com.eratw.port.core.code.FlatPoolBudget.DISABLED]）。
+     *   带默认值 ⇒ 既有构造点（含单测直接 `HeapEstimate(...)` 那处）逐字不变。
      */
     data class HeapEstimate(
         val artifactBytes: Long,
@@ -246,6 +252,7 @@ object ProgramLoader {
         val instructionCount: Int,
         val requiredBytes: Long,
         val maxMemoryBytes: Long,
+        val flatReserveBytes: Long = 0L,
     ) {
         /** 堆是否够装载：`maxMemory >= requiredBytes`。 */
         val sufficient: Boolean get() = maxMemoryBytes >= requiredBytes
@@ -286,27 +293,64 @@ object ProgramLoader {
      * 真机常驻比值若偏离需重标。本机无设备，卡点在 M4-SKEL-RT。
      *
      * @param maxMemoryOverride 测试注入的堆上限；null = `Runtime.getRuntime().maxMemory()`。
+     * @param flatStatements 本局是否开分摊语句池（flat）。true ⇒ 按**判定用的同一个堆读数**把
+     *   [com.eratw.port.core.code.FlatPoolBudget.forHeap] 的 `reserveBytes` 记进
+     *   [HeapEstimate.requiredBytes] 与 [HeapEstimate.flatReserveBytes]；false（默认 = Android
+     *   生产现状）⇒ 0，读数与加本参之前**逐字节相同**。
+     *
+     *   **预检不许少报**：开的池在 512 MiB 挡实测多吃 114 MiB
+     *   （`core/code/SegmentedFlatStmt.kt:52-61`），旧口径把这笔完全漏在账外。
+     *   堆 < 512 MiB 时 [com.eratw.port.core.code.FlatPoolBudget.forHeap] 给
+     *   [com.eratw.port.core.code.FlatPoolBudget.DISABLED]（预留 0）—— 那一挡本来就被 0.8×
+     *   报出的 258 MiB 判不足（产品护栏），池不会被建，无需另加预算。
      */
     fun estimateHeap(
         programPath: Path,
         metaPath: Path,
         maxMemoryOverride: Long? = null,
+        flatStatements: Boolean = false,
     ): HeapEstimate {
-        val metaBytes = Files.size(metaPath)
+        // P12（挖虫波第三批）：**先开 `.erbc` 再取侧车大小**。
+        // 旧次序 `Files.size(metaPath)` 在前，两份产物同时缺失（解压中断 / 只随了 erbc 的
+        // 小包 / 手工删文件）时，抛出的 NoSuchFileException 指向 `program.meta` ⇒
+        // 宿主 `BootFailures.classify` 把「缺产物」报成「缺 meta」，失败屏文案与真实缺口
+        // 对不上。装载主链（[loadMapped]）本来就是先解码产物再读侧车，此处同序。
         val mapped = MappedErbc.open(programPath)
         return try {
+            val metaBytes = Files.size(metaPath)
             // CMP-23：与装载同式。段布局不符（含撒谎的 CODE 计数）在这里就抛
             // ErbcDecodeException（ErbcFormatException 族）⇒ CORRUPT_ARTIFACT，
             // 不会走到「按条数估需求」那一步。
             mapped.checkSectionLayout()
-            val instructions =
-                if (mapped.isPresent(ErbcFormat.SECTION_CODE)) mapped.instructionCount() else 0
+            // P13：CODE 缺失不再折成「0 条指令 ⇒ 需求很小 ⇒ 预检放行」。
+            // 装载链在 `MappedErbc.instructionCount()`（:273-278，CODE 不在就
+            // `startOrThrow` 抛「段 CODE 不存在」）与 `codeWindow()` 上都会拒这份产物，
+            // 预检却给出一条与真实失败无关的「够」——失败屏于是显示解码期才出现的
+            // 段损坏，而预检的读数（instructionCount = 0）已写进日志与错误报告。
+            // 改成直接复用同一条判据：预检在同一处、同一句话抛出。
+            val instructions = mapped.instructionCount()
+            val maxMemoryBytes = maxMemoryOverride ?: Runtime.getRuntime().maxMemory()
+            // 档位与 flat 预算**共用同一个堆读数**（注入挡位时也是它），否则测试里会出现
+            // 「按注入的堆判不足、按真实堆判放开」两张皮。判式见 core/host/MemoryTier.kt。
+            val generous = MemoryTier.isGenerous(maxMemoryBytes)
+            val flatReserveBytes = if (flatStatements) {
+                FlatPoolBudget.forHeap(maxMemoryBytes, generous).reserveBytes
+            } else {
+                0L
+            }
             HeapEstimate(
                 artifactBytes = mapped.byteSize.toLong(),
                 metaBytes = metaBytes,
                 instructionCount = instructions,
-                requiredBytes = estimatedHeapBytes(mapped.byteSize.toLong(), metaBytes, instructions),
-                maxMemoryBytes = maxMemoryOverride ?: Runtime.getRuntime().maxMemory(),
+                requiredBytes = estimatedHeapBytes(
+                    mapped.byteSize.toLong(),
+                    metaBytes,
+                    instructions,
+                    generous = generous,
+                    flatReserveBytes = flatReserveBytes,
+                ),
+                maxMemoryBytes = maxMemoryBytes,
+                flatReserveBytes = flatReserveBytes,
             )
         } finally {
             mapped.close()
@@ -344,25 +388,43 @@ object ProgramLoader {
      * 同配置同产物实测 +223.4 MiB ≈ 0.711×产物；§9.5 里"语句树 ≈390 MB"含编译期的 raw 原文，
      * erbc 装载档的语句树只有这一份（raw 恒 ""）。
      *
-     * 常驻那两行是 2026-10-24 N8 重标：CMP-15（Commit 96664b02）把形状掩码纳入 `line`/`col`、
-     * 池根「只登记不替换」之后，表达式池里「同形异行」的根与子树不再被归并 —— 旧读数
+     * 常驻那两行是 2026-10-24 N8 重标：CMP-15（Commit 96664b02）做的是**池根「只登记不替换」**，
+     * 表达式池里「同形异行」的根与子树因此不再被就地顶掉 —— 旧读数
      * +100.4 MiB 是**去重塌陷**口径（`program.expr(k)` 的 line/col 会被改掉、`.erbc` 再编码
      * 少节点记录，`MmapLoaderTest` 真语料差分钉过），不是可回退的目标。多出来的 ~41 MiB
      * 是池根保真的成本：+40.1 MiB 惰性档 / +37.5 MiB 整池档，两条档同幅（见交付报告分解）。
      *
+     * （2026-11-01 订正：本段旧写法把这笔成本归给「把形状掩码纳入 `line`/`col`」，与代码不符 ——
+     * CMP-15 当时明确**没有**动掩码（`ArgInterner` 的 KDoc 原话是「不能把 `line`/`col` 塞进全局
+     * 形状表：跨语句折叠必须忽略它们」），它只做了种子段的「只登记不替换」。行列号真正进掩码是
+     * INTERN-STMT（车道 fix-internstmt，为结 `MappedCodeSourceTest` 的映射/全读再编码逐字节差），
+     * 成本量级不变，变的只是归因。）
+     *
      * ⚠️ 别拿 `total − free` 那一路的读数标定：索引趟「解完即弃」把垃圾算进去了，
      * 同一份产物两次跑实测 342.6 / 388.3 / 725.5 MiB，纯 GC 时机噪声。
      *
-     * 于是产物项取 **1.45×**（= 实测 live 高水位 1.416× 之上再留 ~2.4% 余量，462 vs 445 MiB）。
-     * 波次 B 的 1.1× 是**装载形状**的标定（那时装载期不建扁平池），拿它套波次 C 就是少报。
+     * 波次 C 期间产物项取 1.45×（= 实测 live 高水位 1.416× 之上再留 ~2.4% 余量，462 vs 445 MiB）。
+     * 那一行有个**前提**：扁平池在装载链里整池构建并常驻。该前提在波次 D（8d075e7b 分段惰性
+     * 扁池）与 Android 侧 `flatStatements=false` 之后已经不成立 —— 见下节重标。
      *
-     * ⚠️ 512 MiB 挡位的余量因此从 159 MiB 收到 **~50 MiB**（侧车 `program.meta` 一份就 46.8 MiB）：
-     * 估算仍判 `sufficient=true`（M10-MEM 的出口判据形式上还成立），但这一挡实际上已经贴边。
-     * 要说清责任归属：波次 B 的**进程稳态**是 ≈+660.9 MiB（树 + 扁平池），本来就不是 512 MiB 装得下的；
-     * 只是那时扁平池在 proc 桥里建，装载预检看不见它。本波把压扁挪进装载链后，预检终于如实把它算进来。
-     * 要不要把 512 MiB 标成"需要 force_load"、或者把扁平流/表达式结点再做一层惰性化，
-     * 是产品口径的决定，不在本路（见交付消息「需组长接线」）。ART 的 footprint 涨阶与真实
-     * `load.peak` 也没在设备上复测过（本机无设备，M4-SKEL-RT）。
+     * ## 2026-11-03 重标：0.8×（4.981 真机启动被判不足的直接死因）
+     *
+     * 真机（vivo V2199A，largeHeap 上限 512 MiB）4.981 启动：预检按 1.45× 报 **540 MiB**
+     * ⇒ 512 挡恒判不足。而实测装载链（`HeapWallProbeTest`，HotSpot `-Xmx512m`，
+     * `loadMapped(compat=false, flatStatements=false)` = 真机同档夹具）：
+     *
+     * | 产物 | 装载 live 峰值（多轮） | 装载后常驻 | 旧估算 |
+     * |---|---|---|---|
+     * | 4.981（385,025,304 B / 5,462,998 指令） | **55–121 MiB**（0.15–0.33×） | +10 MiB | 540 MiB |
+     * | 4.980（329,311,670 B / 4,888,249 指令） | 43–129 MiB（0.13–0.41×） | +10 MiB | 462 MiB |
+     *
+     * 真机 ART 侧同段读数更小（失败报告里 `program.段3 语句记录 1/8 used=30MiB`，装载结束
+     * 30–52 MiB）。1.45× 的 444.8 MiB 高台属于「整池扁平流」那一代，早已不复存在。
+     *
+     * 新系数 **0.8×**：约为实测最坏值（121 MiB）的 2.6 倍，仍是刻意保守的上界；
+     * 4.981 报到 ≈301 MiB、4.980 ≈258 MiB ⇒ 512 挡留 200+ MiB 给侧车/session/运行期，
+     * 同时 256 MiB 挡仍判不足（那是产品护栏：该挡位游玩期也放不下图像预算）。
+     * 若将来装载形状再变（例如重新整池化），用 `HeapWallProbeTest` 重测后按同一张表重标。
      *
      * 预检**不许少报**由那条用例钉死；反过来多报的代价是产品行为 —— 旧口径 `2.0×`
      * （整池时代 628.6 MiB / 313.6 MiB 标定）在段 3 惰性化之后仍把需求报到 634 MiB
@@ -376,25 +438,43 @@ object ProgramLoader {
      * 成立的事算了进去（`code` 4 字 × 4 B = 16 B 已进映射页、`lines` 4 B/条已压成 2 B/条）。
      * 头里的 CODE 计数与产物字节互不替代：下界只防「产物字节小、指令条数大」的形态。
      *
-     * 两者取大：全量语料 ⇒ `max(9.3 MiB, 455.4 MiB + 7.0 MiB) ≈ 462.4 MiB`（报 462 MiB；512 MiB
-     * 判够，但只剩 ~50 MiB 给侧车/session/runtime）。撒谎的 CODE 计数**不再参与估算**：预检先跑
+     * 两者取大：4.980 全量语料 ⇒ `max(9.3 MiB, 251.2 MiB + 7.0 MiB) ≈ 258.3 MiB`（512 MiB 判够，
+     * 留 ~254 MiB 给侧车/session/runtime）。撒谎的 CODE 计数**不再参与估算**：预检先跑
      * [MappedErbc.checkSectionLayout]，与段长不符的计数在那一步就按装载口径被拒
      * （CMP-23；旧实现会把它报到 42.9 GB 后误报「堆不足」）。
      *
-     * TODO(verify)：1.45× 只在 HotSpot/G1 + 桌面产物上标定过；ART 的 footprint 涨阶、
-     * `Runtime.maxMemory()` 的实际挡位与 GC 时机是另一套口径。真机复跑 `load.peak` 之后
-     * 按屏上读数收口：`峰值 ÷ 产物字节 > 1.45` 就再往上抬，`LazyStatementDecodeTest` 那条
-     * 「不许少报」若被真机证伪，以真机为准重标 —— 卡点同旧版（本机无设备，M4-SKEL-RT）。
+     * TODO(verify)：0.8× 的实测档在 HotSpot/G1 `-Xmx512m`（`HeapWallProbeTest`）+ ART 真机
+     * 装载轨迹（30–52 MiB）两处取过数；ART 的 GC 时机仍是另一套口径。真机再出「预检判够却
+     * OOM」时报文里会带装载峰值，按「峰值 ÷ 产物字节」重标；`LazyStatementDecodeTest` 那条
+     * 「不许少报」若被真机证伪，以真机为准往上抬。
+     *
+     * @param generous 放开档（[com.eratw.port.core.host.MemoryTier]：API >= 26 且堆 >= 512 MiB）。
+     *   缺省 false = 今天的口径逐字不变，桌面装置与单测全走这一支。
+     * @param flatReserveBytes 分摊语句池的预留（[com.eratw.port.core.code.FlatPoolBudget.reserveBytes]，
+     *   由 [estimateHeap] 按同一个堆读数取；缺省 0 ⇒ 返回值与加本参之前**逐字节相同**）。
+     *   它**只加不减**（`coerceAtLeast(0)`）：预检多报的代价是产品行为，少报的代价是 OOM。
      */
     internal fun estimatedHeapBytes(
         artifactBytes: Long,
         metaBytes: Long,
         instructionCount: Int,
+        generous: Boolean = false,
+        flatReserveBytes: Long = 0L,
     ): Long {
         val codeAndLines = instructionCount.coerceAtLeast(0).toLong() * BYTES_PER_INSTRUCTION
-        val decoded = artifactBytes.coerceAtLeast(0L) * ARTIFACT_RESIDENT_NUMERATOR / ARTIFACT_RESIDENT_DENOMINATOR
+        val numerator = if (generous) {
+            ARTIFACT_RESIDENT_NUMERATOR_GENEROUS
+        } else {
+            ARTIFACT_RESIDENT_NUMERATOR
+        }
+        val denominator = if (generous) {
+            ARTIFACT_RESIDENT_DENOMINATOR_GENEROUS
+        } else {
+            ARTIFACT_RESIDENT_DENOMINATOR
+        }
+        val decoded = artifactBytes.coerceAtLeast(0L) * numerator / denominator
         val meta = metaBytes.coerceAtLeast(0L) * META_RESIDENT_NUMERATOR / META_RESIDENT_DENOMINATOR
-        return maxOf(codeAndLines, decoded + meta)
+        return maxOf(codeAndLines, decoded + meta) + flatReserveBytes.coerceAtLeast(0L)
     }
 
     /**
@@ -405,18 +485,48 @@ object ProgramLoader {
     private const val BYTES_PER_INSTRUCTION = 2L
 
     /**
-     * 产物字节 → 解码内部实时高水位的实测比例。
+     * 产物字节 → 装载链 live 峰值的高水位比例。
      *
-     * 沿革：2.0（整池顺序解码时代）→ 1.1（M10-MEM 段 3 惰性化之后，实测 0.850×）→
-     * **1.45**（T2-64 波次 C「压扁即弃」把扁平池构建挪进装载链之后：实测 live 高水位
-     * 444.8 MiB / 314.1 MiB = **1.416×**，落在 `语句池压扁即弃` 段）。
-     *
-     * 波次 C 的数字不是装载变胖，而是**原本就在进程里**的那份扁平池（波次 B 在 proc 桥构建期
-     * 建、建完一直常驻）现在算进了装载期高水位；旧 1.1× 只覆盖了「装载」那一段。
-     * 详见 [estimatedHeapBytes] 的表与 512 MiB 挡位余量的警告。
+     * 沿革：2.0（整池顺序解码）→ 1.1（段 3 惰性化）→ 1.45（波次 C「压扁即弃」，整池扁平流
+     * 常驻，实测 1.416×）→ **0.8**（2026-11-03：波次 D 分段惰性扁池 + Android 侧
+     * `flatStatements=false` 之后整池扁平流不再存在，512 MiB JVM 实测 live 峰值
+     * 55–121 MiB = 0.15–0.33×；0.8× 仍是实测最坏值的三倍上下，属刻意保守）。
+     * 重标读数与理由见 [estimatedHeapBytes] 的「2026-11-03 重标」一节。
      */
-    private const val ARTIFACT_RESIDENT_NUMERATOR = 29L
-    private const val ARTIFACT_RESIDENT_DENOMINATOR = 20L
+    private const val ARTIFACT_RESIDENT_NUMERATOR = 4L
+    private const val ARTIFACT_RESIDENT_DENOMINATOR = 5L
+
+    /**
+     * 放开档的产物项：**0.7×**（同上沿革，只是将将低一档）。
+     *
+     * 为什么在放开档敢少报一点：0.8× 标定读的是 HotSpot/G1 `-Xmx512m` 的实测最坏值
+     * 121 MiB 的 2.6 倍，而同一段装载在 ART 真机上的读数还要更小（`program.段3 语句记录
+     * used=30MiB`、装载结束 30–52 MiB —— 见上面「2026-11-03 重标」那张表下一句）。放开档
+     * 的前提是这台机给 >= 512 MiB 的堆且是 Android 8+ 的 ART，两者都满足时 0.7× 报出的
+     * 4.981 需求从 301 MiB 降到 264 MiB，**仍然是 ART 实测最坏值（52 MiB）的 5 倍**，
+     * 保守方向没变，只是把「产物大小落在 0.7–0.8 倍挡位线之间」那一批从失败屏放回来。
+     *
+     * **不动 256 MiB 挡那道产品护栏**：档位判式第二条要求堆 >= 512 MiB，
+     * 256 MiB 挡永远读保守档的 0.8×（4.980 在那一挡报 258 MiB ⇒ 恒判不足，与加本刀前逐字相同）。
+     */
+    private const val ARTIFACT_RESIDENT_NUMERATOR_GENEROUS = 7L
+    private const val ARTIFACT_RESIDENT_DENOMINATOR_GENEROUS = 10L
+
+    /**
+     * 本档产物项系数的**百分数读数**（80 / 70），只给进程那行档位取证与错误报告用：
+     * 放开档生效与否必须可回收，而「估需 = 产物 × 系数」这件事在失败屏上只以
+     * `需=…MiB` 的形式出现，不换成系数就看不出档位。
+     *
+     * 系数从 [ARTIFACT_RESIDENT_NUMERATOR] / [ARTIFACT_RESIDENT_NUMERATOR_GENEROUS] 现算，
+     * 不另抄一份数字 —— 抄一份就是下一次「账面与实际不一致」的源头。
+     * 判档用的堆读数与 [estimateHeap] 同源（缺省 = 本进程现取，装置可注入）。
+     */
+    fun artifactResidentPercent(maxMemoryBytes: Long = Runtime.getRuntime().maxMemory()): Long =
+        if (MemoryTier.isGenerous(maxMemoryBytes)) {
+            ARTIFACT_RESIDENT_NUMERATOR_GENEROUS * 100L / ARTIFACT_RESIDENT_DENOMINATOR_GENEROUS
+        } else {
+            ARTIFACT_RESIDENT_NUMERATOR * 100L / ARTIFACT_RESIDENT_DENOMINATOR
+        }
 
     /** 侧车字节 → 常驻堆：5.4 MiB / 46.9 MiB ≈ 0.115，向上取 0.15 留余量。 */
     private const val META_RESIDENT_NUMERATOR = 3L
@@ -560,6 +670,12 @@ object ProgramLoader {
         maxEnsureDepth: Int = MAX_ENSURE_DEPTH,
         /** 兼容装载档：true = 去重与校验串行（见 [ErbcStreamDecoder] 的 `serialPhases`）。 */
         serialPhases: Boolean = false,
+        /**
+         * 本段基线（R7-C3 的映射路同步；[ProgramBase.NONE] = 全量产物口径，六个基线全 0）。
+         * 缺省值保证既有调用点零改动、逐位等价（I1）；非零时本产物是补丁段窗口，
+         * 判据与 `ErbcReader.decode(bytes, base)` 逐字同源（见 [MappedErbc.toProgram]）。
+         */
+        base: ProgramBase = ProgramBase.NONE,
     ): Program {
         val source = m.path.toString()
         // 语句记录偏移表侧车（可选）：有就直接用，省掉「逐条反序列化 171 万条语句只为拿
@@ -572,7 +688,7 @@ object ProgramLoader {
         // 之前没有任何读数；失败屏因此只能把这一段算进上一段。
         mark?.onStage("program.${LoadStages.STMT_SIDECAR}")
         val program = try {
-            ErbcStreamDecoder.decode(m, null, mark, lazyStatements, stmtOffsets, maxEnsureDepth, serialPhases)
+            ErbcStreamDecoder.decode(m, null, mark, lazyStatements, stmtOffsets, maxEnsureDepth, serialPhases, base)
         } catch (e: ErbcFormatException) {
             throw withSource(e, source)
         } catch (e: IOException) {
@@ -655,10 +771,37 @@ object ProgramLoader {
     /**
      * 目录里全部产物的延迟句柄（清单对账用，顺序与 [artifactFiles] 一致）。
      * 每个句柄只花 38 字节的头 + 段界数组；未物化的产物不进堆。
+     *
+     * 失败回滚：第 N 个文件开不出来（坏头 / 权限 / 被占用）时，前 N-1 个句柄**就地关掉**再上抛。
+     * 旧写法把已开的列表直接丢给 GC —— 装机首启一目录几千个产物就是几千个 fd，
+     * Android 的 fd 上限先到，屏上只剩一句含糊的「装载失败」，看不出是哪个文件坏。
      */
     fun deferredDirectory(dir: Path): List<MappedProgramSource> {
         val root = dir.toAbsolutePath().normalize()
-        return artifactFiles(root).map { p -> deferredMapped(p) }
+        val opened = ArrayList<MappedProgramSource>()
+        try {
+            for (p in artifactFiles(root)) opened += deferredMapped(p)
+            return opened
+        } catch (t: Throwable) {
+            closeDeferredHandles(opened)
+            throw t
+        }
+    }
+
+    /**
+     * 逐个关句柄（[deferredDirectory] 的失败回滚口）。
+     *
+     * 单个关不掉**不再上抛**：回滚路上首因还在往上走，这里抛会把真正的坏文件换成一条
+     * close 异常。幂等 —— [MappedProgramSource.close] 自己判过重复。
+     */
+    internal fun closeDeferredHandles(handles: List<MappedProgramSource>) {
+        for (h in handles) {
+            try {
+                h.close()
+            } catch (e: RuntimeException) {
+                // 见 KDoc：回滚不掩盖首因。
+            }
+        }
     }
 
     /**

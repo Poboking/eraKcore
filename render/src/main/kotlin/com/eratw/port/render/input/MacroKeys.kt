@@ -89,6 +89,26 @@ object MacroKeys {
     }
 
     /**
+     * 宏预填的唯一判据（WIRE-5 / C-MACRO-FLAG@1）。
+     *
+     * 来源 = 当前等待请求的 `InputRequest.macroEnabled`
+     * （`core-vm/src/main/kotlin/com/eratw/port/core/host/InputSink.kt:86`，由 sem 在
+     * `StatementExecutor.kt:3907` 以 `ctx.inputMacroEnabled` 下发；状态源
+     * `ExecContext.inputMacroEnabled`，由 `DISABLE_INPUT_MACRO` / `ENABLE_INPUT_MACRO` 写入，
+     * 均不改 core-vm）。语义：`false` ⇒ 输入宿主**不执行宏预填**（宏按钮点击 / 功能键宏预填）；
+     * `true`（缺省）⇒ 行为与本波前逐项一致。
+     *
+     * 这条判据**只此一处**：`dispatch` / `prefillFromMenu` 与壳层宏按钮都从这里取，
+     * 不许在各调用点各写一份 `if`（R4-AC3 单一来源）。
+     *
+     * TODO(verify)：`DISABLE_INPUT_MACRO` 的原版生效面是**提交文本的 parseInput 宏展开**
+     * （括号宏 `()` 的重复输入与 `\e` 的 MesSkip，见 `specs/builtin-functions.yaml:2286`），
+     * 移植侧无该子系统（OD2），故本波把判据接到宿主侧唯一存在的宏机制（预填）；
+     * `实用设置.ERB:571-573` 的「原样记录含花括号的预设宏」意图无法在宿主侧证伪。
+     */
+    fun prefillAllowed(macroEnabled: Boolean): Boolean = macroEnabled
+
+    /**
      * 按键分派（`ProcessCmdKey` 的 `default` 支 + 两道前置门槛）。
      *
      * @param keyCode `keyData & Keys.KeyCode` 的整值（:492）
@@ -100,6 +120,8 @@ object MacroKeys {
      * @param useKeyMacro `Config.UseKeyMacro`（:488）
      * @param waitingPrimitive 「门槛一」整条的结论，即 `console != null && console.IsWaitingPrimitive`
      *   （:385，见类文档；单喂 `IsWaitingPrimitive` 会在无核心层时少预填一次）
+     * @param macroEnabled 当前等待请求的宏预填开关（[prefillAllowed]）；缺省 true。
+     *   为假时无修饰功能键那一路**不预填**（返回 [Decision.Ignored]）；记录与换组不受影响（WIRE-5）
      */
     fun dispatch(
         keyCode: Int,
@@ -109,6 +131,7 @@ object MacroKeys {
         group: Int,
         useKeyMacro: Boolean = true,
         waitingPrimitive: Boolean = false,
+        macroEnabled: Boolean = true,
     ): Decision {
         if (waitingPrimitive) {
             // :385-388：等待原始键期间，整段 ProcessCmdKey 提前返回，宏一律不响应。
@@ -124,7 +147,9 @@ object MacroKeys {
                 // :499-506：Shift+Fn 存宏（空框不覆盖），吞键。
                 Modifier.SHIFT -> Decision.Record(fkey, group, boxText, write = boxText.isNotEmpty())
                 // :507-512：无修饰预填（宏为空即清框），吞键。
-                Modifier.NONE -> Decision.Prefill(macroAtSlot)
+                // WIRE-5：macroEnabled == false 时不预填（[prefillAllowed]），整条不响应。
+                Modifier.NONE ->
+                    if (prefillAllowed(macroEnabled)) Decision.Prefill(macroAtSlot) else Decision.Ignored
                 // :493-495 的三个旗标都不成立 ⇒ 整条 default 走完 break，什么都不做。
                 Modifier.CONTROL, Modifier.OTHER -> Decision.Ignored
             }
@@ -143,14 +168,18 @@ object MacroKeys {
      *
      * 三道闸按原版的合取顺序整条排在取宏**之前**（:1567），少一条都会在
      * 「核心层还没建 / 正在跑程序 / 开关关了」时多写一次框内文本。
+     *
+     * @param macroEnabled 当前等待请求的宏预填开关（[prefillAllowed]）；缺省 true。
+     *   为假时不预填（WIRE-5）。
      */
     fun prefillFromMenu(
         macro: String,
         inProcess: Boolean,
         useKeyMacro: Boolean = true,
         consolePresent: Boolean = true,
+        macroEnabled: Boolean = true,
     ): Decision {
-        if (!consolePresent || inProcess || !useKeyMacro || macro.isEmpty()) {
+        if (!consolePresent || inProcess || !useKeyMacro || macro.isEmpty() || !prefillAllowed(macroEnabled)) {
             return Decision.Ignored
         }
         return Decision.Prefill(macro)

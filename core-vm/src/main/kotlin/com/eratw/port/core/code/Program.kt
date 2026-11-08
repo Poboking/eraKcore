@@ -1,11 +1,13 @@
 package com.eratw.port.core.code
 
 import com.eratw.port.core.expr.Expr
+import com.eratw.port.core.host.MemoryTier
 import com.eratw.port.core.sem.FlatStmtSource
 import com.eratw.port.core.stmt.ArgInterner
 import com.eratw.port.core.stmt.ExpressionArrayArgument
 import com.eratw.port.core.stmt.FunctionCode
 import com.eratw.port.core.stmt.InstructionStmt
+import com.eratw.port.core.stmt.SpCallSharpArgument
 import com.eratw.port.core.stmt.Statement
 import java.util.AbstractMap
 import java.util.AbstractSet
@@ -223,6 +225,22 @@ internal interface LazyStatementPool {
      * 返回的下标**片内从 0 起**：调用方按 `index - from` 访问。
      */
     fun buildFlatStatementsRange(from: Int, until: Int): FlatStatements
+
+    /**
+     * CALLSHARP 装载趟扫描（CSHARP-WIRE C2）：返回本池里「语句记录标签 = CALL_SHARP」的
+     * **池内下标**（升序；调用方按 `index + 池基线` 折回绝对下标）。
+     *
+     * 实现要求：**不物化语句** —— 惰性档逐条读记录首字节判标签（语句记录布局
+     * `u8 StmtTag + i32 line + u32 raw + u32 codeName + …`，ErbcWriter.stmtHead 的写序与
+     * `RecordSource.readStatement` 的读序逐字同源），命中 CALLSHARP 标签的条目才交给
+     * 调用方走 [statementAt] 物化（那里才是身份/规范化的权威路径）。全量语料 1,716,636 条
+     * 记录的一趟标签字节扫 ≈ 一次顺序映射读，语句对象零常驻。
+     *
+     * 缺省空表 = 供给方不认识本扫描时**宁可漏报**：漏报的行退回「首执行裁决」的旧路
+     * （`SharpLinkTable` 未命中时在执行期记行错），不会误报；误报（把普通语句当 CALLSHARP
+     * 物化出来）才是要防的方向。
+     */
+    fun sharpStatementIndices(): IntArray = IntArray(0)
 }
 
 /**
@@ -249,6 +267,15 @@ internal interface LazyFunctionTable : List<FunctionInfo> {
 
     /** 是否有任一函数带形参名（段 8 声明）；不物化任何 [FunctionInfo]。 */
     fun hasAnyParamNames(): Boolean
+
+    /**
+     * 第 [index] 个函数的形参名（[hasAnyParamNames] 的逐条版本，同样**不物化** [FunctionInfo]）。
+     *
+     * 存在理由：`ProcessRuntime` 的局部长度注册要对全表逐条数 ARGF 形参，走
+     * [Program.paramNames] 会把 M11-MEM 刻意按需解码的 110,072 条一次性击穿并**永久驻留**
+     * （惰性表 `get` 写缓存）。无段 8 = 空表，与 `FunctionInfo.paramNames` 的缺席读数同值。
+     */
+    fun paramNamesAt(index: Int): List<String>
 }
 
 /**
@@ -263,6 +290,26 @@ internal interface LazyFunctionTable : List<FunctionInfo> {
  *
  * 语句池自 M10-MEM 起可以是**惰性**的（[attachLazyStatementPool]）：此时 [statements] 保持空，
  * 下标读数走 [LazyStatementPool.totalCount]，取值走 [statementAt]。
+ *
+ * ## 基线（R7-L1 `codeBase` 偏移基座）：池是绝对下标空间上的**窗口**
+ *
+ * 补丁（`mods/` 里的口上 .ERB）在设备端单独编译，装载期拼在 base 指令流/池之后。为了让补丁的
+ * 指令**直接**带绝对下标（marker 的 `a`、`_SET_INT` 的 `b`、`_SET_STR` 的 `b`、`_EVAL_*` 的 `a`），
+ * 四个池各有一个**基线**（[longBase] / [stringBase] / [exprBase] / [statementBase]，默认 0）：
+ * `add*` 返回 `base + 本池序号`，`*At` 取用与四个 `*Count` 读数都按绝对下标口径。
+ *
+ * **为什么在编译期偏移，而不是装载期 remap**（ADR-004 的操作数模式表是判决依据）：
+ * 同一个 `a`/`b` 位可能是槽号、池下标、函数下标或跳转偏移，语义只由 opcode 决定；
+ * 装载期要做等价改写就必须**遍历整段指令流**逐条识别操作数模式，漏判/错判一次就是静默错值
+ * （某个角色念了别人的台词），而这条遍历本身也是 O(指令数) 的高风险动作。编译期只在
+ * `add*` 的出口做一次加法：O(1)、不可能漏、且编译产物与「一次性全量编译」的同一段字节可比。
+ * 反向污染由调用方负责规避：补丁必须用**独立** [ConstantPool]（`CodeBuilder.build()` 之后池被
+ * [seal] 封死，且语句池按引用共享给已建 Program —— 见 `IncrementalCompileParityTest`）。
+ *
+ * 窗口语义（不许静默错读）：本池只持有绝对下标 `[base, base + 本池条数)` 的条目；
+ * 取用 `base` 以下的绝对下标是**调用方的错**（那段归 base 池），按数组越界抛
+ * [IndexOutOfBoundsException]（`index - base` 为负），不做「回落到 0」之类的纠正。
+ * 快照类访问器（[longArray] / [stringArray] / [exprList] / [statementList]）只含本池条目。
  */
 /**
  * 表达式池的**惰性供给**（2026-10-24 M12-EXPRLAZY）。
@@ -281,9 +328,51 @@ internal interface LazyExprSource {
 
     /** 第 [index] 个池根（按需物化；同一下标恒同一实例由实现保证）。 */
     fun node(index: Int): Expr
+
+    /**
+     * 关掉产物文件通道之后，本池还能不能继续取值（CMP-19 的表达式侧判据）。
+     *
+     * 真 = 运行期取用全部落在装载期就 pin 好的映射里；假 = 还有回读要 `channel.map`，
+     * 于是 [ConstantPool.releaseMmap] 不许关通道（宁可多留 1 fd）。缺省真：非映射档
+     * （堆内表达式池 / 测试桩）本来就不碰产物文件。
+     */
+    val channelFreeForRuntime: Boolean get() = true
 }
 
-class ConstantPool {
+class ConstantPool(
+    /**
+     * 常量（Long）池基线：本池第 0 条在绝对下标空间里的位置（默认 0 = 无基线）。
+     * 只由 [CodeBuilder] 的 `longBase` 喂入；装载链（`ErbcReader`/`ErbcStream`）恒用缺省值。
+     */
+    private val longBase: Int = 0,
+    /** 字符串池基线；语义同 [longBase]。 */
+    private val stringBase: Int = 0,
+    /** 表达式池基线；语义同 [longBase]（惰性表达式池同样按绝对下标取用）。 */
+    private val exprBase: Int = 0,
+    /** 语句池基线；语义同 [longBase]（惰性语句池同样按绝对下标取用）。 */
+    private val statementBase: Int = 0,
+    /**
+     * 组合池的 base（R7 波 C）：非 null 时本池是 base 之后的**续段**，
+     * 所有 `*At` 与计数先问 base。null = 普通池（既有路径逐位不变）。
+     *
+     * 为什么要「组合」而不是「合并」：base 的语句池 1,100,720 条 / 表达式池 328,661 条
+     * 是**惰性解码**的（装载时不常驻），整池拷进新池等于把几十 MB 重新物化一遍，直接
+     * 撞装载峰值闸。于是装载期只把「绝对下标空间」拼起来：`index < base.<x>Count` 归
+     * base，其余按本池基线折回。取用分派收在池内部，[Program] 的六个访问点一行都不用改。
+     *
+     * 本池只作为装载期拼装出来的**续段**：构造期必须为空（此时它是 base 的纯透传视图），
+     * 之后只允许往续段追加（补丁那几十 KB），base 段永远不写 —— 所有 `add*` 的返回下标
+     * 仍是 `基线 + 本段序号`，因为构造期不变式已经把基线钉在 base 的计数上。
+     */
+    private val basePool: ConstantPool? = null,
+) {
+    init {
+        require(longBase >= 0) { "longBase 不能为负: $longBase" }
+        require(stringBase >= 0) { "stringBase 不能为负: $stringBase" }
+        require(exprBase >= 0) { "exprBase 不能为负: $exprBase" }
+        require(statementBase >= 0) { "statementBase 不能为负: $statementBase" }
+    }
+
     private val longs = ArrayList<Long>()
 
     /**
@@ -322,44 +411,95 @@ class ConstantPool {
      */
     private val statements = ArrayList<Statement>()
 
+    /**
+     * 组合池的构造期不变式（R7 波 C）：fail-fast，不做静默纠错。
+     *
+     * 四条基线必须**正好**接在 base 池的绝对计数之后 —— 差一点就是绝对下标空间里出现
+     * 空洞或重叠，取用会静默落到错的池（或者干脆越界），而装载期拼出来的池没有第二处
+     * 会去校验它。本池在构造期还必须还是空的：那一刻它是 base 的**纯透传视图**，
+     * 带着条目进来只可能是「把别人的池接错位置」（基线对不上条目归属），续段条目
+     * 应当由拼装方在构造之后追加（补丁那几十 KB）。
+     *
+     * 位置说明：本 init 必须排在四个列表属性的初始化器**之后**（Kotlin 按声明序执行
+     * 初始化器与 init 块），否则读到的是尚未赋值的字段。
+     */
+    init {
+        val base = basePool
+        if (base != null) {
+            require(longBase == base.longCount) {
+                "组合池 longBase 必须等于 base 池的 longCount：期望 ${base.longCount}，实际 $longBase"
+            }
+            require(stringBase == base.stringCount) {
+                "组合池 stringBase 必须等于 base 池的 stringCount：期望 ${base.stringCount}，实际 $stringBase"
+            }
+            require(exprBase == base.exprCount) {
+                "组合池 exprBase 必须等于 base 池的 exprCount：期望 ${base.exprCount}，实际 $exprBase"
+            }
+            require(statementBase == base.statementCount) {
+                "组合池 statementBase 必须等于 base 池的 statementCount：期望 ${base.statementCount}，实际 $statementBase"
+            }
+            require(longs.isEmpty() && strings.isEmpty() && exprs.isEmpty() && statements.isEmpty()) {
+                "组合池构造期本池不许已有条目（续段应在构造之后追加）：" +
+                    "long=${longs.size} string=${strings.size} expr=${exprs.size} statement=${statements.size}"
+            }
+        }
+    }
+
     /** 惰性语句池供给（M10-MEM）；null = 常规池（[statements] 本体）。 */
     private var lazyStatements: LazyStatementPool? = null
 
     /** 原文是否已被释放（[releaseStatementRaws]）；惰性池的后续条目也要照此处理。 */
     private var rawsReleased = false
 
+    /** 追加常量，返回**绝对**下标（`longBase + 本池序号`）。 */
     fun addLong(value: Long): Int {
         checkWritable()
         val idx = longIndex!!
-        return idx.getOrPut(value) {
+        return longBase + idx.getOrPut(value) {
             longs.add(value)
             longs.size - 1
         }
     }
 
+    /** 追加字符串，返回**绝对**下标（`stringBase + 本池序号`）。 */
     fun addString(value: String): Int {
         checkWritable()
         val idx = stringIndex!!
-        return idx.getOrPut(value) {
+        return stringBase + idx.getOrPut(value) {
             strings.add(value)
             strings.size - 1
         }
     }
 
+    /** 追加表达式，返回**绝对**下标（`exprBase + 本池序号`）；结构相等仍复用同一条目。 */
     fun addExpr(value: Expr): Int {
         checkWritable()
         check(lazyExprs == null) { "表达式池是惰性装载的（M12-EXPRLAZY），不能再追加条目" }
         // Expr 是 data class 树，结构相等即可复用；同一表达式在池里出现多次没有意义。
         val idx = exprIndex!!
         val existing = idx[value]
-        if (existing != null) return existing
+        if (existing != null) return exprBase + existing
         exprs.add(value)
         idx[value] = exprs.size - 1
-        return exprs.size - 1
+        return exprBase + exprs.size - 1
     }
 
-    fun longAt(index: Int): Long = longs[index]
-    fun stringAt(index: Int): String = strings[index]
+    /**
+     * 常量取用（绝对下标）。组合池先问 base：`index < basePool.longCount` 归 base，
+     * 其余按 `longBase` 折回本池序号；越界仍抛 [IndexOutOfBoundsException]（不静默回落）。
+     */
+    fun longAt(index: Int): Long {
+        val base = basePool
+        if (base != null && index < base.longCount) return base.longAt(index)
+        return longs[index - longBase]
+    }
+
+    /** 字符串取用（绝对下标；组合池分派口径同 [longAt]）。 */
+    fun stringAt(index: Int): String {
+        val base = basePool
+        if (base != null && index < base.stringCount) return base.stringAt(index)
+        return strings[index - stringBase]
+    }
     /** 惰性表达式供给（M12-EXPRLAZY）；null = 常规池（[exprs] 本体）。 */
     private var lazyExprs: LazyExprSource? = null
 
@@ -378,7 +518,15 @@ class ConstantPool {
         lazyExprs = source
     }
 
-    fun exprAt(index: Int): Expr = lazyExprs?.node(index) ?: exprs[index]
+    /**
+     * 表达式池取用（绝对下标）：惰性池按 `index - exprBase` 物化，常规池同口径直取；
+     * 组合池先把 `index < basePool.exprCount` 的那一段交给 base（不物化本池的任何条目）。
+     */
+    fun exprAt(index: Int): Expr {
+        val base = basePool
+        if (base != null && index < base.exprCount) return base.exprAt(index)
+        return lazyExprs?.node(index - exprBase) ?: exprs[index - exprBase]
+    }
 
     /**
      * 语句池追加（契约 C2）：恒新开条目并返回其下标；**不去重、不按身份合并**。
@@ -390,7 +538,7 @@ class ConstantPool {
     fun addStatement(s: Statement): Int {
         check(lazyStatements == null) { "语句池是惰性装载的（段 3 索引表），不能再追加条目" }
         statements.add(s)
-        return statements.size - 1
+        return statementBase + statements.size - 1
     }
 
     /**
@@ -414,8 +562,26 @@ class ConstantPool {
     /**
      * 见 [Program.releaseMmap]：非惰性池在装载返回前就由装载层关掉了映射（`keepChannel=false`），
      * 所以这里恒报「不再回读产物文件」。
+     *
+     * **两条池都要点头才关**（CMP-19 补门）：语句池与表达式池共用一个产物通道，
+     * 而 [LazyStatementRecords.releaseMmap] 只知道自己那两条回读路。表达式池在装载期
+     * 没能把段 2 整段 pin 住时（串表数据块超 128 MiB，或映射建不出来静默退成分块窗口），
+     * 它的运行期取用仍要换块 —— 先前只问语句池就把通道关了，症状是**玩几十分钟后**
+     * 第一次取用某个没物化过的节点才炸「映射已关闭」。判据见 [LazyExprSource.channelFreeForRuntime]。
+     *
+     * **组合池再叠一层**（R7 波 C）：续段与 base 池各管自己的通道，本池不许替 base 决定
+     * 关不关，所以先问 base —— 语义是「两者都允许才关」：base 说不行（它的串表太大、
+     * 运行期还要换块）就直接 false，本段连自己那条通道都不关。顺序上必须 base 在前：
+     * 通道一旦关掉就收不回来（JVM 不 unmap，已建映射仍可读），先关 base 再发现本段还要
+     * 通道，就变成「base 已关、本段想开」的不可逆状态；反过来先问 base 则不会有这种状态。
      */
-    internal fun releaseMmap(): Boolean = lazyStatements?.releaseMmap() ?: true
+    internal fun releaseMmap(): Boolean {
+        val base = basePool
+        if (base != null && !base.releaseMmap()) return false
+        val exprs = lazyExprs
+        if (exprs != null && !exprs.channelFreeForRuntime) return false
+        return lazyStatements?.releaseMmap() ?: true
+    }
 
     /**
      * 已物化（= 已留在池缓存里、之后可原地回读）的语句条数（诊断/perf 装置口径）：
@@ -423,6 +589,9 @@ class ConstantPool {
      *
      * T2-64 波次 C 的装载期「压扁即弃」**不经过**这条计数：压扁趟逐条解码后当场弃树，
      * 不进缓存 ⇒ 装载返回时惰性档仍恒为 0。
+     *
+     * 组合池（R7 波 C）只报**续段**读数：base 的物化量归 base 池自己（诊断口径不叠加，
+     * 叠加会诱导「整池已物化」的误判，而 base 恰恰是按需解码的）。
      */
     internal val materializedStatementCount: Int
         get() = lazyStatements?.materializedCount ?: statements.size
@@ -431,19 +600,72 @@ class ConstantPool {
      * T2-64 波次 D：产出 `[from, until)` 这一片的扁平流。惰性挡走按片流式压扁
      * （[LazyStatementPool.buildFlatStatementsRange]），常规挡（编译器/内存装置）语句本就在池里，
      * 直接对子表 encode。
+     *
+     * 入参是**绝对**下标（与 [statementCount] 同口径），按 `statementBase` 折回本池序号；
+     * 返回的下标仍按「片内从 0 起」口径。
+     *
+     * 组合池（R7 波 C）按分片位置分三支：整片落在 base ⇒ 原样转给 base（零物化）；
+     * 整片落在续段 ⇒ 走本池（惰性挡仍按片流式压扁）；**跨边界** ⇒ 只有这一支会把片内
+     * 条目逐条取出来拼（片大小 4,096，与既有的「整片物化」同量级，不是整池拷贝）。
      */
     internal fun buildFlatStatementsRange(from: Int, until: Int): FlatStatements {
-        lazyStatements?.let { return it.buildFlatStatementsRange(from, until) }
-        return FlatStatements.encode(statements.subList(from, until), emptyList())
+        val base = basePool
+        if (base != null) {
+            val boundary = base.statementCount
+            if (until <= boundary) return base.buildFlatStatementsRange(from, until)
+            if (from < boundary) {
+                val slice = ArrayList<Statement>(until - from)
+                for (i in from until until) slice.add(statementAt(i))
+                return FlatStatements.encode(slice, emptyList())
+            }
+        }
+        val f = from - statementBase
+        val u = until - statementBase
+        lazyStatements?.let { return it.buildFlatStatementsRange(f, u) }
+        return FlatStatements.encode(statements.subList(f, u), emptyList())
     }
 
+    /**
+     * 语句池取用（绝对下标）：惰性池按 `index - statementBase` 物化，常规池同口径直取；
+     * 组合池先把 `index < basePool.statementCount` 的那一段交给 base —— **本池的惰性供给
+     * 一次都不碰**，这正是「取补丁段不触发 base 物化」的判据所在。
+     */
     fun statementAt(index: Int): Statement {
+        val base = basePool
+        if (base != null && index < base.statementCount) return base.statementAt(index)
         val lazy = lazyStatements
-        if (lazy == null) return statements[index]
-        val s = lazy.statementAt(index)
+        if (lazy == null) return statements[index - statementBase]
+        val s = lazy.statementAt(index - statementBase)
         // 释放原文之后才物化的条目同样不落原文（口径与 releaseStatementRaws 一致）
         if (rawsReleased) s.releaseRaw()
         return s
+    }
+
+    /**
+     * CALLSHARP 装载趟扫描（CSHARP-WIRE C2）：返回**绝对**下标升序的 CALLSHARP 语句候选。
+     *
+     * 组合池先把 base 段的候选原样并进来（base 返回的是它自己绝对空间里的下标，
+     * 拼接后即本池的绝对下标 —— 与 [statementAt] 的 base 分派同一口径）；续段惰性档
+     * 走 [LazyStatementPool.sharpStatementIndices]（记录标签字节扫，不物化），常规档
+     * 直接按 args 形态识别（语句树已在堆内，`is SpCallSharpArgument` 就是权威判据 ——
+     * `CallSharpStmt` 是唯一携带该参数形态的语句，ErbcWriter.writeStatement 的
+     * `is CallSharpStmt -> stmtHead(…, StmtTag.CALL_SHARP, …)` 与此一一对应）。
+     *
+     * 候选 ≠ 裁决：名字是否常量、注册表是否命中都在 [com.eratw.port.core.fn.prefillSharpLinks]
+     * （取用方）做 —— 本方法只回答「哪些下标值得物化一眼」。
+     */
+    internal fun sharpStatementIndices(): IntArray {
+        val out = ArrayList<Int>()
+        basePool?.let { base -> for (i in base.sharpStatementIndices()) out.add(i) }
+        val lazy = lazyStatements
+        if (lazy != null) {
+            for (i in lazy.sharpStatementIndices()) out.add(statementBase + i)
+        } else {
+            for (i in statements.indices) {
+                if (statements[i].args is SpCallSharpArgument) out.add(statementBase + i)
+            }
+        }
+        return out.toIntArray()
     }
 
     /**
@@ -473,11 +695,53 @@ class ConstantPool {
         return exprs
     }
 
+    // ------------------------------------------------------------------
+    // R7-C2 overlay 的续段逐位追加（只由 ProgramOverlay 在构造 Program 之前调用）
+    // ------------------------------------------------------------------
+
+    /**
+     * 逐位追加一条常量，返回**绝对**下标（`longBase + 本池序号`）——**不走 [addLong] 的去重**。
+     *
+     * 只服务 [ProgramOverlay] 的续段拼装：补丁的池条目在绝对下标空间里与 base **位对位**——
+     * 补丁指令的操作数是补丁编译期按基线算好的绝对下标，拼接必须让 `longAt(补丁下标)`
+     * 精确返回补丁池那一条。若走 [addLong] 的去重，「与 base 同值」的条目会折回 base 的
+     * 既有下标、不落新槽：补丁下标处变成空洞或错值，池计数也不再增长。所以这里绕过去重
+     * 索引直接 `longs.add`——同值条目在组合池里允许出现两份（base 一份、续段一份），
+     * 唯一权威是**下标自洽**（I2 线性自检校验的就是下标界）。
+     *
+     * 组合池的基线在构造期不变式里已钉在 base 的计数上，因此本方法的返回值与「补丁
+     * 编译期算出的绝对下标」逐条对齐。
+     */
+    internal fun appendLongDirect(value: Long): Int {
+        checkWritable()
+        longs.add(value)
+        return longBase + longs.size - 1
+    }
+
+    /** 字符串池的续段逐位追加；语义同 [appendLongDirect]（不走 [addString] 的去重）。 */
+    internal fun appendStringDirect(value: String): Int {
+        checkWritable()
+        strings.add(value)
+        return stringBase + strings.size - 1
+    }
+
+    /** 表达式池的续段逐位追加；语义同 [appendLongDirect]（不走 [addExpr] 的结构相等去重）。 */
+    internal fun appendExprDirect(value: Expr): Int {
+        checkWritable()
+        check(lazyExprs == null) { "表达式池是惰性装载的（M12-EXPRLAZY），不能再追加条目" }
+        exprs.add(value)
+        return exprBase + exprs.size - 1
+    }
+
     /**
      * 冻结（MEM-OPT）：释放三个去重索引（[longIndex]/[stringIndex]/[exprIndex]）的引用，
      * 之后任何 add* 抛 IllegalStateException。由 [Program] 构造期调用 —— 池条目
      * （longs/strings/exprs/statements 四个列表）原样保留，只读路径全部不受影响。
      * 语句池本就无索引，addStatement 在冻结后依旧可用（ErbcReader 重灌即依赖这一点）。
+     *
+     * 组合池（R7 波 C）：**只封本段，不许去 seal base**。base 池早由它自己的 `Program`
+     * 构造期封过，续段视图再封一次没有意义，却会把「base 池还能不能被别人用」这件
+     * 事替 base 决定掉（base 是共享的只读对象）。
      */
     internal fun seal() {
         longIndex = null
@@ -500,8 +764,13 @@ class ConstantPool {
      * 惰性池（M10-MEM）：只清**已物化**的条目并立起 [rawsReleased] 标记，
      * 之后每条物化的语句在 [statementAt] 里当场清 raw ⇒ 池内语句的 raw 口径与整池遍历
      * 逐条一致，而不会因为「释放原文」这一件装配期小事把 171 万条语句全解码一遍。
+     *
+     * 组合池（R7 波 C）先转给 base 一次：续段接管运行期之后，base 池的 131 MiB 原文驻留
+     * 没有第二个释放点（base 自己的 `Program` 已不再是运行期入口）。幂等 —— 已经清过的
+     * 条目再清一遍就是空操作。
      */
     fun releaseStatementRaws() {
+        basePool?.releaseStatementRaws()
         rawsReleased = true
         lazyStatements?.let { it.releaseRaws(); return }
         for (i in statements.indices) statements[i].releaseRaw()
@@ -509,10 +778,16 @@ class ConstantPool {
 
     val longArray: LongArray get() = longs.toLongArray()
     val stringArray: Array<String> get() = strings.toTypedArray()
-    /** 表达式池快照（`ErbcWriter`/反汇编往返用）：惰性档会**物化整池**，只许在诊断/落盘路径调。 */
+    /**
+     * 表达式池快照（`ErbcWriter`/反汇编往返用）：惰性档会**物化整池**，只许在诊断/落盘路径调。
+     * 只含本池条目（绝对下标 `[exprBase, exprCount)`）；`exprBase` 恒 0 的装载链逐字不变。
+     *
+     * 组合池（R7 波 C）同样只吐**续段**：`exprBase until exprCount` 这段区间整体落在 base 之上，
+     * base 的条目一条都不会被物化 —— 那正是「不合并池」要避免的拷贝。
+     */
     val exprList: List<Expr>
-        get() = if (lazyExprs == null) exprs.toList() else ArrayList<Expr>(exprCount).apply {
-            for (i in 0 until exprCount) add(exprAt(i))
+        get() = if (lazyExprs == null) exprs.toList() else ArrayList<Expr>(exprCount - exprBase).apply {
+            for (i in exprBase until exprCount) add(exprAt(i))
         }
 
     /**
@@ -520,6 +795,8 @@ class ConstantPool {
      *
      * 惰性池的快照 = 按下标升序整池物化（M10-MEM）：升序物化与改造前的顺序解码同一口径，
      * 但会把这一池都拉进堆 —— 只有真的要整池快照的冷路径（汇编往返）才调它。
+     *
+     * 组合池（R7 波 C）只含**续段**条目（口径同 [exprList]）：base 的语句一条都不物化。
      */
     val statementList: List<Statement>
         get() {
@@ -530,12 +807,23 @@ class ConstantPool {
             return out
         }
 
-    val longCount: Int get() = longs.size
-    val stringCount: Int get() = strings.size
-    val exprCount: Int get() = lazyExprs?.nodeCount ?: exprs.size
+    /**
+     * 常量池条数（绝对口径：`longBase + 本池条数`）。
+     *
+     * 组合池下这条公式**不用改**：构造期不变式已经钉住 `longBase == basePool.longCount`，
+     * 所以算出来正好是 `base 条数 + 续段条数`。
+     */
+    val longCount: Int get() = longBase + longs.size
+    /** 字符串池条数（绝对口径；组合池口径同 [longCount]）。 */
+    val stringCount: Int get() = stringBase + strings.size
+    /** 表达式池条数（绝对口径；惰性档读段头声明值；组合池口径同 [longCount]）。 */
+    val exprCount: Int get() = exprBase + (lazyExprs?.nodeCount ?: exprs.size)
 
-    /** 语句池条数：惰性池 = 段 3 声明的记录条数（不物化任何条目）。 */
-    val statementCount: Int get() = lazyStatements?.totalCount ?: statements.size
+    /**
+     * 语句池条数：惰性池 = 段 3 声明的记录条数（不物化任何条目）；绝对口径。
+     * 组合池口径同 [longCount]（`statementBase == basePool.statementCount`）。
+     */
+    val statementCount: Int get() = statementBase + (lazyStatements?.totalCount ?: statements.size)
 }
 
 /**
@@ -576,7 +864,42 @@ class Program private constructor(
      * 内存编译的 Program 恒为 [CallArgSource.IN_MEMORY]。
      */
     val callArgSource: CallArgSource,
+
+    /**
+     * 代码基线（R7-L1）：本 Program 的**第一段指令之前**的 base 指令流字数（`CodeSource.wordCount`
+     * 同单位）。0 = 普通全量产物（既有路径逐位不变）。
+     *
+     * 非零时本 Program 是**绝对下标空间上的一个窗口**：`instructionCount` / 四个池计数都报
+     * 绝对口径（供装载期算补丁区间 `[base, count)`），而 [code] / [lines] / [codeSource] 与
+     * 池本体只持有窗口内的条目。只由 [CodeBuilder] 喂入；装载链恒用缺省 0。
+     *
+     * **不许直接执行**：pc 是绝对口径而 [codeSource] 只是窗口，取指会落到窗口之外。带基线的
+     * Program 只是「补丁编译产物」，装载期必须与 base 拼成 `CompositeCodeSource`（并按基线
+     * 合并池/函数表）之后才能交给 VM —— 拼接不在本类，见 R7 波 C 的接线。
+     */
+    val codeBase: Int = 0,
+    /** 语句池基线（绝对下标口径；语义同 [codeBase]）。 */
+    val statementBase: Int = 0,
+    /** 字符串池基线（绝对下标口径）。 */
+    val stringBase: Int = 0,
+    /** 常量（Long）池基线（绝对下标口径）。 */
+    val longBase: Int = 0,
+    /** 表达式池基线（绝对下标口径）。 */
+    val exprBase: Int = 0,
+    /**
+     * 函数表基线（绝对下标口径）。`functions` 本身是 `List`（无法开窗口），只含本段新增条目；
+     * 绝对函数下标 = `functionBase + functions` 内序号，`_CALL` 的 `a` 已是绝对口径。
+     */
+    val functionBase: Int = 0,
 ) {
+    /**
+     * [codeBase] 的指令口径（= `codeBase / Instruction.WORDS`）：本段第一条指令的**绝对** pc。
+     *
+     * 所有收 pc 的读面（[op] / [a] / [b] / [c] / [instructionAt] / [lineOf]）都按绝对 pc 取值，
+     * 内部折回窗口序号 `pc - instructionBase`；`base` 以下的 pc 归 base 产物，越界读会抛
+     * [IndexOutOfBoundsException]（不静默回落）。
+     */
+    val instructionBase: Int get() = codeBase / Instruction.WORDS
     /**
      * 堆内指令字来源（编译期产物 / 既有装载链）：**零拷贝**包一层字视图，
      * [code] 仍是入参那个数组本体。行号表在此压实，入参数组不再被引用。
@@ -590,6 +913,12 @@ class Program private constructor(
         globalSlots: Int,
         callArgs: Map<Int, List<CallArg>> = emptyMap(),
         callArgSource: CallArgSource = CallArgSource.IN_MEMORY,
+        codeBase: Int = 0,
+        statementBase: Int = 0,
+        stringBase: Int = 0,
+        longBase: Int = 0,
+        exprBase: Int = 0,
+        functionBase: Int = 0,
     ) : this(
         codeSource = IntArrayCodeSource(code),
         residentCode = code,
@@ -600,6 +929,12 @@ class Program private constructor(
         globalSlots = globalSlots,
         callArgs = callArgs,
         callArgSource = callArgSource,
+        codeBase = codeBase,
+        statementBase = statementBase,
+        stringBase = stringBase,
+        longBase = longBase,
+        exprBase = exprBase,
+        functionBase = functionBase,
     )
 
     /**
@@ -618,6 +953,12 @@ class Program private constructor(
         globalSlots: Int,
         callArgs: Map<Int, List<CallArg>> = emptyMap(),
         callArgSource: CallArgSource = CallArgSource.IN_MEMORY,
+        codeBase: Int = 0,
+        statementBase: Int = 0,
+        stringBase: Int = 0,
+        longBase: Int = 0,
+        exprBase: Int = 0,
+        functionBase: Int = 0,
     ) : this(
         codeSource = codeSource,
         lineTable = LineTable.of(lines),
@@ -627,6 +968,12 @@ class Program private constructor(
         globalSlots = globalSlots,
         callArgs = callArgs,
         callArgSource = callArgSource,
+        codeBase = codeBase,
+        statementBase = statementBase,
+        stringBase = stringBase,
+        longBase = longBase,
+        exprBase = exprBase,
+        functionBase = functionBase,
     )
 
     /**
@@ -642,6 +989,12 @@ class Program private constructor(
         globalSlots: Int,
         callArgs: Map<Int, List<CallArg>> = emptyMap(),
         callArgSource: CallArgSource = CallArgSource.IN_MEMORY,
+        codeBase: Int = 0,
+        statementBase: Int = 0,
+        stringBase: Int = 0,
+        longBase: Int = 0,
+        exprBase: Int = 0,
+        functionBase: Int = 0,
     ) : this(
         codeSource = codeSource,
         residentCode = null,
@@ -652,6 +1005,12 @@ class Program private constructor(
         globalSlots = globalSlots,
         callArgs = callArgs,
         callArgSource = callArgSource,
+        codeBase = codeBase,
+        statementBase = statementBase,
+        stringBase = stringBase,
+        longBase = longBase,
+        exprBase = exprBase,
+        functionBase = functionBase,
     )
 
     /**
@@ -660,6 +1019,10 @@ class Program private constructor(
      *
      * 运行期**不读这里**（VM 取指走 [codeSource]）：物化会把映射来源的 73.3 MiB 重新拖回堆内，
      * 因此只有 `.erbc` 落盘、反汇编、逐字对拍这些冷路径允许碰它。
+     *
+     * 带基线（[codeBase] ≠ 0）时这里只有**本段**的字（下标 0 = 绝对 pc [instructionBase]），
+     * 不含 base 段的零填充 —— 给 base 段补零会让补丁产物凭空多出整段 base 的字节。
+     * 落盘/对拍需要全量视图时，按 [instructionBase] 自行拼接（补丁装载期的 `CompositeCodeSource`）。
      */
     val code: IntArray get() = residentCode ?: materializedCode
 
@@ -671,6 +1034,7 @@ class Program private constructor(
      * 兼容视图：由 [LineTable] 物化，整个 Program 生命周期内返回**同一实例**
      * （`ProcessRuntimeTest` 用 `assertSame` 锁「不复制第二份」）。
      * 只读：改它不会影响 [lineOf]（VM 报错定位走紧凑表）。
+     * 带基线时同样只含本段条目（见 [code] 的同一条窗口说明）。
      */
     val lines: IntArray get() = materializedLines
 
@@ -692,6 +1056,31 @@ class Program private constructor(
 
     /** 行号表的块位数 / 已灌满的块数（整表形态恒 0；装置与单测读数用）。 */
     internal fun lineTableBlockStats(): Pair<Int, Int> = lineTable.blockCount() to lineTable.filledBlocks()
+
+    // ------------------------------------------------------------------
+    // R7-C2 overlay 装配读数（只由 ProgramOverlay 在拼装时取件）
+    // ------------------------------------------------------------------
+
+    /**
+     * 行号表的引用（[ProgramOverlay] 拼装用）。
+     *
+     * [lineOf] 的拼接不在访问点上做分支，而是把 [LineTable] 换成 [LineTable.composite]
+     * 的组合视图（纯分派，base 段零物化）。组合层需要 base 与补丁**两段**的 [LineTable]
+     * 引用，而两者都是 private——这是装配期唯一的取件口；运行期读面（[lineOf] 与
+     * [lines]）一个字节都不变。base 的行号表绝不允许物化再重建：真机 base 是
+     * 4,884,338 条指令，物化即 19.5 MB（R7 内存红线）。
+     */
+    internal val overlayLineTableRef: LineTable get() = lineTable
+
+    /**
+     * 池的引用（[ProgramOverlay] 拼装用）。
+     *
+     * 组合池（[ConstantPool] 的 basePool 形态）按「base 段惰性直通 + 续段堆内」分派，
+     * 需要 base 池的**引用**——绝不物化：base 的语句池 171 万条、表达式池 32 万条都是
+     * 按需解码的（M10-MEM 与 M12-EXPRLAZY 的全部收益），整池物化等于把装载峰值闸撞穿。
+     * `pool` 是 private，这是装配期唯一的取件口。
+     */
+    internal val overlayPoolRef: ConstantPool get() = pool
 
     /**
      * 调用点 pc → 该调用逐位实参元数据（[CallArg]）。**构造期规范化去重**（见
@@ -731,44 +1120,67 @@ class Program private constructor(
         pool.seal()
     }
 
-    val instructionCount: Int get() = codeSource.wordCount / Instruction.WORDS
+    /**
+     * 指令条数（**绝对**口径 = `instructionBase + 本段条数`）。
+     *
+     * 无基线时与 `codeSource.wordCount / Instruction.WORDS` 逐位相同。带基线时它报的是
+     * 「base + 新增」—— 补丁装载期据此算区间 `[instructionBase, instructionCount)`，
+     * `ErbcWriter`/`ErbcReader` 的 entryPc / 标签 pc / 调用点 pc 判界也据此与绝对 pc 对齐。
+     * 注意 [code] / [lines] 仍只含本段条目（见 [codeBase] 的窗口语义）。
+     */
+    val instructionCount: Int get() = instructionBase + codeSource.wordCount / Instruction.WORDS
 
-    fun op(pc: Int): Int = codeSource.word(pc * Instruction.WORDS)
+    /** 取操作数：pc 为**绝对** pc，内部折回窗口序号（无基线时折回量恒 0）。 */
+    fun op(pc: Int): Int = codeSource.word((pc - instructionBase) * Instruction.WORDS)
 
-    fun a(pc: Int): Int = codeSource.word(pc * Instruction.WORDS + 1)
+    fun a(pc: Int): Int = codeSource.word((pc - instructionBase) * Instruction.WORDS + 1)
 
-    fun b(pc: Int): Int = codeSource.word(pc * Instruction.WORDS + 2)
+    fun b(pc: Int): Int = codeSource.word((pc - instructionBase) * Instruction.WORDS + 2)
 
-    fun c(pc: Int): Int = codeSource.word(pc * Instruction.WORDS + 3)
+    fun c(pc: Int): Int = codeSource.word((pc - instructionBase) * Instruction.WORDS + 3)
 
     /**
-     * 解码第 [pc] 条指令（冷路径：反汇编/诊断）。
+     * 解码第 [pc] 条指令（冷路径：反汇编/诊断）；[pc] 为**绝对** pc。
      *
      * 走当前页而不是 [code]：映射来源下物化整段会把 73.3 MiB 拖回堆内，
      * 而一条指令的 4 个字按页契约必在同一页内（[CodeSource.pageWords] 是 4 的倍数）。
      */
     fun instructionAt(pc: Int): Instruction {
-        val w = pc * Instruction.WORDS
+        val w = (pc - instructionBase) * Instruction.WORDS
         val p = w / codeSource.pageWords
         return Instruction.decodeFrom(codeSource.page(p), w - p * codeSource.pageWords)
     }
 
     /**
-     * 第 [pc] 条指令的源码行号（-1 = 未知）；越界同样回落 -1。
+     * 第 [pc] 条指令的源码行号（-1 = 未知）；越界同样回落 -1。[pc] 为**绝对** pc。
      *
      * marker 指令每条都要读（`Vm.envAt` 填 `StmtEnv.line`），故直接查紧凑表
      * （2 B/条、单次数组读），不经过 [lines] 的物化副本。
+     * 带基线时行号表只覆盖本段，`base` 以下的 pc 折成负序号后按越界口径回落 -1。
      */
-    fun lineOf(pc: Int): Int = lineTable.lineOf(pc)
+    fun lineOf(pc: Int): Int = lineTable.lineOf(pc - instructionBase)
 
+    /** 常量池取用（绝对下标；带基线时 `index < longBase` 越界，见 [ConstantPool] 的窗口语义）。 */
     fun constant(index: Int): Long = pool.longAt(index)
 
+    /** 字符串池取用（绝对下标）。 */
     fun string(index: Int): String = pool.stringAt(index)
 
+    /** 表达式池取用（绝对下标）。 */
     fun expr(index: Int): Expr = pool.exprAt(index)
 
-    /** 语句池条目（契约 C2）；[index] = marker 指令的 `a` 操作数，越界抛 IndexOutOfBounds。 */
+    /**
+     * 语句池条目（契约 C2）；[index] = marker 指令的 `a` 操作数（**绝对**下标），
+     * 越界抛 IndexOutOfBounds。
+     */
     fun statement(index: Int): Statement = pool.statementAt(index)
+
+    /**
+     * CALLSHARP 装载趟扫描（CSHARP-WIRE C2）：CALLSHARP 语句候选的**绝对**下标（升序）。
+     * 语义与成本见 [ConstantPool.sharpStatementIndices]；取用方 = core/fn 的
+     * `prefillSharpLinks`（装载期联结裁决），本 accessor 只做池转发。
+     */
+    internal fun sharpStatementIndices(): IntArray = pool.sharpStatementIndices()
 
     /**
      * 语句池是否还是**惰性**的（M10-MEM）：装载侧据此决定产物文件要不要留在进程里 ——
@@ -845,12 +1257,57 @@ class Program private constructor(
         private set
 
     /**
+     * 分片惰性扁平源的**驻留片数**（EP3/L10 开放的诊断读面；源未构建 = 0）。
+     *
+     * 为什么要这一对：本体 `SegmentedFlatStmtSource` 是 `internal` 类、`residentSegments`/
+     * `builtSegments` 也是 `internal` 面（`SegmentedFlatStmt.kt:73/:77`），模块外的取证探针
+     * （`devtools/heap_phase_probe.py` 内嵌那份 Java）只能按名字前缀反射取，core 内的账面
+     * （`core/diag/LiveSetCensus`）与 app 侧报告面就没有稳定名字可依赖。
+     * **语义零改动**：只读 `blocks.size` 与累计计数器，不解码、不建片、不碰 LRU，
+     * 也不代替 [flatStmtSource]（那条 `internal` 面留给同模块的 VM/proc/测试）。
+     */
+    val flatResidentSegmentCount: Int
+        get() = (flatStmtSource as? SegmentedFlatStmtSource)?.residentSegments ?: 0
+
+    /**
+     * 分片惰性扁平源的**累计已建片数**（含已被 LRU 淘汰的；开放理由与只读口径同
+     * [flatResidentSegmentCount]）。
+     */
+    val flatBuiltSegmentCount: Int
+        get() = (flatStmtSource as? SegmentedFlatStmtSource)?.builtSegments ?: 0
+
+    /** [ensureFlatStmtSource] 构建时实际用的片数上限（未构建 = 0）。 */
+    @Volatile
+    private var flatSegmentLimitUsed: Int = 0
+
+    /**
+     * 分片惰性扁平源的**片数上限**（[FlatPoolBudget.maxSegments] 落到构建点的那个数；
+     * 源未构建 = 0）。开放理由与只读口径同 [flatResidentSegmentCount]：诊断/取证面要能看到
+     * 「这台机的堆预算给了几片」，不靠反射去掏 [SegmentedFlatStmtSource] 的私有字段。
+     *
+     * 预算 [FlatPoolBudget.enabled] 为假但调用方显式开了 flat 时，实际构建的是 **1 片**
+     * （见 [ensureFlatStmtSource]），这里读到的也是 1 —— 报的是「构建时实际用的值」，
+     * 不是「预算判式的值」。诊断口 [buildSegmentedFlatSource] 不装进 [flatStmtSource]，
+     * 因此**不写**这条读数（它建的源不是本 Program 的运行期池）。
+     */
+    val flatSegmentLimit: Int
+        get() = flatSegmentLimitUsed
+
+    /**
      * 构建/取回扁平语句池（幂等；单线程假设 ADR-003 —— 并发构建的两份产物语义相同，
      * 最后写入者胜，无正确性后果）。
      *
      * 调用时机：[flatStatementsEnabled] 为真时，由 proc 桥构建期
-     * （`ProcessRuntime` 的 init）调用一次；[flatStatementsEnabled] 为假（Android 默认）
-     * 则从不构建，VM marker 走对象树老路。
+     * （`ProcessRuntime` 的 init）调用一次；[flatStatementsEnabled] 为假则从不构建，
+     * VM marker 走对象树老路。
+     *
+     * **片数上限由堆预算推导**（[FlatPoolBudget.forHeap]）：`Runtime.maxMemory()` **只读一次**，
+     * 同一个读数既喂档位判式（[MemoryTier.isGenerous]）又喂预算判式 —— 读两次会让两个判式
+     * 在边界上互相打架（口径同 `ProgramLoader.estimateHeap` 的 `maxMemoryOverride` 注释）。
+     * 堆 >= 512 MiB 给 32 片（保守档）/ 64 片（放开档）；更小的挡位预算为
+     * [FlatPoolBudget.DISABLED]，此时**降到 1 片**而不是拒绝构建：显式开关
+     * （`flat-statements.on` / Intent extra）的语义不能被预算悄悄改掉，只缩缓存容量
+     * （LRU 淘汰不改变正确性，`StabilityL2FlatCacheTest` 已钉）。
      *
      * 成本：惰性挡走**流式**压扁（解码+规范化+写入一趟，≈8.9 s，语句树当场弃置）；
      * 常规挡（编译器/内存装置）才走整池 encode。常驻只剩扁平流本体。
@@ -863,16 +1320,35 @@ class Program private constructor(
      */
     internal fun ensureFlatStmtSource(): FlatStmtSource {
         flatStmtSource?.let { return it }
+        val maxMemoryBytes = Runtime.getRuntime().maxMemory()
+        return ensureFlatStmtSource(FlatPoolBudget.forHeap(maxMemoryBytes, MemoryTier.isGenerous(maxMemoryBytes)))
+    }
+
+    /**
+     * [ensureFlatStmtSource] 的**可注入预算**形态（定向单测专用）。
+     *
+     * 为什么需要它：`Runtime.maxMemory()` 是进程事实，测试没法伪造「256 MiB 挡」，而
+     * 「预算 disabled ⇒ 降到 1 片」这条降级只能靠注入预算才钉得住（否则只能拿
+     * [buildSegmentedFlatSource] 从旁边绕，测不到 [ensureFlatStmtSource] 的判式本身）。
+     * 生产只走无参那条；本函数不读任何进程读数。
+     */
+    internal fun ensureFlatStmtSource(budget: FlatPoolBudget): FlatStmtSource {
+        flatStmtSource?.let { return it }
         // 波次 D：**不再整池压扁**。返回一个分片惰性源，装载期零成本；某条语句第一次被执行时
-        // 才建它所在的片（4096 条），片数由 LRU 卡住（见 SegmentedFlatStmtSource）。
-        val src = SegmentedFlatStmtSource(pool, this)
+        // 才建它所在的片（segmentStatements 条），片数由 LRU 卡住（见 SegmentedFlatStmtSource）。
+        // 预算 disabled（maxSegments = 0）⇒ 1 片，理由见无参那条的 KDoc。
+        val limit = if (budget.enabled) budget.maxSegments else 1
+        val src = SegmentedFlatStmtSource(pool, this, budget.segmentStatements, limit)
+        flatSegmentLimitUsed = limit
         flatStmtSource = src
         return src
     }
 
     /**
      * 分片惰性扁平源（**诊断/测试口径**：可指定片大小与片数上限，用来钉跨片与 LRU 淘汰）。
-     * 生产走 [ensureFlatStmtSource] 的缺省档（4096 条/片、64 片）。
+     * 生产走 [ensureFlatStmtSource] 的预算档（片大小 [FlatPoolBudget.SEGMENT_STATEMENTS]、
+     * 片数按 [FlatPoolBudget.forHeap]）。本函数的签名与行为**逐字不变**（诊断口，
+     * 不装进 [flatStmtSource]，也不写 [flatSegmentLimit]）。
      */
     internal fun buildSegmentedFlatSource(
         segmentSize: Int,
@@ -880,13 +1356,19 @@ class Program private constructor(
     ): FlatStmtSource = SegmentedFlatStmtSource(pool, this, segmentSize, maxSegments)
 
     /**
-     * 是否允许构建扁平语句池（装载期的 [com.eratw.port.core.loader.ProgramLoader.loadMapped] 的
+     * 是否**允许**构建扁平语句池（装载期的 [com.eratw.port.core.loader.ProgramLoader.loadMapped] 的
      * `flatStatements` 参数写入）。false ⇒ 不建池，VM marker 走对象树老路。
      *
-     * 波次 D 起扁平池是**分片惰性**的（`SegmentedFlatStmtSource`：装载期零建片，执行到才建 4,096 条
-     * 一片，LRU 上限 64 片），装载后常驻与「关闭」同读数（64.3 MiB），因此 Android 也默认开。
+     * 这里的 `true` 只是「允许构建」，**不是**生产默认开：默认值由宿主决定 —— Android 侧
+     * `GameHost` 读游戏目录旁的文件哨兵 `flat-statements.on`（默认不存在 ⇒ 关）或启动 Intent
+     * 的 `eratwFlatStatements` extra，再把读数经 `loadMapped(flatStatements = …)` 写进来
+     * （`app/.../GameHost.kt` 的 `loadAndRun` 在堆预检之前读一次、`assembleSession` 按同一个值建池）。
+     * 桌面装置、vmdbg 与定向单测没有这个哨兵，读到的就是本字段的 `true`（保持波次 D 起的口径）。
+     *
+     * 旧 KDoc 写「Android 也默认开」，与 `GameHost` 的哨兵（默认不存在 ⇒ 关）互相矛盾，本刀
+     * 就地订正：默认开/关的唯一判据在宿主，core 只提供开关与预算（[FlatPoolBudget]）。
      * 保留这个开关只为「关闭通道做 A/B」与「出问题时退回对象树」两条退路 ——
-     * 见 `.workbuddy/CONTRACT-T2-64.md` §10.6/§10.8。
+     * 见 `<internal-workdir>/CONTRACT-T2-64.md` §10.6/§10.8。
      */
     internal var flatStatementsEnabled: Boolean = true
 
@@ -908,6 +1390,16 @@ class Program private constructor(
 
     /** 函数下标 → 形参名（装载侧未喂 = 空）。 */
     fun paramNames(funcIndex: Int): List<String> = functions.getOrNull(funcIndex)?.paramNames ?: emptyList()
+
+    /**
+     * [paramNames] 的**不物化**版本：惰性表走段 8 的只读视图（[LazyFunctionTable.paramNamesAt]），
+     * 常规表直接读条目（`get` 不新增常驻）。逐条读数与 [paramNames] 相同。
+     */
+    internal fun paramNamesPeek(funcIndex: Int): List<String> {
+        val fns = functions
+        if (fns is LazyFunctionTable) return fns.paramNamesAt(funcIndex)
+        return functions.getOrNull(funcIndex)?.paramNames ?: emptyList()
+    }
 
     /**
      * 已解码的函数元数据条数（M11-MEM 的判据读数）：惰性装载完 = 0，
@@ -980,13 +1472,17 @@ class Program private constructor(
     val bindsCallArgsPositionally: Boolean
         get() {
             if (callArgs.isEmpty()) return false
-            val fns = functions
-            return if (fns is LazyFunctionTable) {
-                fns.hasAnyParamNames()
-            } else {
-                fns.any { it.paramNames.isNotEmpty() }
-            }
+            return hasAnyParamNames()
         }
+
+    /**
+     * 容器是否带段 8（有任何函数声明形参名）；惰性表由「每函数条数」表直接回答，
+     * **不物化** [FunctionInfo]。与 [bindsCallArgsPositionally] 的区别是不问调用点表。
+     */
+    fun hasAnyParamNames(): Boolean {
+        val fns = functions
+        return if (fns is LazyFunctionTable) fns.hasAnyParamNames() else fns.any { it.paramNames.isNotEmpty() }
+    }
 
     /** 表达式池快照（`_EVAL_*` 的 `$k` 操作数在反汇编往返时按此顺序复用）。 */
     fun expressions(): List<Expr> = pool.exprList
@@ -1012,8 +1508,15 @@ class Program private constructor(
      *    「字符串归一后重建」的同值实例，`.expr(k)` 的 data class 相等性（含 `line`/`col`）
      *    逐字段不变 —— 句柄稳定性由 `ErbcStreamEquivalenceTest`/`MmapLoaderTest` 锁死。
      * 2. **语句段**：语句池的 `args`（`IfStmt.condition` 等自带表达式字段同理）并入同一张表，
-     *    与池内形态相同的结点换成**池内代表**。方向只能是「语句侧让位」：反过来会让池根的
-     *    `line`/`col` 漂移，`program.expr(k)` 的逐字段对拍（装载差分测试）当场红。
+     *    与池内**逐字段全等（含 `line`/`col`）**的结点换成池内代表；只相差行列号的结点**不折**
+     *    （INTERN-STMT，规约 `specs/erbc-format.md` §5.3「`line`/`col` 必须逐字往返……两条只差
+     *    行列号的表达式会被错误合并」）。折叠判据一旦放行行列号差异，被换掉的语句结点会把
+     *    池内代表的行列号带进落盘，`.erbc` 再编码随之漂移 ⇒ 本方法的两条装载路径
+     *    （[com.eratw.port.core.loader.ProgramLoader.loadFile] 与
+     *    [com.eratw.port.core.loader.ProgramLoader.loadMapped]）不再逐字节相同
+     *    （`MappedCodeSourceTest` 真实产物用例）。
+     *    方向只能是「语句侧让位」：反过来会让池根的 `line`/`col` 漂移，`program.expr(k)` 的
+     *    逐字段对拍（装载差分测试）当场红。
      *
      * 为什么值得做（`PoolDecomp` §2b 实测）：两套对象图的**身份重叠为 0**
      * （`PoolDecomp` §2b「exprs 池有 0 个根与语句 args 是同一实例」），同一份表达式在
@@ -1123,12 +1626,18 @@ class Program private constructor(
  * `IntArray.getOrElse` 口径一致），[toIntArray] 则是同一函数的下标枚举 —— 两者互为对拍。
  * 行号只被读（`Program.lines` 的唯一消费者是 `ErbcWriter` 落盘与报错定位），没有写路径。
  *
- * ## 两种形态（MEM9 刀 2：装载即付全表 → 未取用不占）
+ * ## 三种形态（MEM9 刀 2：装载即付全表 → 未取用不占；R7 波 C：再加组合）
  *
  * | 形态 | 谁在用 | 装载后常驻 |
  * |---|---|---|
  * | **整表**（[packed] ≠ null） | 编译期产物、`ErbcReader` 字节档（[of] / [ofStreaming]） | `count × 2 B` |
  * | **稀疏分块**（[blocks] ≠ null） | 映射装载档（[ofPaged]，装机唯一路径） | **块位表**（4,888,249 条 ⇒ 1,193 个块位 ≈ 4.7 KiB） |
+ * | **组合**（[baseTable] ≠ null） | 装载期把补丁拼到 base 之后（[composite]） | 两个引用（两段常驻各自照旧） |
+ *
+ * 组合形态是**纯分派视图**，不拼、不物化：`pc < base.count` 归 base，其余折成
+ * `pc - base.count` 问 tail。真机 base 4,884,338 条指令，拼接版是一张 19.5 MB 的
+ * `IntArray`，每次导入 mod 付一次 —— 这正是组合形态要躲的那笔。它的 [bytes] 是两段相加
+ * （自身没有主表/块位表/逃逸表），[toIntArray] 才会物化（冷路径）。
  *
  * 分块形态与 [com.eratw.port.core.loader.BlockU32s]（mem7 刀 C/刀 D）同一套形态与口径：
  * 块宽 [BLOCK] = 4,096 条（8 KiB 背衬），块在**第一次被取到**时由 [source] 回读段 6 的原始
@@ -1147,6 +1656,8 @@ class Program private constructor(
  * - 块位表越界（`blocks[bi]`）在两条路径上都不可能发生：[blocks] 的长度由 [count] 换算
  *   （[blockCountFor]），`bi = pc ushr BLOCK_SHIFT` 在 `pc < count` 时恒 `< blocks.length`；
  * - 末块不足一块（`count % 4096 != 0`）时 [blockLength] 给真实槽数，取用面拿不到块外下标；
+ * - 组合形态沿用同一条越界判据（[lineOf] 首行显式挡，回落 -1），且 `pc < 0` 在分派**之前**
+ *   回落 —— 负下标绝不被折成 base 的段内下标；
  * - 「静默退回全数组形态」有正面钉：`ProgramMmapReleaseTest.段6 分块形态：装载后零块、按 pc 取用才灌`
  *   直接断言映射装载出来的表 `isPaged == true` 且 `filledBlocks() == 0`。
  */
@@ -1160,13 +1671,79 @@ internal class LineTable private constructor(
     private val source: LineBlockSource?,
     private val overflowPcs: IntArray,
     private val overflowLines: IntArray,
+    /**
+     * **组合形态**的 base 段（R7 波 C）：非 null 时本表是 `base` 之后的续段视图，
+     * [lineOf] 按 `pc < base.count` 分派。null = 普通表（整表 / 分块，既有路径逐位不变）。
+     */
+    private val baseTable: LineTable? = null,
+    /** 组合形态的 tail 段（补丁那一段）；[baseTable] 非 null 时恒非 null。 */
+    private val tailTable: LineTable? = null,
 ) {
-    /** true = 稀疏分块形态（装载后堆上只有块位表；判据见类 KDoc 的「两种形态」）。 */
-    val isPaged: Boolean get() = blocks != null
+    /**
+     * 构造期不变式（fail-fast，不做静默纠错）。
+     *
+     * 组合形态是**纯分派视图**：它自己不许带 [packed] / [blocks] / [source]，也不许带逃逸表
+     * （两段的逃逸项各归各的，[lineOf] 落到哪一段就由那一段自己查表）。`count` 必须恰好等于
+     * `base.count + tail.count` —— 用 Long 相加再比，`Int` 回绕会被当场拒掉，而不是留下
+     * 「计数对了但分派走错段」的缝。tail 为空表合法：此时 `count == base.count`，
+     * 任何 `pc < count` 都落在 base、`pc >= count` 越界回落。
+     *
+     * 位置说明：本 init 紧跟构造参数之后、任何带初始化器的属性之前，读到的都是已赋值的
+     * 构造参数（本类其余属性全是自定义 getter，没有初始化器与之竞争）。
+     */
+    init {
+        require(count >= 0) { "行号表 count 不能为负: $count" }
+        val base = baseTable
+        if (base != null) {
+            val tail = checkNotNull(tailTable) {
+                "组合行号表缺 tail 段（baseTable 非 null 时 tailTable 必须给出）"
+            }
+            require(packed == null && blocks == null && source == null) {
+                "组合行号表不许自带 packed / blocks / source：它是纯分派视图" +
+                    "（packed=${packed != null} blocks=${blocks != null} source=${source != null}）"
+            }
+            require(overflowPcs.isEmpty() && overflowLines.isEmpty()) {
+                "组合行号表不许自带逃逸表（两段各管各的）：" +
+                    "overflowPcs=${overflowPcs.size} overflowLines=${overflowLines.size}"
+            }
+            val expect = base.count.toLong() + tail.count.toLong()
+            require(count.toLong() == expect) {
+                "组合行号表 count 必须等于 base.count + tail.count：期望 $expect，实际 $count"
+            }
+        } else {
+            require(tailTable == null) { "非组合行号表不许带 tail 段" }
+        }
+    }
 
-    /** 第 [pc] 条指令的行号；越界（pc < 0 或 ≥ [count]）回落 -1（旧 `getOrElse` 口径）。 */
+    /**
+     * true = 稀疏分块形态（装载后堆上只有块位表；判据见类 KDoc 的「三种形态」）。
+     *
+     * 组合形态**任一段**是分块就算分块：`Program.lineTableIsPaged` 的调用方
+     * （`HeapCompositionProbeTest` / `ProgramMmapReleaseTest`）拿它区分「段 6 没常驻」与
+     * 「整表 ShortArray 常驻」—— base 是分块而组合层报 false，装置就会把「其实没常驻」
+     * 当成「整表常驻」，读数直接反了。
+     */
+    val isPaged: Boolean
+        get() {
+            val base = baseTable
+            if (base != null) return base.isPaged || tailTable?.isPaged == true
+            return blocks != null
+        }
+
+    /**
+     * 第 [pc] 条指令的行号；越界（pc < 0 或 ≥ [count]）回落 -1（旧 `getOrElse` 口径）。
+     *
+     * 组合形态按 `pc < base.count` 分派，`pc - base.count` 折回 tail 的段内下标。越界判据
+     * 先于分派：`pc < 0` 直接回落，**不转给 base**（否则 -1 之类的负下标会变成 base 内部的
+     * 另一个越界，口径就不再是「越界回落 -1」）。
+     */
     fun lineOf(pc: Int): Int {
         if (pc < 0 || pc >= count) return UNKNOWN_LINE
+        val base = baseTable
+        if (base != null) {
+            val bc = base.count
+            return if (pc < bc) base.lineOf(pc) else checkNotNull(tailTable).lineOf(pc - bc)
+        }
         val whole = packed
         val v = if (whole != null) {
             whole[pc].toInt() and 0xFFFF
@@ -1190,8 +1767,22 @@ internal class LineTable private constructor(
      *
      * 分块形态下这会把**所有块**灌满（≈ 全表 2 B/条）并留驻 —— 只有落盘/对拍这类
      * 冷路径允许付这一笔，运行期取行号一律走 [lineOf]。
+     *
+     * **组合形态调用它等于物化**：`count` 条一次性落成一张 `IntArray`（真机 base
+     * 4,884,338 条 ⇒ 19.5 MB）。这是冷路径，运行期不许调 —— 运行期取行号走 [lineOf]，
+     * 那才是零拷贝的分派。两段按下标直接写进同一张输出数组，**不**先各自物化再拼
+     * （那会多出一张 base 大小的临时数组，正是本条要躲的那笔）。
      */
-    fun toIntArray(): IntArray = IntArray(count) { lineOf(it) }
+    fun toIntArray(): IntArray {
+        val base = baseTable
+        if (base == null) return IntArray(count) { lineOf(it) }
+        val tail = checkNotNull(tailTable)
+        val out = IntArray(count)
+        val bc = base.count
+        for (i in 0 until bc) out[i] = base.lineOf(i)
+        for (i in 0 until tail.count) out[bc + i] = tail.lineOf(i)
+        return out
+    }
 
     /**
      * 常驻字节（perf 装置读数用）。
@@ -1199,10 +1790,15 @@ internal class LineTable private constructor(
      * * 整表形态：3 个数组头 + u16 主表 + 两张溢出表 —— **与改造前逐字同一条公式**
      *   （`CodeSourceViewTest` 钉 `3×16 + n×2`）；
      * * 分块形态：`AtomicReferenceArray` 壳 + 块位表 + **已灌的块** + 两张溢出表
-     *   （装载后 = 块位表本体，4,888,249 条 ⇒ 1,193 槽 ≈ 4.8 KiB）。
+     *   （装载后 = 块位表本体，4,888,249 条 ⇒ 1,193 槽 ≈ 4.8 KiB）；
+     * * 组合形态：**两段相加**。它是纯分派视图，自身没有主表/块位表/逃逸表（只有两个
+     *   引用字段），所以相加就是真实常驻。绝不能报「拼接后的整表大小」—— 这是装载峰值
+     *   闸的读数，虚报会让闸失真，而这正是本形态存在的理由（不物化那张 19.5 MB）。
      */
     val bytes: Long
         get() {
+            val base = baseTable
+            if (base != null) return base.bytes + checkNotNull(tailTable).bytes
             val whole = packed
             if (whole != null) return 3 * 16L + count * 2L +
                 overflowPcs.size * 4L + overflowLines.size * 4L
@@ -1214,23 +1810,69 @@ internal class LineTable private constructor(
             return total
         }
 
-    /** 块位数（分块形态才有意义；整表形态返回 0）。 */
-    fun blockCount(): Int = blocks?.length() ?: 0
+    /**
+     * 块位数（分块形态才有意义；整表形态返回 0）。
+     *
+     * 组合形态**两段相加**：这是「两张背衬表一共持多少块位」的真话，不是「组合 pc 空间
+     * 折算出来的块数」—— 后者在两段交界处与任一段的块几何都对不上（`base.count` 不保证
+     * 是 [BLOCK] 的整数倍），报出来会是看起来合理但错的数。调用方
+     * （`Program.lineTableBlockStats` → `HeapCompositionProbeTest`）只用它印
+     * 「N 块位 / 已灌 M 块」，相加正是它要的口径。
+     */
+    fun blockCount(): Int {
+        val base = baseTable
+        if (base != null) return base.blockCount() + checkNotNull(tailTable).blockCount()
+        return blocks?.length() ?: 0
+    }
 
-    /** 已灌满的块数（装载后应恒为 0；每条被取到的 pc 只给自己那一块付一次 8 KiB）。 */
+    /**
+     * 已灌满的块数（装载后应恒为 0；每条被取到的 pc 只给自己那一块付一次 8 KiB）。
+     * 组合形态两段相加（口径同 [blockCount]）。
+     */
     fun filledBlocks(): Int {
+        val base = baseTable
+        if (base != null) return base.filledBlocks() + checkNotNull(tailTable).filledBlocks()
         val table = blocks ?: return 0
         var n = 0
         for (i in 0 until table.length()) if (table.get(i) != null) n++
         return n
     }
 
-    /** 第 [blockIndex] 块的槽数（末块可能不足一块）。 */
-    fun blockLength(blockIndex: Int): Int =
-        minOf(BLOCK.toLong(), count.toLong() - blockIndex.toLong() * BLOCK).toInt()
+    /**
+     * 第 [blockIndex] 块的槽数（末块可能不足一块）。
+     *
+     * **组合形态不支持该读数**（明确抛错，不返回近似值）：它问的是「本表第 i 块的几何」，
+     * 而组合形态有**两套**互不相同的块几何，且组合 pc 空间的块边界在两段交界处与任何一套
+     * 都不重合。按哪一段回答都是错的。生产路径只在 [fillBlock] 里调它，而组合形态没有块位表，
+     * 那条路走不到这里；测试面（`ProgramMmapReleaseTest` / `HeapCompositionProbeTest`）
+     * 拿它量的是 `BlockU32s`，不是 `LineTable`。
+     */
+    fun blockLength(blockIndex: Int): Int {
+        if (baseTable != null) {
+            throw UnsupportedOperationException(
+                "组合行号表不支持 blockLength（两段各有各的块几何，组合 pc 空间的块边界与两段都不重合）: " +
+                    "blockIndex=$blockIndex",
+            )
+        }
+        return minOf(BLOCK.toLong(), count.toLong() - blockIndex.toLong() * BLOCK).toInt()
+    }
 
-    /** 块定位：pc → 块号。 */
-    fun blockIndexOf(pc: Int): Int = pc ushr BLOCK_SHIFT
+    /**
+     * 块定位：pc → 块号。
+     *
+     * **组合形态不支持该读数**（明确抛错）：tail 段的段内块号是
+     * `(pc - base.count) ushr BLOCK_SHIFT`，与本式算出的 `pc ushr BLOCK_SHIFT` 在
+     * `base.count` 不是 [BLOCK] 整数倍时**不是同一个数** —— 返回后者就是静默错值。
+     */
+    fun blockIndexOf(pc: Int): Int {
+        if (baseTable != null) {
+            throw UnsupportedOperationException(
+                "组合行号表不支持 blockIndexOf（tail 段块号要按 pc - base.count 折算，" +
+                    "与本式在段界处不同）: pc=$pc",
+            )
+        }
+        return pc ushr BLOCK_SHIFT
+    }
 
     private fun fillBlock(blockIndex: Int): ShortArray {
         val src = checkNotNull(source) { "分块形态没有行号供给（source = null）" }
@@ -1370,6 +2012,59 @@ internal class LineTable private constructor(
             }
             return LineTable(lines.size, packed, null, null, pcs, vals)
         }
+
+        /**
+         * **组合形态**（R7 波 C）：pc 空间 = base 的全部 pc，其后紧接 tail 的全部 pc。
+         *
+         * ## 为什么是分派而不是拼接
+         *
+         * 真机 base 是 4,884,338 条指令 ⇒ 拼成一张 `IntArray` 是 19.5 MB，而且
+         * `Program.lines` 是惰性物化（一碰就付）。导入一次 mod 就付一次，正好压在
+         * 512 MiB 堆、已实测 422 MiB 的那条线上。组合形态只持两个引用：取行号按
+         * `pc < base.count` 分派，零拷贝、零物化。
+         *
+         * ## 分派与越界口径
+         *
+         * 越界（`pc < 0` 或 `pc >= count`）仍回落 [UNKNOWN_LINE]，**不抛错** —— 与普通表的
+         * `IntArray.getOrElse` 口径逐字相同。`pc < 0` 在分派之前就回落，绝不转给 base
+         * （转过去就是 base 内部的另一个越界，口径不再一致）。`pc >= count` 同样先挡：
+         * 落进 tail 的下标若靠 tail 自己判界虽然结果相同，但那是两条不同的判界路，
+         * 组合层自己钉住才不会被后来的改动撬开。
+         *
+         * ## 构造期不变式（fail-fast，不做静默纠错）
+         *
+         * 两段的 `count` 都必须非负；总条数用 Long 相加后再判不溢出 `Int`（`Int` 回绕
+         * 会让 `count` 变成一个负数或小数，而它正是分派与越界判据的唯一依据）。
+         * 组合视图自身**不许**带 packed / blocks / source 与逃逸表 —— 它是纯分派视图，
+         * 两段的逃逸表各管各的（[lineOf] 落到哪一段就由那一段自己查表，组合层不吞）。
+         *
+         * tail 为空表合法：此时 `count == base.count`，任何 `pc < count` 都落在 base，
+         * `pc >= count` 越界回落 —— 不存在「count 对了但 lineOf 走错段」的缝。
+         *
+         * @param base 已装载产物的行号表（分块/整表形态均可）
+         * @param tail 补丁那一段的行号表（段内下标从 0 起，与补丁自己的 pc 空间一致）
+         */
+        fun composite(base: LineTable, tail: LineTable): LineTable {
+            require(base.count >= 0) { "组合行号表 base.count 不能为负: ${base.count}" }
+            require(tail.count >= 0) { "组合行号表 tail.count 不能为负: ${tail.count}" }
+            val total = base.count.toLong() + tail.count.toLong()
+            require(total <= Int.MAX_VALUE.toLong()) {
+                "组合行号表总条数溢出 Int：base.count=${base.count} + tail.count=${tail.count} = $total"
+            }
+            return LineTable(
+                count = total.toInt(),
+                packed = null,
+                blocks = null,
+                source = null,
+                overflowPcs = NO_ESCAPES,
+                overflowLines = NO_ESCAPES,
+                baseTable = base,
+                tailTable = tail,
+            )
+        }
+
+        /** 组合形态自身的逃逸表（恒空；两段的逃逸项各在各自表里）。共享一份，不逐次分配。 */
+        private val NO_ESCAPES = IntArray(0)
     }
 }
 
@@ -1390,21 +2085,79 @@ internal fun interface LineBlockSource {
  * 指令流构建器。erbcc 与汇编器共用；写完后 [build] 冻结为 [Program]。
  *
  * 数组按 2 倍增长，避免逐条 `ArrayList<Int>` 的装箱（构建期也照 ADR-001 的宗旨来）。
+ *
+ * ## 基线预置（R7-L1 `codeBase` 偏移基座）
+ *
+ * 六个基线参数（[codeBase] / [statementBase] / [stringBase] / [longBase] / [exprBase] /
+ * [functionBase]，**全部默认 0**）让同一个构建器能编「接在已有产物之后」的一段补丁：
+ * 一切**绝对下标**在 [emit] / [constant] / [string] / [expr] / [statement] /
+ * [declareFunction] / [functionIndex] / [declareLabel] / [declareCallArgs] 的出口就算成
+ * `base + 新增`，补丁产物因此不需要装载期遍历改写（理由见 [ConstantPool] 的类 KDoc：
+ * 操作数语义由 opcode 决定，装载期 remap 必须逐条识别模式，漏判即静默错值）。
+ *
+ * 三条口径必须记清（都是补丁装载期算区间的依据）：
+ *
+ * 1. [codeBase] 的单位是**字**（与 `CodeSource.wordCount` 同单位），不是指令条数；
+ *    故必须是 [Instruction.WORDS] 的整数倍，否则**构造期直接抛错**（不静默纠正）。
+ *    [here] / [emit] / [patch] 收发的 pc 都是**绝对** pc（= `codeBase / WORDS + 段内序号`）。
+ * 2. 跳转操作数**不受基线影响**：`_JUMP*` / `_GOTO` 的 a 是「相对下一条指令的指令条数」，
+ *    起止两端同处绝对 pc 空间，差值不变。带基线的 [here] 因此不会让跳转偏移漂移。
+ * 3. 段内数组（[build] 交给 `Program` 的 code/lines、池本体、函数表）**仍然只含新增条目** ——
+ *    给 base 段补零会让 4,800,579 条指令的 base 白占 76.8 MiB 常驻，且补丁产物会带上整段
+ *    零字节。基线只体现在「计数与下标」上：`Program.instructionCount` / 四个池计数都是
+ *    绝对口径，段内本体则从绝对下标 `base` 起算。
  */
-class CodeBuilder {
+class CodeBuilder(
+    /**
+     * 代码基线：本段第一条指令之前的 base 指令流**字数**（不是条数）。
+     * 0 = 无基线（既有路径逐位不变）。
+     */
+    val codeBase: Int = 0,
+    /** 语句池基线：本段第 0 条语句的绝对下标。 */
+    val statementBase: Int = 0,
+    /** 字符串池基线：本段第 0 条字符串的绝对下标。 */
+    val stringBase: Int = 0,
+    /** 常量（Long）池基线：本段第 0 条常量的绝对下标。 */
+    val longBase: Int = 0,
+    /** 表达式池基线：本段第 0 条表达式的绝对下标。 */
+    val exprBase: Int = 0,
+    /** 函数表基线：本段第 0 个函数的绝对下标（`_CALL` 的 a 用它算）。 */
+    val functionBase: Int = 0,
+) {
+    init {
+        require(codeBase >= 0) { "codeBase 不能为负: $codeBase" }
+        require(codeBase % Instruction.WORDS == 0) {
+            "codeBase 必须是 Instruction.WORDS(${Instruction.WORDS}) 的整数倍" +
+                "（单位是字，与 CodeSource.wordCount 同口径）: $codeBase"
+        }
+        require(statementBase >= 0) { "statementBase 不能为负: $statementBase" }
+        require(stringBase >= 0) { "stringBase 不能为负: $stringBase" }
+        require(longBase >= 0) { "longBase 不能为负: $longBase" }
+        require(exprBase >= 0) { "exprBase 不能为负: $exprBase" }
+        require(functionBase >= 0) { "functionBase 不能为负: $functionBase" }
+    }
+
+    /** [codeBase] 的指令口径（= `codeBase / Instruction.WORDS`）：段内 pc 的起点。 */
+    val instructionBase: Int = codeBase / Instruction.WORDS
+
     private var code = IntArray(64 * Instruction.WORDS)
     private var lines = IntArray(64)
     private var count = 0
 
-    private val pool = ConstantPool()
+    private val pool = ConstantPool(
+        longBase = longBase,
+        stringBase = stringBase,
+        exprBase = exprBase,
+        statementBase = statementBase,
+    )
     private val functions = ArrayList<FunctionInfo>()
     private var globalSlots = 0
 
-    /** 当前指令下标（= 下一条要发射的指令的 pc）。 */
-    fun here(): Int = count
+    /** 当前指令下标（= 下一条要发射的指令的**绝对** pc）。 */
+    fun here(): Int = instructionBase + count
 
     /**
-     * 发射一条指令，返回其 pc。
+     * 发射一条指令，返回其**绝对** pc（`instructionBase + 段内序号`）。
      * [line] 为源码行号，CodeEE 报错时使用。
      */
     fun emit(op: Int, a: Int = 0, b: Int = 0, c: Int = 0, line: Int = -1): Int {
@@ -1418,20 +2171,28 @@ class CodeBuilder {
         code[w + 2] = b
         code[w + 3] = c
         lines[count] = line
-        return count++
+        return instructionBase + count++
     }
 
-    /** 回填某个操作数（跳转偏移、前向函数下标）。[operand] ∈ 1..3。 */
+    /**
+     * 回填某个操作数（跳转偏移、前向函数下标）。[operand] ∈ 1..3。
+     * [pc] 是 [emit] 返回的**绝对** pc（本段区间 `[instructionBase, instructionBase + 已发射条数)`）。
+     */
     fun patch(pc: Int, operand: Int, value: Int) {
         require(operand in 1..3) { "operand 必须是 1..3: $operand" }
-        require(pc in 0 until count) { "pc 越界: $pc" }
-        code[pc * Instruction.WORDS + operand] = value
+        require(pc in instructionBase until instructionBase + count) {
+            "pc 越界: $pc（本段绝对区间 [$instructionBase, ${instructionBase + count})）"
+        }
+        code[(pc - instructionBase) * Instruction.WORDS + operand] = value
     }
 
+    /** 追加常量，返回**绝对**下标（`longBase + 段内序号`）；见 [ConstantPool.addLong]。 */
     fun constant(value: Long): Int = pool.addLong(value)
 
+    /** 追加字符串，返回**绝对**下标（`stringBase + 段内序号`）。 */
     fun string(value: String): Int = pool.addString(value)
 
+    /** 追加表达式，返回**绝对**下标（`exprBase + 段内序号`）。 */
     fun expr(value: Expr): Int = pool.addExpr(value)
 
     /** 语句池追加转发（契约 C2；语义见 ConstantPool.addStatement —— 按身份追加、严禁去重）。 */
@@ -1440,7 +2201,12 @@ class CodeBuilder {
     /** 名字 → 下标（10 万级函数表的声明/链接都必须 O(1)，线性扫会变成 O(n²)）。 */
     private val nameToIndex = HashMap<String, Int>()
 
-    /** 登记函数原型；返回函数下标。 */
+    /**
+     * 登记函数原型；返回**绝对**函数下标（`functionBase + 段内序号`）。
+     *
+     * [entryPc] 由调用方从 [emit] 取得，因此已经是绝对 pc —— 这里原样存进 [FunctionInfo]，
+     * 补丁装载期不必再给函数表补偏移（`_CALL` 的 a 与 entryPc 同处绝对空间，逐条自洽）。
+     */
     fun declareFunction(
         name: String,
         entryPc: Int,
@@ -1450,33 +2216,39 @@ class CodeBuilder {
     ): Int {
         require(nameToIndex.put(name, functions.size) == null) { "函数重复声明: $name" }
         functions.add(FunctionInfo(name, entryPc, arity, slotCount, paramNames))
-        return functions.size - 1
+        return functionBase + functions.size - 1
     }
 
     /** 调用点 pc → 逐位实参元数据（具名形参/REF 绑定用；只记非空表，保持表小）。 */
     private val callArgs = HashMap<Int, List<CallArg>>()
 
-    /** 登记某个调用点的逐位实参元数据（同一 pc 只会有一条调用指令，后者覆盖前者）。 */
+    /** 登记某个调用点的逐位实参元数据（同一 pc 只会有一条调用指令，后者覆盖前者；[pc] 为绝对 pc）。 */
     fun declareCallArgs(pc: Int, args: List<CallArg>) {
         if (args.isNotEmpty()) callArgs[pc] = args
     }
 
-    fun functionIndex(name: String): Int = nameToIndex[name] ?: -1
+    /** 函数名 → **绝对**函数下标（未声明返回 -1）。 */
+    fun functionIndex(name: String): Int {
+        val i = nameToIndex[name] ?: return -1
+        return functionBase + i
+    }
 
     /**
      * 登记函数内 `$标签`（编译期；同名幂等并更新 pc）。返回标签下标（= [_JUMP_DYN] 的 a）。
      * 名字大写归一与幂等写面在 [FunctionInfo.putLabel]（惰性槽位）。
+     * [funcIndex] 是 [declareFunction] 返回的**绝对**下标，[pc] 是**绝对** pc。
      */
     fun declareLabel(funcIndex: Int, name: String, pc: Int): Int =
-        functions[funcIndex].putLabel(name.uppercase(), pc)
+        functions[funcIndex - functionBase].putLabel(name.uppercase(), pc)
 
-    /** 标签名 → 下标（未定义返回 -1）。 */
+    /** 标签名 → 下标（未定义返回 -1）。[funcIndex] 为绝对函数下标。 */
     fun labelIndex(funcIndex: Int, name: String): Int =
-        functions[funcIndex].labelNames.indexOf(name.uppercase())
+        functions[funcIndex - functionBase].labelNames.indexOf(name.uppercase())
 
-    /** 函数体解析完后回填帧大小。 */
+    /** 函数体解析完后回填帧大小。[index] 为绝对函数下标。 */
     fun setFunctionSlots(index: Int, slotCount: Int) {
-        functions[index].slotCount = maxOf(functions[index].slotCount, slotCount)
+        val f = functions[index - functionBase]
+        f.slotCount = maxOf(f.slotCount, slotCount)
     }
 
     /**
@@ -1497,8 +2269,16 @@ class CodeBuilder {
 
     val globalSlotCount: Int get() = globalSlots
 
+    /**
+     * 收尾成 [Program]。[entryFunction] 是**绝对**函数下标（[declareFunction] / [functionIndex]
+     * 的返回值）：本段函数表只含新增条目，故落到 `Program.entryFunction` 时折回表内序号
+     * （`entryFunction - functionBase`）—— 既有口径「`entryFunction` 是 `functions` 的下标」
+     * 因此一个字符都没变。六个基线一并交给 `Program`，供装载期算补丁区间。
+     */
     fun build(entryFunction: Int): Program {
-        require(entryFunction in functions.indices) { "入口函数下标越界: $entryFunction" }
+        require(entryFunction in functionBase until functionBase + functions.size) {
+            "入口函数下标越界: $entryFunction（本段绝对区间 [$functionBase, ${functionBase + functions.size})）"
+        }
         require(count > 0) { "空程序" }
         // 跨字段不变量（与 ErbcReader:548 / ErbcWriter:254 / ErbcStream:1135 三路装载校验同款）：
         // 内存 Program 的唯一构建出口再拦一道。arity > slotCount 时 Vm.callInto 的实参复制
@@ -1516,9 +2296,15 @@ class CodeBuilder {
             lines = lines.copyOf(count),
             pool = pool,
             functions = functions.toList(),
-            entryFunction = entryFunction,
+            entryFunction = entryFunction - functionBase,
             globalSlots = globalSlots,
             callArgs = callArgs.toMap(),
+            codeBase = codeBase,
+            statementBase = statementBase,
+            stringBase = stringBase,
+            longBase = longBase,
+            exprBase = exprBase,
+            functionBase = functionBase,
         )
     }
 }

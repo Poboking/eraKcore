@@ -21,13 +21,15 @@ import kotlin.test.assertTrue
 class BundledFontFamiliesTest {
 
     @Test
-    fun `默认族是 Saitamaar 且进选择列表`() {
-        // 2026-10-25 主人指定：默认族切回 Saitamaar 子集（eratw 早期安卓版观感）。
-        // 代价是比例 advance（布局仍按 Grid 1:2 兜底）与 65.23% 的种类覆盖；
-        // 覆盖率最优的 Fusion 与零方框的 Unifont 仍留在设置页可选。
-        assertEquals("Saitamaar", BundledFontFamilies.default.family)
-        assertSame(BundledFontFamilies.SAITAMAAR, BundledFontFamilies.default)
+    fun `默认族是 Sarasa Mono SC 且进选择列表`() {
+        // 原版 PC 的正文是 `FONT NAME:黑体`（SimHei，微软专有），不可随包分发；
+        // Sarasa Mono SC 是它的合法替身（思源黑体同源、OFL-1.1、严格 1:2），
+        // 且八族里字数覆盖最高（99.999%，缺 1056 次），因此是默认正文族。
+        assertEquals("Sarasa Mono SC", BundledFontFamilies.default.family)
+        assertSame(BundledFontFamilies.SARASA, BundledFontFamilies.default)
         assertTrue(BundledFontFamilies.default.selectable, "默认族必须能出现在设置页里")
+        // 演示名与机器键分离：机器键进 Typeface/sidecar，演示名只上设置页
+        assertTrue(BundledFontFamilies.default.displayName.contains("Sarasa"))
     }
 
     @Test
@@ -51,7 +53,6 @@ class BundledFontFamiliesTest {
             "MS P Gothic",
             "黑体",
             "SimHei",
-            "Eratw Mono SC",
         )) {
             assertEquals(
                 BundledFontFamilies.DEFAULT_FAMILY,
@@ -62,12 +63,25 @@ class BundledFontFamiliesTest {
     }
 
     @Test
-    fun `Saitamaar 精确命中且可作正文选项`() {
+    fun `Saitamaar 精确命中且仍可作正文选项`() {
         val resolved = BundledFontFamilies.resolve("Saitamaar")
         assertSame(BundledFontFamilies.SAITAMAAR, resolved)
-        assertTrue(resolved.selectable, "默认族必须进正文选择列表")
+        assertTrue(resolved.selectable, "字符画族仍须进正文选择列表")
         // 大小写与首尾空白不敏感
         assertSame(BundledFontFamilies.SAITAMAAR, BundledFontFamilies.resolve("  saitamaar "))
+    }
+
+    @Test
+    fun `新增的开源族按族名与别名命中`() {
+        assertSame(BundledFontFamilies.SARASA, BundledFontFamilies.resolve("Sarasa Mono SC"))
+        assertSame(BundledFontFamilies.SARASA, BundledFontFamilies.resolve("sarasa-mono-sc"))
+        assertSame(BundledFontFamilies.LXGW_WENKAI, BundledFontFamilies.resolve("Eratw WenKai Mono"))
+        assertSame(BundledFontFamilies.LXGW_WENKAI, BundledFontFamilies.resolve("LXGW WenKai Mono"))
+        assertSame(BundledFontFamilies.MAPLE_MONO, BundledFontFamilies.resolve("Maple Mono CN"))
+        assertSame(BundledFontFamilies.MAPLE_MONO, BundledFontFamilies.resolve("maple-mono"))
+        // 霞鹜文楷的机器键是改名后的 `Eratw WenKai Mono`（OFL RFN），原名仍可达
+        assertEquals("Eratw WenKai Mono", BundledFontFamilies.LXGW_WENKAI.family)
+        assertTrue(BundledFontFamilies.LXGW_WENKAI.displayName.contains("LXGW"))
     }
 
     @Test
@@ -77,6 +91,23 @@ class BundledFontFamiliesTest {
         assertSame(BundledFontFamilies.UNIFONT, BundledFontFamilies.resolve("unifont"))
         // 内部空白差异不影响命中（normalize 会删掉空白）
         assertSame(BundledFontFamilies.FUSION_PIXEL, BundledFontFamilies.resolve("FusionPixel12px"))
+    }
+
+    @Test
+    fun `缺字回落链确定性且只含随包族`() {
+        // 默认族只兜 Unifont；其它族先兜 Sarasa 再兜 Unifont
+        assertEquals(listOf(BundledFontFamilies.UNIFONT), BundledFontFamilies.fallbacksFor(BundledFontFamilies.SARASA))
+        assertEquals(listOf(BundledFontFamilies.SARASA), BundledFontFamilies.fallbacksFor(BundledFontFamilies.UNIFONT))
+        assertEquals(
+            listOf(BundledFontFamilies.SARASA, BundledFontFamilies.UNIFONT),
+            BundledFontFamilies.fallbacksFor(BundledFontFamilies.MISAKI),
+        )
+        for (family in BundledFontFamilies.ALL) {
+            val chain = BundledFontFamilies.fallbacksFor(family)
+            assertTrue(chain.none { it.id == family.id }, "${family.family} 的回落链不应包含自己")
+            assertTrue(chain.all { it in BundledFontFamilies.ALL }, "${family.family} 的回落链只能含随包族")
+            assertEquals(chain.size, chain.map { it.id }.toSet().size, "${family.family} 的回落链有重复")
+        }
     }
 
     @Test
@@ -122,7 +153,7 @@ class BundledFontFamiliesTest {
         assertEquals(
             BundledFontFamilies.ALL.size,
             BundledFontFamilies.SELECTABLE.size,
-            "当前五族全部可选（Saitamaar 也提供选项）",
+            "当前八族全部可选（Saitamaar 也提供选项）",
         )
     }
 
@@ -131,11 +162,16 @@ class BundledFontFamiliesTest {
         // 与 render/src/main/resources/fonts/font-pack-manifest.txt 的 coverage /
         // occurrence-coverage 行同值。改字体子集后三处（manifest / 本表 / 这里）一起改，
         // 否则设置页显示的覆盖率会骗人。
+        // 2026-11-05，4.981 语料重扫（闭包 7956 码点，分母 108,464,789 次）
         val expected = mapOf(
-            "fusion" to (7262 to 80516),
-            "ark" to (7252 to 457668),
-            "unifont" to (8034 to 84),
-            "saitamaar" to (5268 to 3908779),
+            "sarasa" to (7880 to 1056),
+            "lxgw" to (7651 to 42354),
+            "maple" to (7213 to 887528),
+            "fusion" to (7136 to 89992),
+            "ark" to (7146 to 526038),
+            "unifont" to (7909 to 495),
+            "saitamaar" to (5169 to 5098238),
+            "misaki" to (4977 to 5389921),
         )
         for ((id, pair) in expected) {
             val family = assertNotNull(BundledFontFamilies.byId(id), "登记表缺 $id")
@@ -147,8 +183,16 @@ class BundledFontFamiliesTest {
 
     @Test
     fun `覆盖率排序：Fusion 仍是 12px 档最优，Unifont 是零方框档`() {
-        // 默认族切回 Saitamaar 后，「覆盖率最好」与「默认」不是同一个族 —— 这条钉住
-        // 覆盖率本身的排序不变（改字体子集后仍要成立），设置页的覆盖率提示才有意义。
+        // 默认族（Sarasa）也是字数覆盖最高的族；这条钉住其余排序（改字体子集后仍要成立），
+        // 设置页的覆盖率提示才有意义。
+        val bestNonFallback = BundledFontFamilies.SELECTABLE
+            .filter { it.id != BundledFontFamilies.UNIFONT.id }
+            .maxBy { it.occurrenceCoverage }
+        assertSame(
+            BundledFontFamilies.SARASA,
+            bestNonFallback,
+            "除兜底族外，默认族 Sarasa 的字数覆盖应最高",
+        )
         assertTrue(
             BundledFontFamilies.FUSION_PIXEL.occurrenceCoverage >
                 BundledFontFamilies.ARK_PIXEL.occurrenceCoverage,
@@ -168,7 +212,7 @@ class BundledFontFamiliesTest {
             BundledFontFamilies.MISAKI.occurrenceCoverage < BundledFontFamilies.FUSION_PIXEL.occurrenceCoverage,
             "美咲的覆盖率低于像素字体，不能虚报",
         )
-        // 默认族 Saitamaar 同理：它是观感选择，覆盖率不是最优，设置页提示必须写实
+        // 字符画族 Saitamaar 同理：覆盖率不是最优，设置页提示必须写实
         assertTrue(
             BundledFontFamilies.SAITAMAAR.occurrenceCoverage < BundledFontFamilies.FUSION_PIXEL.occurrenceCoverage,
             "Saitamaar 的覆盖率低于像素字体，不能虚报",

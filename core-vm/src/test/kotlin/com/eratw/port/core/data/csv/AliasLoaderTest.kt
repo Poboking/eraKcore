@@ -145,18 +145,22 @@ class AliasLoaderTest {
     @Test
     fun `真实语料 als 装载规模与样例`() {
         val dir = requireCsvDir()
+        // 根自适应（corpusroot 波，2026-11-05）：规模读数按当前根的 CorpusProfile 列取；
+        // 根不认识 ⇒ detect 直接判红，语料被换/被改仍会撞红。
+        val profile = com.eratw.port.boot.CorpusProfile.detect(dir)
         val physical = Files.list(dir).use { s ->
             s.filter { it.fileName.toString().endsWith(".als", ignoreCase = true) }.toList()
         }
-        assertEquals(19, physical.size, "语料 CSV 目录应有 19 个 .als")
+        assertEquals(profile.alsPhysical, physical.size, "语料 CSV 目录应有 ${profile.alsPhysical} 个 .als（${profile.name} 列）")
 
         // 29 槽里有同名 .als 的槽数。Juel.csv/.als 都存在，但 JUEL 不在原版 29 槽装载清单里
         // （ConstantData.cs:682-710 没有 JUEL.CSV），故 Juel.als 无槽可入、原版同样不装载；
         // JUEL 关键字用的是 PALAM 名字表（ConstantData.cs:943-949 / :1654-1659）。
+        // 4.981 新增 Train.als / Time.als（另有 BUFF.als / Dish.als 不在 29 槽清单），可装载槽数 18→20。
         val loadable = GameDataLoader.SLOT_FILES.count { f ->
             CsvLoader.resolveFile(dir, "${f.substringBeforeLast('.')}.als") != null
         }
-        assertEquals(18, loadable)
+        assertEquals(profile.alsLoadableSlots, loadable, "可装载 .als 槽数（${profile.name} 列：18/20）")
         assertNotNull(CsvLoader.resolveFile(dir, "Juel.csv"))
         assertNotNull(CsvLoader.resolveFile(dir, "Juel.als"))
         assertTrue(GameDataLoader.SLOT_FILES.none { it.equals("Juel.csv", ignoreCase = true) })

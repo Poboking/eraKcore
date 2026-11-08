@@ -1,0 +1,24 @@
+; 子目录：JSON 里的 file 值是 `/` 分隔的相对路径（Symbols.kt 的 relativize + replace 口径）。
+@G12_SUB
+#DIM SORT_VALUE [VARSIZE("RELATION")]
+#DIMS 空尺寸$ = "x"
+	PRINTL sub-dir
+	RETURN
+
+@G12_SUB
+#DIM 二维 2, 0, 9
+	PRINTL sub-dir-second
+	RETURN
+
+@EVENTTRAIN
+#ONLY
+	PRINTL sub-event-only
+
+@EVENTTRAIN
+#PRI
+	PRINTL sub-event-pri
+
+@G12_ONLY
+#SINGLE
+	PRINTL only-then-single
+	RETURN

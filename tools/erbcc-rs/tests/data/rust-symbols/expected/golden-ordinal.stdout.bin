@@ -1,0 +1,27 @@
+=== 符号表 ===
+配置: IgnoreCase=true SortFilenames=true DebugMode=false Collator=ORDINAL 宏 0 个（含展开体） ERH #DIM CONST 声明 0 条
+尺寸可解常量 0 个  不可求值丢弃声明: 收集前 0 → 收集后 0
+定义 43  唯一名 37  重名 4（非事件 2 / 事件 2）  被遮蔽 6  方法 6
+
+=== 重名组 ===
+[事件] @EVENTEND  2 处
+  1. GOLDEN_03_FLOW.ERB:308 (fileIndex=4) 
+  2. GOLDEN_03_FLOW.ERB:310 (fileIndex=4) 
+[非事件] @G12_FUNC  2 处
+  1. GOLDEN_12_SYMBOLS.ERB:43 (fileIndex=13) #FUNCTION 
+  生效: GOLDEN_12_SYMBOLS.ERB:43
+[非事件] @G12_PLAIN  3 处
+  1. GOLDEN_12_SYMBOLS.ERB:56 (fileIndex=13) 
+  生效: GOLDEN_12_SYMBOLS.ERB:56
+[事件] @EVENTTURNEND  3 处
+  1. GOLDEN_12_SYMBOLS.ERB:65 (fileIndex=13) #PRI 
+  2. GOLDEN_12_SYMBOLS.ERB:61 (fileIndex=13) 
+  3. GOLDEN_12_SYMBOLS.ERB:70 (fileIndex=13) #LATER 
+
+=== 比较器自检（ja-JP Collator vs ORDINAL）===
+文件数 13  绝对位置位移 0（含被动位移，仅供观察）
+重名定义文件 2 个，两两相对次序翻转 0 / 1 对
+重名组 4  定义集合/次序翻转 0  事件执行序翻转 0
+结论: PASS（两比较器对本语料的重名解析结论一致）
+
+符号表摘要: C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\sym-probe\base\golden-ordinal.json

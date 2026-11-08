@@ -1,0 +1,5 @@
+# erbcc-rs / rust-staging 车道登记：开关纪律探针（闸 3）
+# 产法：python devtools/verify_rust_erbc_staging.py switches --register --register-into 1101
+# 时间：2026-11-01 16:26:03　编译器指纹（现读 pin 清单）：compiler-digest 4ef357c0758d9635927d7e4c5c3cb11315a3ea8d1faef94d324438c3cdb8ee86
+# rc=1（配置期抛 GradleException，app/build.gradle.kts 的开关互斥闸）
+-PeratwAllowStaleErbc 与 -PeratwRequireComplete 互斥：正式包必须能证明 erbc 产物新鲜（CMP-66 的 version/源 sha 对账），fixture 才用放行开关。

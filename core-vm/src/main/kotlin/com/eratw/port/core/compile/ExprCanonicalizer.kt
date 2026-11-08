@@ -2,6 +2,7 @@ package com.eratw.port.core.compile
 
 import com.eratw.port.core.expr.Binary
 import com.eratw.port.core.expr.Expr
+import com.eratw.port.core.expr.FloatLiteral
 import com.eratw.port.core.expr.FormConversion
 import com.eratw.port.core.expr.FormPart
 import com.eratw.port.core.expr.FormStringTerm
@@ -318,6 +319,7 @@ internal class ExprCanonicalizer {
     private fun canonExpr(e: Expr): Expr {
         val rebuilt: Expr = when (e) {
             is IntLiteral -> IntLiteral(e.value, -1, -1)
+            is FloatLiteral -> FloatLiteral(e.value, -1, -1)
             is StrLiteral -> StrLiteral(e.value, -1, -1)
             is NullTerm -> NullTerm(e.isInt, -1, -1)
             is VarRef -> VarRef(e.name, exprList(e.indices), e.isNoArg, e.operandType, e.isConst, e.subKey, -1, -1)

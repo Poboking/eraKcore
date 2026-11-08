@@ -248,7 +248,7 @@ class GraphicsGfxAuditTest {
         assertEquals(1L, i(seed, "GCREATE", 60, 6, 5))
         assertEquals(1L, i(seed, "GCLEAR", 60, 0xFF00FF00L))
         assertEquals(1L, i(seed, "GSAVE", 60, 3))
-        ops.files["a.webp"] = requireNotNull(ops.files["sav/img0003.png"]) { "文本载体没写进去，装置失效" }
+        ops.files["a.webp"] = requireNotNull(ops.files["img0003.png"]) { "文本载体没写进去，装置失效" }
 
         val ctx = auditCtx(ops)
         assertEquals(0L, i(ctx, "GCREATEFROMFILE", 61, "a.webp"))

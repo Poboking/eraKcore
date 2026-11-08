@@ -113,4 +113,60 @@ class CharaCsvLoaderTest {
             dir.toFile().deleteRecursively()
         }
     }
+
+    // ------------------------------------------------------------------
+    // B6（2026-11-06）：同层排序 = 全路径 + ja-JP 文化比较（Config.cs:654-712 / :681）
+    // ------------------------------------------------------------------
+
+    /**
+     * 观测通道：最终 `sortBy no` 是**稳定**排序 ⇒ 同 `番号` 的模板保持文件序 ⇒
+     * 用同名番号 + 可分辨的 `名前` 把文件序读出来（类 KDoc「顺序只在同一 No 多份模板时
+     * 可见」的口径）。
+     */
+    private fun namesOf(dir: Path): List<String> {
+        val warnings = ArrayList<String>()
+        return CharaCsvLoader.load(dir, VariableRegistry(), warnings).map { it.name }
+    }
+
+    /**
+     * 深度优先前序 + 同层 ja-JP 文化序（B6 翻案，旧实现是 ordinal 文件名序）：
+     * - 根层 `Chara9.csv` 先于全部子目录递归（Config.cs:683-704 文件循环在目录循环前）；
+     * - 子目录序按文化比较：`Charaア < Charaい`（五十音 a 行先于 i 行；ordinal 是
+     *   い 0x3044 < ア 0x30A2 反序 —— 旧实现会给出 い→ア，本用例钉的就是这个翻案）。
+     * 依据：Config.cs:681/:697 的 `Array.Sort`（Comparer&lt;string&gt;.Default = CurrentCulture），
+     * 文化取值链见 CharaCsvLoader.PATH_COLLATOR 的 KDoc。
+     */
+    @Test
+    fun `同层子目录按 ja-JP 文化序 递归 根层文件先出`() {
+        val root = tempDir()
+        try {
+            root.resolve("Chara9.csv").writeText("番号,1\n名前,根层\n")
+            val dirI = root.resolve("Charaい").also { it.toFile().mkdirs() }
+            dirI.resolve("Chara5.csv").writeText("番号,1\n名前,い行\n")
+            val dirA = root.resolve("Charaア").also { it.toFile().mkdirs() }
+            dirA.resolve("Chara0.csv").writeText("番号,1\n名前,ア行\n")
+            assertEquals(listOf("根层", "ア行", "い行"), namesOf(root))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    /**
+     * 同层 ASCII 分叉（NTFS 安全形）：文化序 `CharaAa.csv < CharaAB.csv`
+     * （第 2 字母按主权重 a&lt;b），ordinal 是 `B`(0x42) &lt; `a`(0x61) 反序 ——
+     * JVM Temurin 17 探针实测（2026-11-06）：ordinal compare = -31、collator = +1。
+     * （纯同字母大小写分叉 `Charaa`/`CharaA` 在 NTFS 上被大小写不敏感合并成同一文件，
+     * 装置用例不可构造，改用这组。）
+     */
+    @Test
+    fun `同层 ASCII 混合大小写分叉按文化序`() {
+        val root = tempDir()
+        try {
+            root.resolve("CharaAB.csv").writeText("番号,2\n名前,大写尾\n")
+            root.resolve("CharaAa.csv").writeText("番号,2\n名前,小写尾\n")
+            assertEquals(listOf("小写尾", "大写尾"), namesOf(root))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
 }

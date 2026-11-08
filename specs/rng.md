@@ -75,3 +75,18 @@
 
 - **默认路径：自实现 SFMT19937**（类名 MTRandom 有误导性），Kotlin 必须完整复刻其状态与递推式才能逐值一致；该算法完全确定性、无平台差异，可复刻性高。
 - **System.Random（.NET 8 → xoshiro256**，内核种子）仅在 `UseNewRandom=true` 时启用**，且此模式下 RANDOMIZE/INITHRAND/DUMPRAND 全部失效、行为天然不可复现。源码未发现 .NET 兼容开关或自定义 Random 子类；如 eratw 需要跨平台逐值一致，应在 Android 端禁用该开关（存档格式已将 UseNewRandom 列为 JSON 配置项）。xoshiro256** 复刻"未找到引擎侧实现，需运行验证 .NET 8 运行时行为"。
+
+## 6. 2026-10-30 4.981 配置漂移：`UseNewRandom` 由 false 翻 true
+
+- **语料证据（B）**：4.980 `setting.json` = `{"UseButtonFocusBackgroundColor":false,"UseNewRandom":false,"UseScopedVariableInstruction":false}`；
+  4.981 = 同一单行 JSON，`"UseNewRandom":true`，并新增 `"RenderingBackend":0`（两文件均为 1 行）。
+- **fork-src 双路径（A）**：`VariableEvaluator.cs:25` `MTRandom rand = new()`、`:28` `Random _newRand = new()`；
+  `Randomize(long seed)`（`:42-46`）**同时**重建两者（`rand = new(seed); _newRand = new((int)seed)`）；
+  `GetNextRand`（`:57-67`）与 `GetNextRandDouble`（`:69-79`）按 `JSONConfig.Data.UseNewRandom` 二选一；
+  `InitRanddata`/`DumpRanddata`（`:48-56`）只动 `rand`（SFMT 625 元素状态），`_newRand` 不可快照、不可回档。
+- **对 §5 判定不改**：`UseNewRandom` 仍是**运行时 JSON 配置**、`JSONConfigData` 侧无赋值 ⇒ 引擎缺省 false，
+  所以「默认路径 = SFMT19937」结论不动；但 4.981 随包发的 `setting.json` 是 true ⇒ **若照抄上游配置，
+  实际走 .NET 8 System.Random（xoshiro256\*\*，内核种子），逐值一致立刻失效、RANDOMIZE 亦被忽略。**
+- **TODO(verify)**：① fork 里 `UseNewRandom=true` 时 `RANDOMIZE/INITRAND/DUMPRAND` 是否仍只告警（1.824 是只告警，
+  fork 的 `FunctionIdentifier` 未逐行复核）；② Android 端是否照抄上游 `setting.json`（要逐值一致就得把该字段改回 false，
+  存档格式已把它列为 JSON 配置项）——需组长裁定。

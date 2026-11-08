@@ -124,4 +124,24 @@ class SingleDaemonSlotTest {
             slot.stop()
         }
     }
+
+    /**
+     * W8 刀五：body 抛未捕获异常把 daemon 线程带死时，死亡原因必须进 [SingleDaemonSlot.lastFailure]
+     * （旧行为 = 静默死亡，只有 stderr 的默认打印）；下一次 [SingleDaemonSlot.start] 清零。
+     */
+    @Test
+    fun `body 非预期死亡进 lastFailure，起新一代时清零`() {
+        val slot = SingleDaemonSlot<Any>("eratw-devtools-crash")
+        val boom = RuntimeException("侧通道读崩了")
+        try {
+            assertTrue(slot.start({ Any() }, { throw boom }))
+            waitUntil(1_000, "daemon 线程被 body 异常带死") { !slot.isRunning }
+            assertSame(boom, slot.lastFailure, "UncaughtExceptionHandler 在线程终止前记账，线程死了读数必已就位")
+            // 复活路径不受影响：线程已死 ⇒ start 允许起新一代（CMP-17 语义）
+            assertTrue(slot.start({ Any() }, { idleLoop() }), "非预期死亡后必须能重新 start")
+            assertNull(slot.lastFailure, "新一代 start 时清零上一代的死因")
+        } finally {
+            slot.stop()
+        }
+    }
 }

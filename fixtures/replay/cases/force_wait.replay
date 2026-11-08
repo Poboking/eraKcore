@@ -1,0 +1,14 @@
+# FORCEWAIT：ReadAnyKey(anykey: false, stopMesskip: true)。禁消息跳过只影响
+# 本次提交后的跳过态（EmueraConsole.cs:1451 的 while 条件含 !StopMesskip），
+# 推进本身仍需一条提交。
+case: force_wait
+target: REPLAY_FORCE_WAIT
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:762-784
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:876-895
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1451-1458
+--- inputs
+submit
+--- expect-console
+START-FORCEWAIT
+AFTER-FORCEWAIT
+END-FORCEWAIT

@@ -1,0 +1,17 @@
+[package]
+name = "erbcc-rs"
+version = "0.1.0"
+edition = "2021"
+description = "EraBasic 编译器 erbcc 的 Rust 侧（构建期工具：语料扫描 / 内容寻址清单 / 编译编排）"
+
+[dependencies]
+encoding_rs = "0.8"
+sha2 = "0.11"
+
+[lib]
+name = "erbcc_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "erbcc"
+path = "src/main.rs"

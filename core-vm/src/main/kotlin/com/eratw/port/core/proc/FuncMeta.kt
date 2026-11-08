@@ -12,9 +12,9 @@ package com.eratw.port.core.proc
  * （大写），对应 Config.StrComper = OrdinalIgnoreCase（spec: Config.cs:33, 299-308）。
  *
  * **M13-MEM5 刀 2（表示形态改造，语义零改动）**：本类由 `data class` 改为普通类，
- * 16 个属性的**名字、类型、取值、构造签名（具名实参 + 缺省值）、equals/hashCode/toString/
+ * 18 个属性的**名字、类型、取值、构造签名（具名实参 + 缺省值）、equals/hashCode/toString/
  * copy 的值语义**与 `data class` 时代逐位相同；变的只是内部布局：
- * - 7 个 Boolean 收进一个 Int 位域（[flags]）——属性读出同值；
+ * - 8 个 Boolean 收进一个 Int 位域（[flags]）——属性读出同值；
  * - `position`（`"ERB/FILE.ERB:42"`，erbcc 写侧 CorpusCompile.kt:682）在 [FunctionTable]
  *   装配期压实为「文件前缀串引用 + 行号 Int」（见 [position]）：110,072 条独立长串
  *   （mem5 拆解探针实测 16.9 MiB 常驻）换成 ≤3,706 条共享前缀串（0.5 MiB）+ 每 meta
@@ -56,8 +56,25 @@ class FuncMeta(
     localSize: Int = 0,
     /** #LOCALSSIZE n。spec: LogicalLineParser.cs:263-273 */
     localsSize: Int = 0,
+    /**
+     * `#LOCALFSIZE n`（4.981 fork 的浮点局部长度）；未声明 0。
+     *
+     * spec: variables.yaml:99-101（`#LOCALFSIZE` 按函数覆盖 LOCALF/ARGF 的默认 10）；
+     * fork-src `LogicalLineParser.cs:257-266`、`ConstantData.cs:211-217`。
+     * 有效长度由 `VariableStore.resolveFloatLocalSize` 取 `max(10, 本值)`。
+     */
+    floatLocalSize: Int = 0,
     /** 方法返回类型：true = #FUNCTIONS（字符串），false = #FUNCTION（整数）。 */
     returnsStr: Boolean = false,
+    /**
+     * 方法返回类型：true = `#FUNCTIONF`（浮点，4.981 fork 的第三种 `MethodType`）。
+     *
+     * 与 [returnsStr] **互斥**（原版一个方法只有一个 `MethodType`）。位域内的旁路位
+     * （[F_RETURNS_FLOAT]）**不进侧车 `function flags`**（那 7 位 1..64 与 v2 逐位绑定），
+     * 侧车用 function 行的可选原子单独承载（见 [com.eratw.port.core.loader.BootMetadata]）。
+     * 运行期据此选 `_RETF` 返回通道，不再靠「出帧是否走了 `_RETF`」反推。
+     */
+    returnsFloat: Boolean = false,
     /** 装载序号（事件同桶内按此升序执行）。 */
     defIndex: Int = index,
     /** 装载来源（报错定位用，如 "ERB/FILE.ERB:42"）。 */
@@ -66,7 +83,7 @@ class FuncMeta(
     /** 源码书写名（报错用）；与 [key] 同实例时不另占堆（装载侧 internKey 已共享）。 */
     val name: String = name
 
-    // ---- M13-MEM8 刀 B：四只 int 装下全部标量（56 B → 40 B/条，真产物 −1.68 MiB）----
+    // ---- M13-MEM8 刀 B：五只 int 装下全部标量（56 B → 40 B/条，真产物 −1.68 MiB）----
     // 每个取值域都由构造期 require 兜住（真语料实测：下标 < 2^17、argInt ≤ 25 / argStr ≤ 30、
     // #LOCALSIZE ≤ 1000 / #LOCALSSIZE ≤ 10000、行号 ≤ 52,594），越域当场炸而不是静默截断。
     //
@@ -74,10 +91,12 @@ class FuncMeta(
     // w1 = position 行号(16 位) | 整型形参数(8 位) | 字符串形参数(8 位)。
     // w2 = #LOCALSIZE(16 位) | #LOCALSSIZE(16 位)。
     // w3 = 装载序号，全 32 位。
+    // w4 = #LOCALFSIZE(16 位)；w2 两半已用满，浮点局部长度单开一只。
     private var w0: Int
     private var w1: Int
     private val w2: Int
     private val w3: Int
+    private val w4: Int
 
     init {
         require(index in 0..INDEX_MASK) { "函数下标越 ${INDEX_BITS} 位域: $index" }
@@ -85,16 +104,19 @@ class FuncMeta(
         require(argStrCount in 0..ARG_MASK) { "字符串形参个数越 8 位域: $argStrCount" }
         require(localSize in 0..SIZE16_MASK) { "#LOCALSIZE 越 16 位域: $localSize" }
         require(localsSize in 0..SIZE16_MASK) { "#LOCALSSIZE 越 16 位域: $localsSize" }
+        require(floatLocalSize in 0..SIZE16_MASK) { "#LOCALFSIZE 越 16 位域: $floatLocalSize" }
         w0 = index or (((if (isEvent) F_EVENT else 0) or
             (if (isMethod) F_METHOD else 0) or
             (if (isOnly) F_ONLY else 0) or
             (if (isPri) F_PRI else 0) or
             (if (isLater) F_LATER else 0) or
             (if (isSingle) F_SINGLE else 0) or
-            (if (returnsStr) F_RETURNS_STR else 0)) shl INDEX_BITS)
+            (if (returnsStr) F_RETURNS_STR else 0) or
+            (if (returnsFloat) F_RETURNS_FLOAT else 0)) shl INDEX_BITS)
         w1 = (argIntCount shl 16) or (argStrCount shl 24)
         w2 = localSize or (localsSize shl 16)
         w3 = defIndex
+        w4 = floatLocalSize
     }
 
     /** 程序函数表下标（= Program.functions 的 index，_CALL 的 a 操作数）。 */
@@ -119,6 +141,9 @@ class FuncMeta(
     /** #LOCALSSIZE n。spec: LogicalLineParser.cs:263-273 */
     val localsSize: Int get() = w2 ushr 16
 
+    /** `#LOCALFSIZE n`（4.981 fork）；未声明 0。spec: variables.yaml:99-101 */
+    val floatLocalSize: Int get() = w4
+
     val isEvent: Boolean get() = flags and F_EVENT != 0
     val isMethod: Boolean get() = flags and F_METHOD != 0
     val isOnly: Boolean get() = flags and F_ONLY != 0
@@ -126,6 +151,8 @@ class FuncMeta(
     val isLater: Boolean get() = flags and F_LATER != 0
     val isSingle: Boolean get() = flags and F_SINGLE != 0
     val returnsStr: Boolean get() = flags and F_RETURNS_STR != 0
+    /** `#FUNCTIONF`（浮点返回方法，4.981 fork）。 */
+    val returnsFloat: Boolean get() = flags and F_RETURNS_FLOAT != 0
 
     /** 装载序号（事件同桶内按此升序执行）。 */
     val defIndex: Int get() = w3
@@ -195,7 +222,7 @@ class FuncMeta(
         }
 
     /**
-     * 值语义与 `data class` 时代逐位相同：16 个构造属性按声明序等值比较
+     * 值语义与 `data class` 时代逐位相同：18 个构造属性按声明序等值比较
      * （position 走属性读值 ⇒ 压实前后等值不受影响）。
      */
     override fun equals(other: Any?): Boolean {
@@ -206,7 +233,8 @@ class FuncMeta(
             isOnly == other.isOnly && isPri == other.isPri && isLater == other.isLater &&
             isSingle == other.isSingle && argIntCount == other.argIntCount &&
             argStrCount == other.argStrCount && localSize == other.localSize &&
-            localsSize == other.localsSize && returnsStr == other.returnsStr &&
+            localsSize == other.localsSize && floatLocalSize == other.floatLocalSize &&
+            returnsStr == other.returnsStr && returnsFloat == other.returnsFloat &&
             defIndex == other.defIndex && position == other.position
     }
 
@@ -225,7 +253,9 @@ class FuncMeta(
         result = 31 * result + argStrCount
         result = 31 * result + localSize
         result = 31 * result + localsSize
+        result = 31 * result + floatLocalSize
         result = 31 * result + returnsStr.hashCode()
+        result = 31 * result + returnsFloat.hashCode()
         result = 31 * result + defIndex
         result = 31 * result + position.hashCode()
         return result
@@ -236,7 +266,8 @@ class FuncMeta(
         "FuncMeta(index=$index, key=$key, name=$name, isEvent=$isEvent, isMethod=$isMethod, " +
             "isOnly=$isOnly, isPri=$isPri, isLater=$isLater, isSingle=$isSingle, " +
             "argIntCount=$argIntCount, argStrCount=$argStrCount, localSize=$localSize, " +
-            "localsSize=$localsSize, returnsStr=$returnsStr, defIndex=$defIndex, position=$position)"
+            "localsSize=$localsSize, floatLocalSize=$floatLocalSize, returnsStr=$returnsStr, " +
+            "returnsFloat=$returnsFloat, defIndex=$defIndex, position=$position)"
 
     /** `data class` 同款 copy（全部具名 + 缺省 = 当前值）。 */
     fun copy(
@@ -253,7 +284,9 @@ class FuncMeta(
         argStrCount: Int = this.argStrCount,
         localSize: Int = this.localSize,
         localsSize: Int = this.localsSize,
+        floatLocalSize: Int = this.floatLocalSize,
         returnsStr: Boolean = this.returnsStr,
+        returnsFloat: Boolean = this.returnsFloat,
         defIndex: Int = this.defIndex,
         position: String = this.position,
     ): FuncMeta = FuncMeta(
@@ -270,7 +303,9 @@ class FuncMeta(
         argStrCount = argStrCount,
         localSize = localSize,
         localsSize = localsSize,
+        floatLocalSize = floatLocalSize,
         returnsStr = returnsStr,
+        returnsFloat = returnsFloat,
         defIndex = defIndex,
         position = position,
     )
@@ -278,6 +313,8 @@ class FuncMeta(
     internal companion object {
         // 位域编号与侧车 `function flags` 逐位一致（BootMetadata.kt:924-930 的 1/2/4/8/16/32/64），
         // 压实标记占 bit 8（侧车读侧值域闸 FUNC_FLAGS_MASK 之下，永不与侧车位冲突）。
+        // F_RETURNS_FLOAT 占 bit 9：**不进**侧车 flags（那 7 位与 v2 逐位绑定），
+        // 侧车用 function 行的可选原子单独承载。
         internal const val F_EVENT = 1
         internal const val F_METHOD = 2
         internal const val F_ONLY = 4
@@ -286,6 +323,7 @@ class FuncMeta(
         internal const val F_SINGLE = 32
         internal const val F_RETURNS_STR = 64
         internal const val F_POS_PACKED = 128
+        internal const val F_RETURNS_FLOAT = 256
 
         /** 下标域宽（与装载器 FUNC_COUNT_MAX = 1 shl 20 同源）。 */
         internal const val INDEX_BITS = 20
@@ -397,9 +435,15 @@ class FunctionTable(metasIn: List<FuncMeta>) {
     private val eventMembersByKey = HashMap<String, MutableList<FuncMeta>>()
 
     /**
-     * 事件成员键（`KEY#defIndex`）→ 元数据。FN-05 的当前行前缀要按
-     * [FuncMeta.key] 反查源文件，而 [nonEventByKey] 只含非事件函数。
-     * 事件成员量级是几十条，单独一张小表即可。
+     * 事件成员键 → 元数据。键形 = **[FuncMeta.key] 原样（裸大写名），后装载成员覆盖先到者**
+     * （init 逐条 `eventMemberByKey[m.key] = m`，同名事件成员只留最后一位；B6 FN-05 复核更正：
+     * 旧文档误称 `KEY#defIndex` 形——那是 erbcc 侧 **Program 函数名**的切片签名形状
+     * （CorpusCompile.kt:469-477），从不是本表的键）。
+     *
+     * 因此**事件成员帧的源文件归因不走这张表**（帧名带 `#defIndex`，两形必不命中，
+     * 曾恒 null = B6 FN-05 的病灶）；正确入口是 [byFunctionIndex] 直取 meta.position
+     * （`ProcessRuntime.currentScriptLineNow` 已改走该道），或 [sourceFileOfIndex]。
+     * 本表仅保留给「按键名查一个代表成员」的诊断面（[sourceFileOf]）。
      */
     private val eventMemberByKey = HashMap<String, FuncMeta>()
 
@@ -481,16 +525,35 @@ class FunctionTable(metasIn: List<FuncMeta>) {
         if (index >= 0 && index < byIndex.size) byIndex[index] else null
 
     /**
-     * 函数键（大写，含事件成员的 `KEY#defIndex`）→ 源文件显示名（FN-05）。
+     * 函数键（大写**裸名**；事件成员见 [eventMemberByKey] 的键形说明）→ 源文件显示名（FN-05 诊断面）。
      *
-     * 来源 = [FuncMeta.position]（erbcc 写 `"文件:行号"`，CorpusCompile.kt:679/:717）。
+     * 来源 = [FuncMeta.position]（erbcc 写 `"文件:行号"`，CorpusCompile.kt:688）。
      * 只剥最后一个 `:` 后的行号；`·event-entry·` 这类合成标记返回 null（不是源文件）。
      * 走 [nonEvent]/[eventMemberByKey] 的查表路，UNICODE 告警级别低频调用足够。
+     *
+     * **运行期帧归因勿用本函数**：事件成员与重复定义的被遮蔽成员在 Program 侧的函数名是
+     * `KEY#defIndex` 形，与本表键形不同源，按键查会恒 null（B6 FN-05）；帧通道走
+     * [sourceFileOfIndex]（下标即 [byFunctionIndex] 的坐标）。
      */
     fun sourceFileOf(key: String): String? {
         val k = keyOf(key)
         val m = nonEvent(k) ?: eventMemberByKey[k] ?: return null
-        val pos = m.position
+        return fileOfPosition(m.position)
+    }
+
+    /**
+     * Program 函数下标（= 帧表 `funcStack[depth]`，与 `VirtualMachine.currentFunctionIndex`
+     * 同坐标域）→
+     * 源文件显示名（FN-05 运行期主通道）。
+     *
+     * 直取 [byFunctionIndex] 的 meta.position，不经任何键表——事件成员帧（Program 函数名
+     * `KEY#defIndex` 形）与非事件帧一律同判据，修复「事件成员帧归因恒 null」（B6 FN-05）。
+     * 下标越界 / 无 position / 合成标记（`·` 起头）→ null（原版 `getCurrentLine == null` 口径）。
+     */
+    fun sourceFileOfIndex(index: Int): String? = byFunctionIndex(index)?.let { fileOfPosition(it.position) }
+
+    /** `position`（`文件:行号` / 合成标记）→ 文件显示名；共用判据见 [sourceFileOf]。 */
+    private fun fileOfPosition(pos: String): String? {
         if (pos.isEmpty() || pos.startsWith("·")) return null
         val cut = pos.lastIndexOf(':')
         val file = if (cut > 0) pos.substring(0, cut) else pos

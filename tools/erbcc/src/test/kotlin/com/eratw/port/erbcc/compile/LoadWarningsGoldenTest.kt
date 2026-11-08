@@ -5,7 +5,8 @@ import com.eratw.port.core.lexer.LexerConfig
 import com.eratw.port.core.lexer.LogicalLineReader
 import com.eratw.port.core.stmt.LineParser
 import com.eratw.port.erbcc.LoadWarning
-import com.eratw.port.erbcc.SymbolTable
+import com.eratw.port.erbcc.LabelTable
+import com.erbcc.bridge.sizeConsts
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -13,9 +14,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * 装载期告警通道对拍 PC 基准 `.workbuddy/golden-pc-loadwarnings.txt`（5 行）。
+ * 装载期告警通道对拍 PC 基准 `<internal-workdir>/golden-pc-loadwarnings.txt`（5 行）。
  *
- * 基准的采集口径（`.workbuddy/tools/golden_check.py:13,50`）：从原版 `emuera.log` 里抓
+ * 基准的采集口径（`<internal-workdir>/tools/golden_check.py:13,50`）：从原版 `emuera.log` 里抓
  * `警告Lv{level}:{file}:第{line}行:{message}`（`EmueraConsole.PrintWarning` 的 Warning1 模板，
  * Lang.cs / zhs 表 `Error.Warning1`），再拼上夹具该行的原文成
  * `文件:行 | 文案 | SRC: 原文`。前两列才是移植侧的判据（`SRC` 是采集脚本从夹具补的）。
@@ -94,7 +95,7 @@ class LoadWarningsGoldenTest {
 
     @Test
     fun duplicateFunctionWarningsMatchGoldenLinesOneToThree() {
-        val table = SymbolTable.build(repoRoot().resolve("fixtures/golden"))
+        val table = LabelTable.build(repoRoot().resolve("fixtures/golden"), sizeConsts = ::sizeConsts)
         val got = table.duplicateFunctionWarnings().map { render(it) }
         assertEquals(
             listOf(
@@ -115,7 +116,7 @@ class LoadWarningsGoldenTest {
      */
     @Test
     fun duplicateFunctionWarningsSkipEventLabels() {
-        val table = SymbolTable.build(repoRoot().resolve("fixtures/golden"))
+        val table = LabelTable.build(repoRoot().resolve("fixtures/golden"), sizeConsts = ::sizeConsts)
         val warns = table.duplicateFunctionWarnings()
         assertEquals(3, warns.size, "非事件重名组 2 个 ⇒ 被遮蔽定义 1+2=3 条；实际: $warns")
         assertTrue(
@@ -183,7 +184,7 @@ class LoadWarningsGoldenTest {
     @Test
     fun goldenFiveLinesInLoadOrder() {
         val root = repoRoot().resolve("fixtures/golden")
-        val dup = SymbolTable.build(root).duplicateFunctionWarnings()
+        val dup = LabelTable.build(root, sizeConsts = ::sizeConsts).duplicateFunctionWarnings()
         // 夹具漂移 2 的 ONEBINPUTS 不在基准里，单列在 [tooManyArgWarningsMatchGoldenLinesFourToFive]；
         // 这里只拼基准覆盖的 5 行，否则整块对拍会被那条「基准之后才出现的语句」打破。
         val arg = statementWarnings(root.resolve("GOLDEN_06_INPUT_AUTO.ERB"))

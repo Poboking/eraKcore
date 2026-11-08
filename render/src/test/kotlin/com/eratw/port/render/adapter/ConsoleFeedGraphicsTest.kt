@@ -600,4 +600,72 @@ class ConsoleFeedGraphicsTest {
         // 合并块再按高限 100/360 等比缩到 1125 × 100/360 ≈ 313。
         assertEquals(313, g.widthPx, "自然宽 1125 × 100/360 ≈ 313（等比）")
     }
+
+    /**
+     * 4.981 首页标题图（`TITLE.ERB:61` 单张 `<img src='TW_title' height='3500'>`）整张不见了。
+     *
+     * 前置事实（逐条对应断言）：
+     * - `height='3500'` 的**裸数字是百分比**：`ParseMixedNum` 只在带 `px` 后缀时置 `isPx`
+     *   （spec: `Utils.cs:342-362`），原版按 `num * Config.FontSize / 100` 折
+     *   （`:27-31`、`ConsoleImagePart.cs:66`）⇒ PC 那侧在语料 18/18 档（`emuera.config:22-23`）
+     *   是 630px = **整 35 行**，脚本紧接着 `PRINTFORML %"\n" * 34%` 给这 35 行腾位置
+     *   （`TITLE.ERB:62`，实测落 **35** 条空白显示行：34 条空白 + PRINTFORML 自己收尾那条）。
+     * - 端口为了让 136 列在手机上可读，生效字号不是 18 而是 41（行高 43）⇒ 同一个 3500%
+     *   在端口折成 **1435px**（`emitImage` 的百分比支按生效字号乘），比 1080 的屏还高；
+     *   图行 + 35 行预留 = 36 行 > 30 行窗口 ⇒ 图所在那一行整个落在**绘制**窗口之外
+     *   （`ConsoleAdapter.DRAW_EXTRA_ABOVE = 1` 只多带一行），而绘制命令只来自
+     *   `ConsoleScreen.visibleRows()` ⇒ 整张标题图**一条命令都不产生**。
+     *   玩家看到的不是「图糊了」，是「不见了，得上滑才看到」。
+     *
+     * 判据：同一份内容两装配对照 —— 不开块预算（= 修复前）图形命令 0 条；开了则缩到 648、
+     * 35 行预留塌成 16 行，1 图 + 15 承载 + 12 文字 = 28 行 ≤ 30 行窗口，命令回到屏上。
+     */
+    @Test
+    fun `4981 单张超高标题图缩到块高上限并落回窗口内`() {
+        val sizes = FakeSizes("TW_title" to (1041 to 557))
+        val m = CellMetrics(41, 43)
+        fun titleBlock(): LineBufferConsoleSink {
+            val s = sink(width = 136)
+            s.printHtml("<p align='center'><img src='TW_title' height='3500'></p>", false)
+            s.printLine("\n".repeat(34))
+            repeat(12) { s.printLine("标题文字$it") }
+            return s
+        }
+
+        // 对照 = 修复前的生产口径（不开块预算，等价于第二趟不存在的旧 `ImageBandMerge`）
+        val plainSink = titleBlock()
+        assertEquals(48, plainSink.snapshot().size, "前置：1 图行 + 35 预留空行 + 12 文字行")
+        val plainScreen = screen(width = 136, heightLines = 30)
+        ConsoleFeed(plainSink, plainScreen, GraphicsLayer(), m, sizes, scriptFontPixelSize = 18).pump()
+        assertEquals(
+            0,
+            plainScreen.list.render().count { it.graphic is InlineGraphic.Image },
+            "修复前：48 行的标题块塞不进 30 行窗口 ⇒ 图行整个在绘制窗口外 ⇒ 整张图零条命令",
+        )
+
+        val sc = screen(width = 136, heightLines = 30)
+        val f = ConsoleFeed(
+            titleBlock(), sc, GraphicsLayer(), m, sizes,
+            bandAvailWidthPx = 2400,
+            bandMaxHeightPx = 648,
+            scriptFontPixelSize = 18,
+        )
+        f.pump()
+
+        // 先钉玩家看得见的那一条：图必须回到屏上。
+        val imgCmds = sc.list.render().filter { it.graphic is InlineGraphic.Image }
+        assertEquals(1, imgCmds.size, "标题图必须回到绘制窗口里（对照装配这里是 0 条）")
+        assertEquals(28, sc.snapshotText().size, "35 行预留塌成 16 行 ⇒ 16 + 12 文字行")
+        assertEquals(
+            12,
+            sc.snapshotText().count { it.startsWith("标题文字") },
+            "文字行一行不丢（塌的是图自己腾出来的空行）",
+        )
+        val g = imgCmds.single().graphic as InlineGraphic.Image
+        assertEquals(648, g.heightPx, "块高收进 bandMaxHeightPx（自然高 1435 = 3500% × 生效字号 41）")
+        assertEquals(1211, g.widthPx, "等比：2682 × 648/1435（横向不单独夹）")
+        assertEquals(16, g.rowSpan, "整块跨 16 行，绘制侧据此不按单行高压回去")
+        assertNull(g.bandResources, "单张图不是竖带块，绘制侧走普通 drawImage 而不是逐片堆叠")
+        assertEquals(0, imgCmds.single().row, "图行回到窗口首行")
+    }
 }

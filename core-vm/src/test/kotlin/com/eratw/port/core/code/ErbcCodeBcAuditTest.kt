@@ -53,8 +53,10 @@ class ErbcCodeBcAuditTest {
     @Test
     fun `越界操作码在装载期当场拒载而不是留给 VM`() {
         // 202..243 自 T2-21 起是合法栈码组（池引用越界由 requireStackOpPool 另行拒载，
-        // 见 StackOpcodeTest 的池校验用例），非法域从栈码组末条 + 1 开始。
-        for (op in listOf(Opcode._STK_POP_SLOT_S + 1, 500, -1, Int.MIN_VALUE)) {
+        // 见 StackOpcodeTest 的池校验用例），244 `_RETF`（4.981 浮点返回追加段）、
+        // 245 `_CALL_STR`（WIRE-1/2 运行期字符串调用追加段）、246 `_EVAL_INT_JZ`
+        // （MODERN-T1 条件位融合追加段）；非法域从 `Opcode.MAX_OPCODE + 1` 开始。
+        for (op in listOf(Opcode.MAX_OPCODE + 1, 500, -1, Int.MIN_VALUE)) {
             val e = assertFailsWith<ErbcDecodeException>("op=$op 应被拒载") {
                 ErbcReader.decode(bytesWithOp0(op))
             }
@@ -63,14 +65,18 @@ class ErbcCodeBcAuditTest {
                 "报错要点名操作码与真值，实际: ${e.message}",
             )
         }
-        // 合法上界 243（栈码组末条 _STK_POP_SLOT_S）必须放行；栈码组首末条都要合法。
-        assertEquals(Opcode._STK_POP_SLOT_S, ErbcFormat.OPCODE_MAX, "上界 = 栈码组末条")
+        // 合法上界 = Opcode.MAX_OPCODE（当前 246 `_EVAL_INT_JZ`，末条；`_CALL_STR`(245)、
+        // `_RETF`(244) 紧随其前）；各段首末条都要合法。
+        assertEquals(Opcode.MAX_OPCODE, ErbcFormat.OPCODE_MAX, "上界 = 操作码表末条")
         assertTrue(ErbcFormat.isValidOpcode(0))
         assertTrue(ErbcFormat.isValidOpcode(Opcode.MAX_STATEMENT_OPCODE))
         assertTrue(ErbcFormat.isValidOpcode(Opcode._RETS))
         assertTrue(ErbcFormat.isValidOpcode(Opcode._STK_PUSH_IMM), "栈码组首条 202 必须合法")
         assertTrue(ErbcFormat.isValidOpcode(Opcode._STK_POP_SLOT_S), "栈码组末条 243 必须合法")
-        assertTrue(!ErbcFormat.isValidOpcode(Opcode._STK_POP_SLOT_S + 1))
+        assertTrue(ErbcFormat.isValidOpcode(Opcode._RETF), "浮点返回追加段 244 必须合法")
+        assertTrue(ErbcFormat.isValidOpcode(Opcode._CALL_STR), "运行期字符串调用追加段 245 必须合法")
+        assertTrue(ErbcFormat.isValidOpcode(Opcode._EVAL_INT_JZ), "条件位融合追加段 246 必须合法")
+        assertTrue(!ErbcFormat.isValidOpcode(Opcode.MAX_OPCODE + 1))
         assertTrue(!ErbcFormat.isValidOpcode(-1))
     }
 

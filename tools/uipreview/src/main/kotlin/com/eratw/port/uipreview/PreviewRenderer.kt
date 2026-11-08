@@ -1,6 +1,7 @@
 package com.eratw.port.uipreview
 
 import com.eratw.port.core.font.FontSidecarCatalog
+import com.eratw.port.core.host.CbgLayerSnapshot
 import com.eratw.port.core.host.InputRequest
 import com.eratw.port.core.proc.BeginType
 import com.eratw.port.core.proc.GameSession
@@ -8,16 +9,19 @@ import com.eratw.port.core.proc.InputSinkClosedException
 import com.eratw.port.core.proc.StepOutcome
 import com.eratw.port.render.Grid
 import com.eratw.port.render.button.ButtonAcceptance
+import com.eratw.port.render.button.ButtonLayer
 import com.eratw.port.render.glyph.CellMetrics
 import com.eratw.port.render.glyph.GlyphCache
 import com.eratw.port.render.glyph.GlyphRaster
 import com.eratw.port.render.glyph.TextMetrics
 import com.eratw.port.render.sprite.Raster
+import com.eratw.port.render.sprite.SpriteTable
 import com.eratw.port.render.view.ConsoleFrame
 import com.eratw.port.render.view.ConsoleScreen
 import com.eratw.port.render.view.GraphicsLayer
 import com.eratw.port.render.view.ScreenComposer
 import com.eratw.port.render.view.ScreenLayout
+import com.eratw.port.render.view.ScreenScene
 import com.eratw.port.render.adapter.ConsoleFeed
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
@@ -115,12 +119,24 @@ class PreviewRenderer(
         heightLines = heightLines,
     )
 
+    /**
+     * 按名取图口（sprite 表 → 文件兜底；同时喂 [feed] 的展平询宽与 [InkPainter]）。
+     *
+     * 声明在 [composer] 之前：`ScreenComposer` 的 div 子行展平器要拿同一份尺寸源
+     * （`<img>` 缺宽推宽 + 图元 miss 判定的唯一入口），Kotlin 属性初始化按声明顺序执行。
+     */
+    val imageFrames: JvmImageFrames = JvmImageFrames(session.gameRoot, session.store.aux)
+
     /** 几何与排版换算（画布高精确 = `--screen` 高，见类 KDoc）。 */
     val composer: ScreenComposer = ScreenComposer(
         clientWidthCells = columns,
         heightLines = heightLines,
         metrics = metrics,
         canvasHeightPx = screenH,
+        // div 子行里的 `<img>` 与正文同一条尺寸源（原版 `ConsoleImagePart.cs:60-71` 的
+        // 查表在构造期只有一次机会）：喂了才判得出「图元 miss ⇒ 按 AltText 当文本」，
+        // 不喂就退回旧的见方占位 / 静默跳过。
+        sizeSource = imageFrames,
     )
 
     private val frame = ConsoleFrame(composer)
@@ -149,14 +165,78 @@ class PreviewRenderer(
      */
     val glyphCache: GlyphCache = GlyphCache(DEFAULT_GLYPH_CACHE_ENTRIES, glyphRaster, metrics)
 
-    /** 按名取图口（sprite 表 → 文件兜底；同时喂 [feed] 的展平询宽与 [InkPainter]）。 */
-    val imageFrames: JvmImageFrames = JvmImageFrames(session.gameRoot, session.store.aux)
-
     /** 图形层：内联段并发队列 + 背景层快照；准入判据 = 整幅基图（原版 `is SpriteF` 口径）。 */
     val graphicsLayer: GraphicsLayer = GraphicsLayer(backgroundAdmissible = imageFrames::backgroundAdmissible)
 
     /** 帧后处理真墨迹（擦占位 / 垫背景 / 字形与图形段铺墨；见 [InkPainter] 类文档）。 */
     private val inkPainter: InkPainter = InkPainter(composer, metrics, glyphCache, imageFrames)
+
+    /**
+     * CBG 图层的名字 → [Raster] 面（D 刀：预览显示 CBG）。
+     *
+     * `ScreenComposer.drawCbgLayer` 在 headless 侧只认 [SpriteTable] 里的名字；真机那边
+     * 走 `ImageFrameSource`（`SpriteBitmapSource.frame`）。本工具没有那份表，于是在泵线程
+     * 把 `JvmImageFrames.frame(name)` 的帧裁剪成一张独立 [Raster] 登记进来 ——
+     * 裁剪范围 = 帧的 `srcX/srcY/srcW/srcH`，**不含** `DestBaseSize` 缩放（缩放由
+     * `drawCbgLayer` 按快照的 `widthPx/heightPx` 做，与真机同一套 DTO 口径）。
+     *
+     * 线程：只在泵线程读写（ADR-003 消费侧独占，与 [glyphCache] 同一条）。
+     */
+    private val cbgSprites: SpriteTable = SpriteTable()
+
+    /** 已登记进 [cbgSprites] 的名字（为空名补登记一次；图后来才就绪时不重试，见 `pumpOnce`）。 */
+    private val cbgSpriteNames: MutableSet<String> = HashSet()
+
+    /**
+     * 本帧的 [ScreenScene]（D 刀）：把 `GraphicsLayer.cbgLayers` 带进合成。
+     *
+     * 只有 CBG 一张面：背景层仍由 [InkPainter] 后处理（理由见其类文档第 2 趟），
+     * 立绘摆位在预览里没有 producer（`ScreenScene.sprites` 是测试面）。**已知次序差**：
+     * `InkPainter` 的垫背景发生在 `compose` 之后，于是「有 `SETBGIMAGE` 且有 CBG」时
+     * 背景会盖住 CBG —— 原版次序是 bg(`EmueraConsole.cs:1817-1820`) → cbg(`:1834-1848`)
+     * → 正文。`InkPainter` 不在本刀文件面，TODO(verify) 登记给 Lead（卡点：
+     * 垫背景要挪进 `compose`，那需要 `drawSprite` 支持 contain 缩放 + 擦占位不能毁背景）。
+     *
+     * @return 空表 ⇒ [ScreenScene]（缺省实例，零分配路径）
+     */
+    private fun sceneOf(): ScreenScene {
+        val layers = graphicsLayer.cbgLayers
+        if (layers.isEmpty()) return ScreenScene()
+        for (layer in layers) {
+            registerCbgSprite(layer.spriteName)
+            registerCbgSprite(layer.spriteNameB)
+        }
+        return ScreenScene(cbgLayers = layers)
+    }
+
+    /** 按名登记一张 CBG 位图（重复名字只裁一次）。 */
+    private fun registerCbgSprite(name: String?) {
+        if (name == null || !cbgSpriteNames.add(name)) return
+        val frame = imageFrames.frame(name) ?: return
+        val decoded = frame.handle as? DecodedPixels ?: return
+        val raster = cropFrame(decoded, frame.srcX, frame.srcY, frame.srcW, frame.srcH) ?: return
+        cbgSprites.add(name, raster)
+    }
+
+    /**
+     * 从整幅解码像素里裁出帧矩形（越界夹取；宽高非正 = 整幅）。
+     *
+     * 与 `SpriteBitmapSource.spriteFrame` 的静态分支同式（`:236-240` 的夹取）；
+     * 动画帧的源矩形在 core 侧已按 `DestBaseSize` 归一（`SPRITEANIMEADDFRAME` 的
+     * `Normalize` 段），这里只需守父图边界。
+     */
+    private fun cropFrame(decoded: DecodedPixels, srcX: Int, srcY: Int, srcW: Int, srcH: Int): Raster? {
+        if (decoded.width <= 0 || decoded.height <= 0) return null
+        val x = srcX.coerceIn(0, decoded.width - 1)
+        val y = srcY.coerceIn(0, decoded.height - 1)
+        val w = (if (srcW > 0) srcW else decoded.width).coerceIn(1, decoded.width - x)
+        val h = (if (srcH > 0) srcH else decoded.height).coerceIn(1, decoded.height - y)
+        val raster = Raster(w, h)
+        for (row in 0 until h) {
+            System.arraycopy(decoded.pixels, (y + row) * decoded.width + x, raster.pixels, row * w, w)
+        }
+        return raster
+    }
 
     /**
      * 核心层行缓冲 → 渲染层屏幕的桥（生产喂法，`ConsoleFeed` 的唯一消费者 = 泵线程）。
@@ -172,10 +252,13 @@ class PreviewRenderer(
         graphicsLayer,
         metrics,
         imageFrames,
-        // **有意不喂 `scriptFontPixelSize`**（缺省 0 = 脚本 px 不折算）：预览要接这把尺，
-        // 必须先重钉 `ImageFrameTest` 那组「段盒几何 + 像素落位」的取证断言（它们钉的是
-        // px 即设备像素的旧口径），而那张表是 UP 波的验收面。真机侧的接线在
-        // `app/GameHost.attachConsoleFeed`；预览这一刀不动，登记给下一轮连真机截图一起做。
+        // 脚本 px 基准字号（2026-11-05 接上）：与 sink 的 `scriptFontSize` 同源
+        // （都是会话生效配置字号）。此前有意缺省 0（px 即设备像素的旧口径），那时
+        // 折行把图形计 0 格、两边没有可对齐的东西；遗留①收口后折行与渲染必须同尺，
+        // 预览不接的话 HTML img/shape 行在预览里就是「折行 24 格、实占 13 格」的错位
+        // 形态（2026-11-05 桌面截图实测）。`ImageFrameTest` 钉的是 PRINT_IMG /
+        // PRINT_RECT（JvmGraphicsSink 路径，不经 HtmlRunFlatten），本参数不触它。
+        scriptFontPixelSize = session.scriptFontPixelSize,
     )
 
     /** 墙钟预算：VM 循环记进度，`GuardTimerSink` 在 AWAIT 检查。 */
@@ -183,8 +266,15 @@ class PreviewRenderer(
 
     init {
         // 两个构造期注入点（与 app/vmdbg 同款）：图形 sink 与 AWAIT 墙钟闸。
-        // sink 与 feed 必须同一把尺，所以这里同样**不**传 scriptFontPixelSize（理由见 [feed]）。
-        session.runtime.execContext.graphics = JvmGraphicsSink(graphicsLayer, metrics)
+        // JvmGraphicsSink 走 PRINT_IMG/PRINT_RECT 路径（无脚本 px 折算参数）；
+        // HTML img/shape 的脚本尺在 [feed] 的 `scriptFontPixelSize`（与 sink 同源）。
+        // `sizeSource` 与 [feed] / [composer] 同一条：PRINT_IMG 的图元 miss 也按 AltText
+        // 量宽（原版 `ConsoleImagePart.cs:60-65` 的单出口），不喂就仍是见方占位。
+        session.runtime.execContext.graphics = JvmGraphicsSink(
+            graphicsLayer,
+            metrics,
+            sizeSource = imageFrames,
+        )
         session.runtime.execContext.timer = GuardTimerSink(guard)
     }
 
@@ -206,12 +296,60 @@ class PreviewRenderer(
         val yPx: Int,
     )
 
-    /** `/state` 的按钮面快照：sink 版本 + 按钮表 + 行数读数。 */
+    /**
+     * 一颗 div 子行按钮的 `/state` 快照（DIV-WIRE-2 余项④）。
+     *
+     * 与 [UiButton] 的分工：那个是**格**命中表（`ConsoleScreen.buttons.all()`）的投影，
+     * 只覆盖普通行；div 子行按钮住的是命中层的**像素**条目（`ButtonLayer.divTargets()`，
+     * 造表口径照 `ConsoleDivPart.cs:137-172` 的 TestChildHitbox），用本类型单独发布。
+     *
+     * **几何口径（与 [UiButton] 同一把尺，与绘制几何分开）**：
+     * - 本类型 = **命中geometry**：直接搬命中层条目自带的设备像素
+     *   （`ButtonLayer` 建表时按 `cellPx` / `rowHeightPx` 折好的 run 命中矩形：
+     *   x = 盒左 + 内缩 + 格游标像素、y = 子行带顶、w = 格数 × 格宽、h = 一行高），
+     *   序列化侧**原样输出**，不再查 `composer.rowTopPx` / `metrics.cellsToPixels` 折算 ——
+     *   保证「报出来的点 = 点得中的点」。
+     * - 若同一 `/state` 里存在 `divs[]`（绘制快照键），那是**绘制几何**：宽 = `widthPx + 2`
+     *   （`ConsoleDivPart.cs:178` 的官方 fudge）、子行 y 由行顶表折算。两者**不许互相折算**。
+     *
+     * @property blockIndex 块号：`DivOverlayPlanner.Plan.all`（behindText + inFrontOfText
+     *   拼接序，`DivOverlay.kt:107`）的全局下标 —— 与 `ButtonLayer.DivFocus.blockIndex`
+     *   同一套编号（组长裁定 2026-11-06）
+     * @property childRow div 子行序号（0 起，`ConsoleDivPart.cs:197-203` 的 children 序）
+     * @property depth div 覆盖层次（`EmueraConsole.cs:1830` 的 depth 降序）
+     * @property colStart / colEnd run 在本子行内的半角格区间（0 起，不含子行 indent 位移）
+     * @property xPx / yPx / widthPx / heightPx 命中矩形（画布像素浮点，原样搬）
+     * @property value 按钮回环值（Long / String），与 `buttons[].value` 同口径
+     * @property label 按钮文案（run 文本拼接）
+     */
+    class UiDivButton(
+        val blockIndex: Int,
+        val childRow: Int,
+        val depth: Int,
+        val colStart: Int,
+        val colEnd: Int,
+        val xPx: Float,
+        val yPx: Float,
+        val widthPx: Float,
+        val heightPx: Float,
+        val value: Any?,
+        val label: String,
+    )
+
+    /** `/state` 的按钮面快照：sink 版本 + 按钮表 + 行数读数 + div 子行按钮。 */
     class UiSnapshot(
         val sinkRev: Long,
         val buttons: List<UiButton>,
         val hitRows: Int,
         val visibleRows: Int,
+        /**
+         * div 子行里的可点条目（DIV-WIRE-2 余项④）。
+         *
+         * 数据源 = `ConsoleScreen.divTargets()`（命中层的像素条目，见 [UiDivButton]）；
+         * 本类只做「命中层条目 → 快照」的搬运，px **原样搬**，不二次折算。
+         * 缺省空表：没有 div 按钮的帧与接线前逐字节相同。
+         */
+        val divButtons: List<UiDivButton> = emptyList(),
     )
 
     private val frameSeq = AtomicLong(0L)
@@ -381,7 +519,7 @@ class PreviewRenderer(
         // 「画布是本帧 compose 的完整结果」之上；桌面工具性能非目标，且背景/立绘路径
         // render 本就强制全量（ConsoleFrame 类文档）。滚动强制全量的旧语义被它覆盖。
         frame.invalidate()
-        val raster = frame.draw(screen, rects)
+        val raster = frame.draw(screen, rects, sceneOf(), cbgSprites)
         inkPainter.paint(raster, screen, graphicsLayer.background)
         publishUi()
         if (raster.width <= 0 || raster.height <= 0) {
@@ -408,7 +546,19 @@ class PreviewRenderer(
                 yPx = y,
             )
         }
-        publishedUi.set(UiSnapshot(session.console.revision, buttons, screen.hitRows().size, rowCount))
+        // div 子行按钮（DIV-WIRE-2 余项④）：数据源 = `ConsoleScreen.divTargets()`（命中层
+        // 像素条目）。px **原样搬**（不折算，见 [UiDivButton] 的 KDoc）。
+        // 前提：帧入口（`ConsoleFrame.draw`）已调 `screen.updateDivOverlay(...)` 喂同帧规划，
+        // 否则命中表为空 —— 头less 路径的这行接线在 `ConsoleFrame` 帧入口内。
+        publishedUi.set(
+            UiSnapshot(
+                sinkRev = session.console.revision,
+                buttons = buttons,
+                hitRows = screen.hitRows().size,
+                visibleRows = rowCount,
+                divButtons = buildUiDivButtons(screen.divTargets()),
+            ),
+        )
     }
 
     /** 起泵线程（守护线程，[pollMs] 周期；`stopped` 置位后退出）。 */
@@ -475,6 +625,43 @@ class PreviewRenderer(
          */
         fun deriveFont(screenW: Int, columns: Int, densityDpi: Int = ScreenLayout.DENSITY_BASE_DPI): Int =
             ScreenLayout.fixedColumns(screenW, densityDpi, columns).fontPixelSize
+
+        /**
+         * 命中层的 div 条目 → `/state` 的 divButtons 快照（**纯函数**：不碰渲染器状态，便于单测）。
+         *
+         * 几何**原样搬** [ButtonLayer.DivHit] 的 Float 像素：那是命中层按 `cellPx` /
+         * `rowHeightPx` / 行顶公式折好的 **run 命中矩形**（x = 盒左 + 格游标像素、
+         * y = 子行带顶、w = 格数 × 格宽、h = 纵带高，见 `ButtonLayer.attachDiv`），
+         * 这里**不取整也不折算** —— 不再查 `composer.rowTopPx` / `metrics.cellsToPixels`
+         * （那会变成第二套算术，出现「报出来的点 ≠ 点得中的点」）。
+         *
+         * 与绘制几何（若同帧存在 `divs[]` 快照键：宽 = `width + 2`、y 由行顶表折算，
+         * `ConsoleDivPart.cs:178`）是两个面，见 [UiDivButton] 的 KDoc。
+         */
+        internal fun buildUiDivButtons(targets: List<ButtonLayer.DivHit>): List<UiDivButton> {
+            if (targets.isEmpty()) {
+                return emptyList()
+            }
+            val out = ArrayList<UiDivButton>(targets.size)
+            for (hit in targets) {
+                out.add(
+                    UiDivButton(
+                        blockIndex = hit.blockIndex,
+                        childRow = hit.childRow,
+                        depth = hit.depth,
+                        colStart = hit.colStart,
+                        colEnd = hit.colEnd,
+                        xPx = hit.xPx,
+                        yPx = hit.yPx,
+                        widthPx = hit.widthPx,
+                        heightPx = hit.heightPx,
+                        value = hit.value,
+                        label = hit.label,
+                    ),
+                )
+            }
+            return out
+        }
     }
 }
 

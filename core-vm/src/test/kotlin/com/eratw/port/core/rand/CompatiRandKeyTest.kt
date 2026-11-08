@@ -84,9 +84,9 @@ class CompatiRandKeyTest {
     @Test
     fun `关：解析期 RAND 省略下标与 RAND 0 都报错`() {
         val omitted = assertFailsWith<StmtParseException> { parse("A = RAND", compatiRAND = false) }
-        assertTrue(omitted.message!!.contains("RAND 不能省略下标"), omitted.message)
+        assertTrue(omitted.message!!.contains("RAND省略了一个参数"), omitted.message)
         val zero = assertFailsWith<StmtParseException> { parse("A = RAND:0", compatiRAND = false) }
-        assertTrue(zero.message!!.contains("RAND 的参数不能为 0"), zero.message)
+        assertTrue(zero.message!!.contains("RAND有一个参数为0"), zero.message)
     }
 
     @Test

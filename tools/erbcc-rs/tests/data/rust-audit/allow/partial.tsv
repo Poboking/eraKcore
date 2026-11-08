@@ -1,0 +1,8 @@
+# 部分放行档：只覆盖 8 处硬差异里的 2 处，第 3 条是非红 kind（不该影响红计数）
+VAR_UNBOUND	AUDIT_NO_SUCH_VAR_A1
+KEYWORD_UNBOUND	AUDIT_A3	RELATION:NOKEY
+COMPILE_DIM_WARNING	AUDIT_P6A
+
+# 下面两行是坏行：Kotlin 只收 2/3 列（Main.kt:635-638），1 列与未知 kind 的行
+BOGUS_KIND	X
+ONECOL

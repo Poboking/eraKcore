@@ -5,30 +5,35 @@
 
 上一版随包字体只有 `saitamaar-subset.ttf`——Saitamaar 是**字符画用的比例字体**
 （advance 空格 400 / 数字 640 / 拉丁 800 / CJK 1280，upem 1280），拿它当正文正文字体
-等于「用错字体」：它对语料 8076 个码点只覆盖 5268 个（65.23%），其余 2808 个在屏上是
-方框。本脚本按 `required-codepoints.txt`（语料码点闭包，唯一语义输入）逐个生成候选字体的
-子集，并**如实记录**每个子集的覆盖率与 advance 分布，供装配层挑默认族。
+等于「用错字体」：它对语料 7956 个码点只覆盖 5169 个（64.97%），其余 2787 个在屏上是
+方框。本脚本按 `required-codepoints.txt`（**随包 4.981 语料**的码点闭包，唯一语义输入）
+逐个生成候选字体的子集，并**如实记录**每个子集的覆盖率与 advance 分布，供装配层挑默认族。
 
 ## 输入与授权（判据：只允许可再分发的源）
 
 | 族 | 源 | 许可 | 备注 |
 |---|---|---|---|
-| **Fusion Pixel 12px**（默认族） | `@fontpkg/fusion-pixel` 20220405 | OFL-1.1 | 缝合像素字体，upem 1200，半角 600 |
+| **Sarasa Mono SC**（默认族） | `@be5invis/sarasa-gothic-sc` 0.36.0 | OFL-1.1 | 更纱黑体，Source Han Sans 字形 + 等宽拉丁，upem 1000，半角 500 |
+| **LXGW WenKai Mono** | `lxgw/LxgwWenKai` 1.530 | OFL-1.1 | 霞鹜文楷等宽（楷体观感），upem 1000，半角 500 |
+| **Maple Mono CN** | `subframe7536/maple-font` 7.0.0 | OFL-1.1 | 圆角编程字体，upem 1000，半角 600 |
+| Fusion Pixel 12px | `@fontpkg/fusion-pixel` 20220405 | OFL-1.1 | 缝合像素字体，upem 1200，半角 600 |
 | Ark Pixel 12px | 仓内 `app/src/main/res/font/ark_pixel.ttf` | OFL-1.1 | 12px 点阵，upem 1200，半角 600 |
 | Unifont 15.0.01 | `@fontpkg/unifont` 15.0.1 | OFL-1.1 / GPLv2+FE | 16px 点阵，upem 1024，半角 512 |
 
-`msgothic.ttc` / `msmincho.ttc` / `simhei.ttf` 的 name ID 13 没有子集再分发权，
-`guard_source` 硬性拒绝（它们只允许本机跑 `probe_metrics.py` 做度量参照）。
+原版正文用的是 `emuera.config` 的 `FONT NAME:黑体`（Windows 的 SimHei）。SimHei 是
+微软专有字体，name ID 13 没有子集再分发权，**不能随包**；`guard_source` 对
+`msgothic` / `msmincho` / `msyh` / `simhei` / `simsun` / `meiryo` / `yugothic` 硬性拒绝
+（它们只允许本机跑 `probe_metrics.py` 做度量参照）。默认族因此取**观感与格宽最接近
+SimHei 的合法开源替代**：Sarasa Mono SC（Source Han Sans 字形，strict 1:2）。
 
 ## 两个覆盖率口径（选默认族必须看后者）
 
-* **种类覆盖** = 闭包 8076 个码点里命中多少个。`required-codepoints.txt` 是「有没有这个字」。
+* **种类覆盖** = 闭包 7956 个码点里命中多少个。`required-codepoints.txt` 是「有没有这个字」。
 * **字数覆盖** = 按语料**实际出现次数**加权（`--gamedir` 给了才算）。这是「读起来卡不卡」。
 
-两者会给出相反的结论：Ark 与 Fusion 的种类覆盖只差 10 个（7252 vs 7262），
-但字数覆盖差 **5.7 倍**（99.522% vs 99.916%）—— Ark 缺的是 `恋`（87,504 次）、
-`然`（56,883 次）这类高频简体字，它多出来的却是点字（175 个）与冷僻字。
-**所以默认族是 Fusion，不是 Ark。**
+两者会给出相反的结论：Ark 与 Fusion 的种类覆盖只差 10 个，但字数覆盖差数倍 ——
+Ark 缺的是 `恋`、`然` 这类高频简体字，它多出来的却是点字与冷僻字。
+**默认族按字数覆盖选（Sarasa Mono SC 99.999%），不是按种类覆盖选。**
 
 ## 产出（全部落 `render/src/main/resources/fonts/`）
 
@@ -67,10 +72,40 @@ REQUIRED = os.path.join(HERE, "required-codepoints.txt")
 # 微软字体：子集也不许进仓库（name ID 13 原文见 LICENSE-Saitamaar.txt）
 DENIED_SOURCE_HINTS = ("msgothic", "msmincho", "msyh", "simhei", "simsun", "meiryo", "yugothic")
 
-# 候选表。**顺序即装配侧默认族顺序**（第一个 = 默认族）。
+# 候选表。**第一个 = 默认正文族**（与 Kotlin 侧 BundledFontFamilies 同序）。
 # source 允许用环境变量覆盖（换机器时不必改脚本）。
 # `family` 必须与 Kotlin 侧 BundledFontFamilies 的族名逐字一致，slug 由它折叠而来。
 CANDIDATES = [
+    {
+        "id": "sarasa",
+        "family": "Sarasa Mono SC",
+        "slug": "sarasa-mono-sc",
+        "size": 18,
+        "source": os.environ.get("ERATW_FONT_SARASA", ""),
+        "source_note": "npm @be5invis/sarasa-gothic-sc 0.36.0 → package/sarasa-mono-sc-regular.ttf（OFL-1.1）",
+        "license": "LICENSE-Sarasa.txt",
+    },
+    {
+        "id": "lxgw",
+        # 源字体声明了 Reserved Font Name（'LXGW' / '霞鹜文楷' …），OFL-1.1 的 RFN 条款要求
+        # Modified Version（子集即修改版）不得沿用保留名 ⇒ 子集族名改成 Eratw WenKai Mono。
+        "family": "Eratw WenKai Mono",
+        "rename": "Eratw WenKai Mono",
+        "slug": "lxgw-wenkai-mono",
+        "size": 18,
+        "source": os.environ.get("ERATW_FONT_LXGW", ""),
+        "source_note": "github lxgw/LxgwWenKai v1.530 LXGWWenKaiMono-Regular.ttf（OFL-1.1，有 RFN ⇒ 子集改名）",
+        "license": "LICENSE-LXGWWenKai.txt",
+    },
+    {
+        "id": "maple",
+        "family": "Maple Mono CN",
+        "slug": "maple-mono-cn",
+        "size": 18,
+        "source": os.environ.get("ERATW_FONT_MAPLE", ""),
+        "source_note": "npm maple-mono-cn 7.0.0 → package/MapleMono-CN-Regular.ttf（OFL-1.1）",
+        "license": "LICENSE-MapleMono.txt",
+    },
     {
         "id": "fusion",
         "family": "Fusion Pixel 12px",
@@ -187,6 +222,25 @@ def read_cmap_and_hmtx(path: str):
     return cmap, adv, upem, len(names)
 
 
+def rename_family(font, family: str) -> None:
+    """把子集的族名/全名/PostScript 名换成不含保留名的 `family`（OFL-1.1 RFN 条款）。
+
+    只改名字表，不动字形——源字体声明的 Reserved Font Name（LXGW 等）不得用于
+    Modified Version；Android 按 asset 路径加载，改名不影响渲染。
+    """
+    postscript = family.replace(" ", "")
+    table = font["name"]
+    for record in table.names:
+        if record.nameID in (1, 16):
+            record.string = family
+        elif record.nameID == 4:
+            record.string = family + " Regular"
+        elif record.nameID == 6:
+            record.string = postscript + "-Regular"
+        elif record.nameID == 3:
+            record.string = family + ";subset"
+
+
 def build_one(cand: dict, required: list[int], check_only: bool, freq: dict[int, int]) -> dict:
     from fontTools import subset
     from fontTools.ttLib import TTFont
@@ -196,7 +250,9 @@ def build_one(cand: dict, required: list[int], check_only: bool, freq: dict[int,
         raise SystemExit(
             "%s 的源字体缺失：%r\n"
             "用环境变量指路，例如：\n"
-            "  ERATW_FONT_FUSION=/path/fusion-pixel.ttf ERATW_FONT_UNIFONT=/path/unifont.ttf python build_font_pack.py"
+            "  ERATW_FONT_SARASA=/path/sarasa-mono-sc-regular.ttf "
+            "ERATW_FONT_FUSION=/path/fusion-pixel.ttf "
+            "ERATW_FONT_UNIFONT=/path/unifont-15.0.01.ttf python build_font_pack.py"
             % (cand["id"], src)
         )
     guard_source(src)
@@ -244,6 +300,8 @@ def build_one(cand: dict, required: list[int], check_only: bool, freq: dict[int,
     subsetter = subset.Subsetter(options=options)
     subsetter.populate(unicodes=required)
     subsetter.subset(font)
+    if cand.get("rename"):
+        rename_family(font, cand["rename"])
 
     os.makedirs(REPO_FONTS_DIR, exist_ok=True)
     out_ttf = os.path.join(REPO_FONTS_DIR, cand["slug"] + "-subset.ttf")

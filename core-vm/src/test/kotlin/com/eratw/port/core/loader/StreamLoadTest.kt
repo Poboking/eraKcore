@@ -21,7 +21,6 @@ import com.eratw.port.core.stmt.VoidArgument
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.io.TempDir
-import java.lang.management.ManagementFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -190,28 +189,10 @@ class StreamLoadTest {
     // 5. 不复制整份产物（分配量硬等式）
     // ==================================================================
 
-    /** 线程分配计数（宿主 JVM 不支持时用例跳过，不伪造读数）。 */
-    private class AllocMeter private constructor(
-        private val bean: com.sun.management.ThreadMXBean,
-        private val tid: Long,
-    ) {
-        fun read(): Long = bean.getThreadAllocatedBytes(tid)
-
-        companion object {
-            fun open(): AllocMeter? = runCatching {
-                val bean = ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean
-                    ?: return null
-                if (!bean.isThreadAllocatedMemorySupported) return null
-                bean.isThreadAllocatedMemoryEnabled = true
-                val tid = Thread.currentThread().id
-                bean.getThreadAllocatedBytes(tid)
-                AllocMeter(bean, tid)
-            }.getOrNull()
-        }
-    }
+    // 线程分配计数（宿主 JVM 不支持时用例跳过，不伪造读数）：原私有 AllocMeter 收敛进共享 AllocMeterProbe。
 
     private fun allocatedBy(
-        meter: AllocMeter,
+        meter: AllocMeterProbe,
         block: () -> Program,
     ): Long {
         val before = meter.read()
@@ -221,9 +202,9 @@ class StreamLoadTest {
 
     @Test
     fun `open 物化比 loadFile 少分配一份产物（无整文件拷贝）`(@TempDir dir: Path) {
-        val meter = AllocMeter.open()
-        assumeTrue(meter != null, "宿主 JVM 不支持线程分配计数（com.sun.management.ThreadMXBean）：跳过")
-        val m = requireNotNull(meter)
+        val opened = AllocMeterProbe.open()
+        assumeTrue(opened.meter != null, "宿主 JVM 不支持线程分配计数（com.sun.management.ThreadMXBean）：跳过（${opened.failureReason}）")
+        val m = requireNotNull(opened.meter)
 
         // 预热：两条路径都先走一遍，类加载/JIT 的一次性分配不计入读数
         val warm = dir.resolve("warm.erbc")
@@ -338,9 +319,9 @@ class StreamLoadTest {
     fun `真实产物：规范化去重占装载分配多少（ERATW_ERBC 动态门）`() {
         val path = realArtifact()
         assumeTrue(path != null, "ERATW_ERBC 未指向可读的 program.erbc：跳过真实产物用例")
-        val meter = AllocMeter.open()
-        assumeTrue(meter != null, "宿主 JVM 不支持线程分配计数（com.sun.management.ThreadMXBean）：跳过")
-        val m = requireNotNull(meter)
+        val opened = AllocMeterProbe.open()
+        assumeTrue(opened.meter != null, "宿主 JVM 不支持线程分配计数（com.sun.management.ThreadMXBean）：跳过（${opened.failureReason}）")
+        val m = requireNotNull(opened.meter)
         val file = requireNotNull(path)
         val fileBytes = Files.size(file)
 

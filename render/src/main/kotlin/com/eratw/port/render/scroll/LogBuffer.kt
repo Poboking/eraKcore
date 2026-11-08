@@ -38,6 +38,15 @@ import com.eratw.port.render.Grid
  * 分析模式（`-a`）读配置时把 `MAXLOG` 强行改写成 10000（spec: `ConfigData.cs:569-572`），
  * 同样属配置侧改写；本类只用 [MAX_LOG_ANALYSIS_MODE] 记录该数，不自动改写，构造时由调用方自己传值。
  *
+ * ## 存储按需增长
+ * 槽位表不按 [maxLog] 一次性预分配：初值 `min(maxLog, 64)`，追加到满才翻倍扩容、
+ * 封顶 [maxLog]。原版 `displayLineList` 是 `List`，同样随行数增长；而 `MAXLOG` 没有上限
+ * （[resolveMaxLog] 只抬下限），配置写大时整表预分配会在**构造期**就要一整张 `Array`
+ * （`Int.MAX_VALUE` 直接 `OutOfMemoryError: Requested array size exceeds VM limit`），
+ * 这与原版同配置下的行为不符。扩容时按逻辑顺序压实到 `head = 0`，环形下标一律模
+ * **当前槽位数**；[maxLog] 仍是生效上限，[size] / [totalLines] / [firstIndex] /
+ * [logicalLines] 等对外读数逐值不变。峰值内存因此跟随实际保留行数，而不是配置值。
+ *
  * ## 行号口径（跨淘汰仍可寻址）
  * 每行有一个**绝对行号**（Long，从 0 递增）：
  *   * 分配时机与原版一致 —— 先 `line.LineNo = lineNo` 再 `lineNo++`
@@ -112,7 +121,7 @@ class LogBuffer(capacity: Int, configMaxLog: Int = capacity) {
     val logicalLines: Long
         get() = logicalCount
 
-    private val slots: Array<DisplayRow?> = arrayOfNulls(maxLog)
+    private var slots: Array<DisplayRow?> = arrayOfNulls(minOf(maxLog, INITIAL_SLOT_COUNT))
     private var head = 0
     private var length = 0
     private var appendCount = 0L
@@ -123,11 +132,15 @@ class LogBuffer(capacity: Int, configMaxLog: Int = capacity) {
      * 传入的 [row] 原样保存，不做任何裁剪或合并。
      */
     fun append(row: DisplayRow) {
-        val slot = (head + length) % maxLog
+        if (length == slots.size && slots.size < maxLog) {
+            growSlots()
+        }
+        val capacity = slots.size
+        val slot = (head + length) % capacity
         slots[slot] = row
-        if (length == maxLog) {
+        if (length == capacity) {
             // 满：slot 恰为 head，覆盖即「RemoveAt(0)」，head 前移一行
-            head = (head + 1) % maxLog
+            head = (head + 1) % capacity
         } else {
             length++
         }
@@ -135,6 +148,20 @@ class LogBuffer(capacity: Int, configMaxLog: Int = capacity) {
         if (row.isLogicalLine && row.isLineEnd) {
             logicalCount++
         }
+    }
+
+    /** 槽位用尽且未到 [maxLog] 时翻倍扩容（封顶 [maxLog]），并压实到 `head = 0`。 */
+    private fun growSlots() {
+        val oldCapacity = slots.size
+        val grownCapacity = minOf(maxLog.toLong(), oldCapacity.toLong() * 2L).toInt()
+        val grown = arrayOfNulls<DisplayRow>(grownCapacity)
+        var offset = 0
+        while (offset < length) {
+            grown[offset] = slots[(head + offset) % oldCapacity]
+            offset++
+        }
+        slots = grown
+        head = 0
     }
 
     /**
@@ -162,7 +189,7 @@ class LogBuffer(capacity: Int, configMaxLog: Int = capacity) {
             return false
         }
         while (length > 0) {
-            val slot = (head + length - 1) % maxLog
+            val slot = (head + length - 1) % slots.size
             val row = slots[slot]
             slots[slot] = null
             length--
@@ -188,7 +215,7 @@ class LogBuffer(capacity: Int, configMaxLog: Int = capacity) {
         if (length == 0) {
             return false
         }
-        val slot = (head + length - 1) % maxLog
+        val slot = (head + length - 1) % slots.size
         val old = slots[slot]
         slots[slot] = row
         if (old != null && old.isLogicalLine && old.isLineEnd) {
@@ -209,11 +236,11 @@ class LogBuffer(capacity: Int, configMaxLog: Int = capacity) {
         if (index < firstIndex || index >= appendCount || length == 0) {
             return null
         }
-        return slots[(head + (index - firstIndex).toInt()) % maxLog]
+        return slots[(head + (index - firstIndex).toInt()) % slots.size]
     }
 
     /** 末行（最新一条）；空缓冲返回 null —— 原版 `LastLineIsTemporary` 的同款守卫（spec: `EmueraConsole.cs:513-524`）。 */
-    fun last(): DisplayRow? = if (length == 0) null else slots[(head + length - 1) % maxLog]
+    fun last(): DisplayRow? = if (length == 0) null else slots[(head + length - 1) % slots.size]
 
     /**
      * 从绝对行号 [from] 起读至多 [count] 行，越界自动裁剪（返回条数可能少于 [count]，也可能为 0）。
@@ -247,7 +274,7 @@ class LogBuffer(capacity: Int, configMaxLog: Int = capacity) {
         val out = ArrayList<DisplayRow>(n)
         var abs = start
         while (abs < endExclusive) {
-            val row = slots[(head + (abs - firstIndex).toInt()) % maxLog]
+            val row = slots[(head + (abs - firstIndex).toInt()) % slots.size]
             if (row != null) {
                 out.add(row)
             }
@@ -293,6 +320,9 @@ class LogBuffer(capacity: Int, configMaxLog: Int = capacity) {
     )
 
     companion object {
+        /** 槽位表初值（实际取 `min(maxLog, 本值)`），之后按需翻倍，不预分配 [maxLog] 整表。 */
+        private const val INITIAL_SLOT_COUNT = 64
+
         /** 分析模式读配置时强改的 `MAXLOG`（spec: `ConfigData.cs:569-572`，`array[1] = "10000"`）。 */
         const val MAX_LOG_ANALYSIS_MODE = 10000
 

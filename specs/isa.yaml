@@ -905,9 +905,9 @@ instructions:
 - name: SETFONT
   kind: display
   arg_form: STR_EXPRESSION_NULLABLE
-  semantics: 按名称设置后续输出使用的字体;空参数恢复默认字体。
+  semantics: 按名称设置后续输出使用的字体;空参数恢复默认字体。段宽随字体变,每段按其字体实测像素宽定位(非静态格表)。
   errors: ''
-  display_effect: 影响后续输出字体。
+  display_effect: 影响后续输出字体,并按该字体换排版宽度(ConsoleStyledString.cs:25,82 Width=GetDisplayLength(Text,Font);ConsoleDisplayLine.cs:66 逐段累加)。
   source: Process.cs:1531-1534
   aliases: SETFONT
   register: FunctionIdentifier.cs:4008
@@ -1520,11 +1520,88 @@ instructions:
   confidence: high
   flag: 38
   flag_source: FunctionIdentifier.cs:1249,4105,4106
+# ─────────────────────────────────────────────────────────────
+# CALLSHARP 条目补登（2026-11-05，来源 = lane modelset 交来；下列每条均由本路逐行回
+# reference/emuera-cs 与 4.981 语料复核后落笔。原 errors 行「解析期找不到本地方法报解析错误」
+# 与移植侧实现不符 —— 移植侧是**执行期** CodeEE，官方也是在这一行被走到时才兑现。）
+#
+# 1) 报错相位与原文（英文文案是官方原样，按 ADR-005 属**待复刻项、不是待翻译项**）：
+#    · 联结期 FunctionIdentifier.cs:1193-1210（CALLSHARP_Instruction.SetJumpTo）：
+#      :1201-1202 `PluginManager.GetInstance()` + `instance.HasMethod(ConstStr)` 未命中时
+#      :1204 `ParserMediator.Warn($"No native method {spCallSharpArgment.ConstStr} found", func, 2, isError: true, isBackComp: false)`
+#      —— **内插串原样即屏上文案**，`<名>` 取脚本里的调用名。
+#    · Warn(isError:true) 不当场抛：ParserMediator.cs:125-136 只把 `line.IsError = true` /
+#      `line.ErrMes = str`（:129-130）记到行上。
+#    · 抛出在执行期：Process.cs:1017-1019（`if (currentLine.IsError) throw new CodeEE(currentLine.ErrMes)`）
+#      与 :1030-1032（惰性 `ArgumentParser.SetArgumentTo` 后再查一次 IsError 同法抛）。
+#    ⇒ 官方口径 = 「错误在装载期登记、在该条语句被走到时以 CodeEE 兑现」。移植侧（B1a，2026-11-06
+#      复刻落定）：注册表挂 store.aux（fn/PluginMethods.kt nativeMethods），而宿主装配点在
+#      app GameHost.wireCorpusNativeMethods（GameHost.kt:3476）—— **晚于** GameSession 构造期的
+#      语料装载 ⇒ 装载期注册表恒空，照抄原版相位会把已接桩的 ModelSet/Chat 全部误杀（0.2.39 上报簇
+#      的复发方向）。故裁决点后移到「该行第一次执行」（宿主装配在 drive() 之前完成，此刻注册表已是
+#      终表），机制 = 行级联结记录 SharpLinkTable（fn/PluginMethods.kt）：
+#      首次执行未命中 → 把 `No native method <名> found` 记进行级错误态并当场抛；命中 → 方法本体
+#      缓存绑定；**此后不重查**（= 原版联结期绑死 CallFunc / IsError，注册表再长出同名也不复活、
+#      clear 已绑定行不受影响）。执行期抛的是**记录值**（Process.cs:1017-1019 抛 ErrMes 的同构），
+#      两条通道：flat 生产路 `StatementExecutor.resolveSharpMethodFlat`（行键 = 语句池下标）与
+#      旧对象树对拍路 `resolveSharpMethodTree`（行键 = SpCallSharpArgument 实例身份）。
+#      const 名判定 = funcNameTerm is StrLiteral（原版名字恒 SingleStrTerm ⇒ IsConst 恒真，
+#      ArgumentParser.cs:800/:850-853，SetJumpTo 的 !IsConst 分支对 CALLSHARP 不可达）。
+#      残余相位差 = **装载期警告面**（原版 warningList 装载完统一上屏，ParserMediator.cs:143-158；
+#      该行不执行也见警告）—— 已由 CSHARP-WIRE 接线复刻：GameHost 装配段三段严格序
+#      wireCorpusNativeMethods → prefillSharpLinks（装载趟扫常量名实参裁决，source/erbc 两路
+#      同一裁决）→ drive() 前警告经 GameSession.sharpLoadWarnings 统一上屏（呈现面 = logcat +
+#      读数面，原版控制台警告样式差登记有意不修，见 verify-notes §13.1 (a2)）。
+#      构造钉 = CallSharpLinkPhaseTest（记行错/抛记录值/不重查/命中绑死，flat 与旧树两通道各两例）
+#      + CallSharpLoadPrefillTest（预填/不物化/幂等，erbc 惰性池通道）。
+# 2) 语料可达面 + 原生名来源：
+#    · 4.980：游戏 ERB 子树 `CALLSHARP` **0 命中**；全树只有 readme 散文提过两处
+#      （`eratw-画蛇添足版eratw4.980/原版+前人整合等各种readme（口上模板及口上教程在内）/更新内容 4.956~汉化.erb:556/:558`，
+#      是「修复了@CALLSHARP()的BUG」「提交了一个@CALLSHARP()的示例DLL」两行说明，不是代码）。
+#    · 4.981：3 处，全在 `ERB/DLC/AI对话补丁/对话调用.erb` —— :35 `CALLSHARP ModelSet(模型API, 模型Key, 模型名称)`、
+#      :36 `CALLSHARP Chat(AI对话返回信息,返回对话)`、:54 的 9 参 `Chat(...)`。
+#      :54 整段被 :45 `[SKIPSTART]` ~ :56 `[SKIPEND]` 包住 ⇒ 预处理期不产逻辑行
+#      （spec: ErbLoader.cs:408-411 + EraStreamReader.cs:130 的 disabled 分支）。
+#      ⇒ **运行期可达的原生名只有 {ModelSet, Chat}**。
+#    · 随包 `plugins/ChatCallSharp.dll`（实测字符串面）另有 ChatExMethod / ChatStreamMethod /
+#      ChatJsonMethod / ChatRawMethod / HttpGetJsonMethod（+ ModelSetMethod / ChatMethod）
+#      ⇒ 即 ChatEx/ChatStream/ChatJson/ChatRaw/HttpGetJson 在本包语料不可达，不设桩、不测。
+#    · 原生名**不是引擎注册表成员**：查表走 `PluginManager.GetInstance()` 的
+#      HasMethod/GetMethod（FunctionIdentifier.cs:1201-1202/:1208），条目由玩家侧 .NET 插件注册
+#      ⇒ 移植层只能由宿主设桩：app `GameHost.wireCorpusNativeMethods`。
+#      钉在 core/proc/CallSharpCorpusCensusTest（可达名集合 + 未注册名报错口径）与
+#      core/proc/AiChatSharpStubTest（有桩/无桩两侧）。
+# 3) 变量实参回写的**有意偏离登记**（重要：这一条不是 bug 修正建议，是记账）：
+#    · 官方回写链**没有常量闸**：FunctionIdentifier.cs:1212-1234（DoInstruction）的 :1218-1232
+#      对每个 `aExpression is VariableTerm` 的实参位直接 `variableTerm.SetValue(...)`
+#      （串 :1226 / 整 :1230）→ VariableTerm.cs:108-129（整数）/ :131-152（字符串），
+#      两者都只是 `Identifier.SetValue(value, transporter)`（:119 / :142），无 IsConst 判定 →
+#      存储层同样只 `array[arguments[0]] = value`（VariableData.cs:1340-1344 静态 1 维整数；各形态同构）。
+#      官方对 const 实参的拦截只存在于**解析期**的 ArgumentBuilder.getChangeableVariable
+#      （ArgumentBuilder.cs:92-105，:99-103 命中 IsConst 报 ArgIsConst），
+#      而 CALLSHARP 用的 SP_CALLCSHARP_ArgumentBuilder（ArgumentParser.cs:795-861）从不调它
+#      ⇒ 官方**允许**本地方法把值写回常量实参槽（写了就变值）。
+#    · 移植侧的常量闸在**存储层**：core/vars/UserVariables.kt:1925（静态整数）与 :1957（静态字符串），
+#      两处都是 `if (spec.isConst) throw CodeEE("变量 X 是常量，不能赋值")`。
+#    · **已落地（lane modelset，合流 `ea8d7726`）**：两条路径的回写环（flat `StatementExecutor.kt:2691` /
+#      旧对象树 `:4921`）收敛成一个出口 `writeBackNativeArg`（`:4957`）——`ref.isConst` 位为真时**跳过回写**，
+#      其余逐字保持官方第 4 步（按接收侧 `operandType` 选 `strValue`/`intValue`）。
+#      为什么不照抄官方：逐字照抄回写在**真语料**上会炸「变量 模型API 是常量，不能赋值」——
+#      `对话调用.erb:35` 的三个实参 模型API/模型Key/模型名称 全是
+#      `#DIMS CONST`（`ERB/DLC/AI对话补丁/AI返回参数.ERH:6/:7/:8`），走到该行即触发。
+#      判据钉 = `core/proc/ChatActionRealCorpusReproTest`（真语料事件 + 真全局维表登记链，
+#      断言上屏三要素与常量格不动；破坏性验证＝摘掉该闸恰好红「有桩」那一例，红的正是上面那句错）。
+#      既有 `AiChatSharpStubTest` 仍测不出这一条：它的 fixture 用 `SymbolTable().declareVariable`
+#      手搭（:56-58），不带 CONST 标志、也不接真全局维表。
+#    · 等值性说明：官方「静默写回同值」 vs 解法「跳过回写」，对现存全部语料观测等值
+#      （语料里唯一的 ModelSet 桩不回写任何槽）；残留分歧 = 若将来某本地方法**故意**改写常量实参槽，
+#      官方会变值、移植侧不会。这一条属有意偏离，不是待修 bug。
+# ─────────────────────────────────────────────────────────────
 - name: CALLSHARP
   kind: call
   arg_form: SpCallSharpArgment (SP_CALLCSHARP)
-  semantics: 调用插件注册的本地 C# 方法,参数传入;参数若为变量则把本地方法修改后的值回写。
-  errors: 解析期找不到本地方法报解析错误。
+  semantics: "调用宿主/插件注册的本地 C# 方法（原生名**不是**引擎注册表成员，来自玩家侧 .NET dll）；实参逐位转成参数槽、执行后把**变量实参**按槽回写。回写在官方侧没有常量闸，移植侧的偏离见下方注释块第 3 条。"
+  errors: "执行期（走到该行时）抛 CodeEE，文案**原样** `No native method <调用名> found`（<调用名> = 脚本原文里的调用名，4.981 真形 = ModelSet）。官方相位：装载/联结期只记错不抛，运行期才抛 —— 见下方注释块第 1 条。旧条目「解析期找不到本地方法报解析错误」与实现不符，已废。"
   display_effect: ''
   source: FunctionIdentifier.cs:1169-1235
   aliases: CALLSHARP
@@ -1554,6 +1631,50 @@ instructions:
 #   CalledFunction.CallLabel -> LabelDictionary.GetLabelDollar(label, CurrentLabel)，CalledFunction.cs:204-207，
 #   即 **$ 标签作用域 = 当前被调函数**）；const 且缺失时非 try 报解析错、try 静默（:3664-3670）。
 # 结果落点：无。
+# ---- A9 补注（GOTO 标签解析面，lane labeldollar 2026-11-04 逐字核）----
+# 【`$` 前缀口径】官方**从不剥 `$`**：`$` 只在标签**定义行**被词法剥掉（LogicalLineParser.cs:316-328
+#   ShiftNext 跳过行首 '$' 后取标识符），labelDollarList 的键因此恒不带 `$`（AddLabelDollar
+#   :339-348）；引用侧 `GOTO $TAIL` 的参数由 ReadString 原样保留 `$`（LexicalAnalyzer.cs:330-399
+#   无 '$' 分支 + ArgumentParser.cs:730），查表键 "$TAIL" 恒 miss ⇒ 非 TRY 在装载期就报
+#   NotDefinedLabelName（SetJumpTo :3664-3669，ErrMes 模板实参=含 `$` 的原文，屏上双 `$`）。
+#   emuera 正统方言里 GOTO 参数**本就不带 `$`**（双语料 4.980/4.981 实测：`GOTO $X` 0 处、
+#   GOTOFORM 族 0 处、语料 3037 处 GOTO 全裸名）。
+#   **移植侧偏差**：静态通道 `ErbProgramCompiler.kt:2647/2905` 对 label 做 `trimStart('$')`
+#   （`GOTO $TAIL` 会命中 TAIL）——比官方宽，语料不可达，登记不修（收窄与否归 compile agent，
+#   牵连 StaticTargetNotFoundCompileTest 与 THROW 哨兵文案的 {0} 取值，见交付「需组长接线」）。
+#   动态通道（Vm `_JUMP_BY_NAME`）不剥 `$`，与官方同口径。
+# 【未命中文案】zhs 模板 `当前函数中不存在指定的标签名"${0}"`（lang.emuera-zhs.xml:540）**自带
+#   字面 `$`**；{0} = FunctionIdentifier.cs:3703 的 `text` = 求值名**原文**（不大写化、不剥 `$`）。
+#   ⇒ 动态未命中屏上 = `名"$TAIL"`；求值名自带 `$` 时 = `名"$$TAIL"`（双 `$` 照抄不修，ADR-005）。
+#   （旧偏差已修：Vm.kt/ProcessRuntime.resolveLabel 曾漏模板字面 `$`，2026-11-04 lane labeldollar。）
+# 【TRY 变体未命中 = 跳过本行，不存在 `$CATCH`】官方无 `$CATCH` 标签概念：isTry 未命中只跳
+#   `func.JumpToEndCatch`，该字段仅由装载期 TRYC 配对链写入（ErbLoader.cs:1339-1358，只认
+#   TRYC{GOTO,CALL,JUMP}{,FORM} 六语句），CATCH 行自身作跳入点、配合主循环 JumpTo 后先
+#   ShiftNextLine 的口径（Process.cs:1011/1016 + ProcessState.cs:129-133）落进 catch 体首；
+#   纯 TRYGOTO/TRYGOTOFORM 恒无 JumpToEndCatch ⇒ 未命中什么都不做 = 顺序落到下一行（:3699-3709）。
+# 【大小写】查表比较器 = Config.StrComper（LabelDictionary.cs:16）= OrdinalIgnoreCase
+#   （Config.cs:33/299-308；由 IgnoreCase 配置决定，默认 true（ConfigData.cs:45），本游戏
+#   emuera.config 未关）。OrdinalIgnoreCase = 逐字符 **ASCII** 折叠；移植侧键归一 = 
+#   `String.uppercase()`（**全 Unicode** 映射）。ASCII 面两侧恒同；非 ASCII 折叠面（全角拉丁
+#   `ｔ→Ｔ`、`ß→SS`、`ﬁ→FI`、`ı→I`）uppercase() 会合并官方判不同的键 ⇒ 移植侧**多命中**方向。
+#   实测（LabelResolutionFidelityTest 钉死）：汉字标签 uppercase() 恒等、全角大写形恒等，双语料
+#   含全角拉丁的 `$标签` 仅 6 条且引用与定义逐字节同形，两口径同果，语料不可达差异面。
+#   不改折叠实现：大写归一是全工程键口径（VarDef/符号表/loader.md keyOf），单改标签面与已落盘
+#   .erbc/侧车键互斥；若未来 IgnoreCase=NO 装机形态要复刻，须连键归一整体切换到条件 Ordinal。
+# 【同名标签跨函数】官方内层字典键 = FunctionLabelLine **对象引用**（默认引用等值，
+#   LabelDictionary.cs:382-389 + 339-348 + FunctionLabelLine.cs:13 无 Equals 覆盖），查表传
+#   CurrentCalled.CurrentLabel（CalledFunction.cs:204-207）⇒ 命中的只可能是**正在执行的那条
+#   定义**的标签；事件多成员时 CurrentLabel 随 ShiftNext 切到当前成员（:228-243），**不是**
+#   同名事件的并集。移植侧 VM 通道 `program.functions[funcStack[depth]]` 同形；LabelTable
+#   通道 functionKey 按定义唯一（事件成员键 `KEY#defIndex`，BootMetadata.labels KDoc）。
+# 【InvalidLabelName 分支在本反编译版本不可达（TODO(verify)）】FunctionIdentifier.cs:3712-3715
+#   （动态命中 IsError 标签 → `指定的标签名"${0}"无效`，lang.emuera-zhs.xml:541）与 :3671-3674
+#   （常量同形）都以 `GotoLabelLine.IsError` 为前提，但在 reference 全树内**找不到任何**把
+#   IsError=true 写到 GotoLabelLine 的赋值点（ErbLoader.cs:460-467 重复 `$标签` 走
+#   Warn(position 重载, level 2)，标记的是当前装载位置不是标签行对象；坏 `$` 行在
+#   LogicalLineParser.cs:369-382 err() 直接返回 InvalidLine，不进 labelDollarList）。
+#   ⇒ 移植侧不实现 InvalidLabelName 查找面；若 PC 真机报出`无效`文案，即为 fork 专有分支，
+#   本行号族不可在 reference 核，需要另取证据。卡点：无 eraTW skia 二进制反编译。
 - name: GOTO
   kind: flow
   arg_form: SpCallArgment (SP_CALL / SP_CALLFORM)
@@ -1810,7 +1931,9 @@ instructions:
 #   主循环是 `do { IL_0000: state.ShiftNextLine(); ...读取 CurrentLine 并执行... } while(...)`
 #   （Process.cs:1006-1081，ShiftNextLine 在 :1011，取行在 :1016；JumpTo 只写 currentLine 不做前进，ProcessState.cs:129-133）。
 #   ⇒ 每次 JumpTo 之后回到循环顶都会先前进一行。交叉验证三处：
-#     · GOTO $TAIL → JumpTo(labelLine)（FunctionIdentifier.cs:3716）落在 label 之后 = 标签体首行 ✓
+#     · GOTO 命中标签 → JumpTo(labelLine)（FunctionIdentifier.cs:3716）落在 label 之后 = 标签体首行 ✓
+#       （注：这里的 labelLine 是 `$TAIL` **定义行**；GOTO 引用参数按官方方言不带 `$`，
+#        `$` 口径见上文「A9 补注（GOTO 标签解析面）」）
 #       （且主循环遇 GotoLabelLine 本身也是 `goto IL_0000` 再前进，Process.cs:1068-1071）
 #     · CALL 的返回地址 = **CALL 语句行自己**（CalledFunction.CallFunction(..., retAddress=func) :3531/:3575；
 #       ProcessState.Return 把 currentLine = ReturnAddress，ProcessState.cs:289-310）→ 落在 CALL 之后 ✓
@@ -2070,7 +2193,11 @@ instructions:
   errors: ''
   display_effect: ''
   source: FunctionIdentifier.cs:1959-1970
-  aliases: ENDDATA
+  # DISABLE_INPUT_MACRO / ENABLE_INPUT_MACRO：fork 在表达式侧注册为函数
+  # （Creator.Method.cs:9709-9737，返回 int 0 + 切 Process.inputMacroEnabled）；
+  # 4.981 语料 `ERB/コマンド関連/USERCOM.ERB:177` 以**语句行**书写，移植侧
+  # 按 DO_NOTHING 语句别名承接（OpcodeTable.kt:1221-1222）。
+  aliases: ENDDATA, DISABLE_INPUT_MACRO, ENABLE_INPUT_MACRO
   register: FunctionIdentifier.cs:4019
   confidence: high
   flag: 22
@@ -2399,21 +2526,136 @@ instructions:
   confidence: medium
   flag: 6
   flag_source: FunctionIdentifier.cs:2536,4122
+# ══════════ 4.981 增量语句（fork-src 证据，2026-10-30 W0） ══════════
+# 证据源：qirchen421/emuera.sk@48494165（branch develop-skiasharp，2026-08-28）的
+#   Emuera/Runtime/Script/Statements/{Instraction.Child.cs, FunctionIdentifier.cs, ArgumentBuilder.cs}。
+# 注册面：fork 的 FunctionIdentifier 静态构造经 addFunction(...)（:48-61），
+#   flag = instruction.Flag | additionalFlag（:562-566）；本段 flag 值即按该校验得出。
+# 小数字面量（4.981 新增，本段未单列语句）：
+#   LexicalAnalyzer.cs:879-900 —— 读到数字串后若下一字符是 '.' 则走 LiteralFloatWord(ReadDouble)，
+#   否则 LiteralIntegerWord(ReadInt64)；ReadDouble（:363-402）接受可选正负号、数字与 '.'、可选 e/E 指数，
+#   末尾 double.Parse(..., CultureInfo.InvariantCulture) —— **字面量解析用不变文化，TOFLOAT 用当前文化**。
+#   我们的 .erbc 目前只有 INT_LITERAL/STR_LITERAL（erbc-format.md:183-184），
+#   承接浮点字面量需要新增 token 槽位（跨模块改动，见 verify-notes.md §23）。
+- name: TINPUTNF
+  kind: input
+  arg_form: SpTInputsArgument (SP_TINPUT)
+  semantics: 限时整数输入的「无焦点」变体（NF = NoFocus，与是否 FORMS 无关）：参数与 TINPUT 相同（时限毫秒、默认值、是否接受鼠标、是否显示剩余时间、超时提示语、可跳过标志，Disp 缺省按 1），唯一差别是走 WaitInputNoFocus——不抢键盘焦点。TONEINPUTNF 为单键变体（同一实现类，oneInput=true）。
+  errors: ''
+  display_effect: 暂停脚本直至输入或超时；不改变输入焦点。
+  source: fork-src Instraction.Child.cs:1080-1133
+  aliases: TINPUTNF, TONEINPUTNF
+  register: fork-src FunctionIdentifier.cs:201,203
+  confidence: high
+  flag: 24578
+  flag_source: fork-src Instraction.Child.cs:1085 (IS_PRINT|IS_INPUT|EXTENDED)
+- name: TINPUTSNF
+  kind: input
+  arg_form: SpTInputsArgument (SP_TINPUTS)
+  semantics: 限时字符串输入的无焦点变体：参数与 TINPUTS 完全一致（时限毫秒、默认字符串、是否接受鼠标、是否显示剩余时间、超时提示语、可跳过标志），唯一差别是走 WaitInputNoFocus——不抢键盘焦点。TONEINPUTSNF 为单键变体（同一实现类，oneInput=true）。语料 qol_MAP.ERB:54 起用它在动画帧间隔（ANIMATERECOLOREDMAPS）超时后轮询 MOUSEB，是地图动画/悬停的核心等待原语。
+  errors: ''
+  display_effect: 暂停脚本直至输入或超时；不改变输入焦点。
+  source: fork-src Instraction.Child.cs:1135-1186
+  aliases: TINPUTSNF, TONEINPUTSNF
+  register: fork-src FunctionIdentifier.cs:202,204
+  confidence: high
+  flag: 24578
+  flag_source: fork-src Instraction.Child.cs:1140 (IS_PRINT|IS_INPUT|EXTENDED)
+- name: HTML_PRINTC
+  kind: display
+  arg_form: SpHtmlPrintC (SP_HTML_PRINTC)
+  semantics: HTML 版的 PRINTC/PRINTLC——按**像素**而不是半角字符数做定宽制表：第 1 参是 HTML 片段字符串，第 2 参可选整型给单元格宽度（像素，≤0 时取 Config.PrintCLength * FontSize / 2）；HTML_PRINTC 右对齐（前补空格）、HTML_PRINTLC 左对齐（后补空格），补足宽度后若当前行超出 DrawableWidth 先 Flush 再写。SkipPrint 期间整条跳过。两个注册名共用一个实现类（构造参数 alignRight 相反）。
+  errors: 实参个数 0 或 >2 在装载期告警（NotEnough/TooMany），第 1 参必须 String、第 2 参必须 Integer。
+  display_effect: 向控制台文字流追加 HTML 渲染内容；可能触发换行；受 SkipPrint 抑制。
+  source: fork-src Instraction.Child.cs:415-434; ArgumentBuilder.cs:408-442; EmueraConsole.Print.cs:521-574
+  aliases: HTML_PRINTC, HTML_PRINTLC
+  register: fork-src FunctionIdentifier.cs:472-473
+  confidence: high
+  flag: 8198
+  flag_source: fork-src Instraction.Child.cs:421 (EXTENDED|METHOD_SAFE) + FunctionIdentifier.cs:472-473,566 (|IS_PRINT)
+- name: TEXT_BGC_ON
+  kind: display
+  arg_form: SpColorAlphaArgument (SP_COLOR_ALPHA)
+  semantics: 开字符背景色（衬底）：两个整型实参——RGB（0xRRGGBB）与不透明度百分比（0..100）；实现按 a = alpha * 255 / 100 拼 Color.FromArgb 后写入 Console.TextBackgroundColor，之后所有文字都带该底色，直到 TEXT_BGC_OFF。常量实参在装载期折叠成 (rgb<<8)+(alpha&0xFF)（ArgumentBuilder.cs:2074-2099）。语料 QOL_IMAGE.ERB:2564 与 DLC/背景图补丁/地点转换.ERB:55 用 LIMIT(衬底透明度*10+1, 1, 100) 作百分比。
+  errors: 实参必须恰好 2 个整型表达式（否则装载期告警）。
+  display_effect: 改变后续文字的背景色（不改已输出的行）。
+  source: fork-src Instraction.Child.cs:1627-1654; ArgumentBuilder.cs:2074-2099; EmueraConsole.cs:94
+  aliases: TEXT_BGC_ON
+  register: fork-src FunctionIdentifier.cs:291
+  confidence: high
+  flag: 6
+  flag_source: fork-src Instraction.Child.cs:1632 (METHOD_SAFE|EXTENDED)
+- name: TEXT_BGC_OFF
+  kind: display
+  arg_form: VOID
+  semantics: 关闭字符背景色（置 Console.TextBackgroundColor = null），无实参、无返回值。
+  errors: ''
+  display_effect: 后续文字恢复无衬底绘制。
+  source: fork-src Instraction.Child.cs:1656-1668
+  aliases: TEXT_BGC_OFF
+  register: fork-src FunctionIdentifier.cs:292
+  confidence: high
+  flag: 6
+  flag_source: fork-src Instraction.Child.cs:1661 (METHOD_SAFE|EXTENDED)
+- name: CALLS
+  kind: flow
+  arg_form: StrExpressionArgument (STR_EXPRESSION)
+  semantics: 按**运行时字符串**调用/跳转函数：字符串写成「函数名(参数…)」或「函数名, 参数…」两种形态，先按 LeftParenthesis_Bracket_Comma_Semicolon 读函数名，再看首字符是 '(' 决定 ReduceArguments 的结束符；随后 CallFunction 取目标、Restructure 实参、ConvertArg 校验后 IntoFunction。isJump 决定是否以跳转语义（call.IsJump）进入，isTry 决定出错是否抛 CodeEE —— TRY* 变体在「表达式解析失败 / 函数未定义 / 实参转换失败」三种情况下都不抛错，而是跳到对应 CATCH 的末尾（JumpToEndCatch）。空串/全空白直接返回。CALLSTR=fork 新增；TRY 家族在装载期靠 funcMatch 要求配 CATCH（TRYCCALLSTR→CATCH→ENDCATCH，FunctionIdentifier.cs:502-503），缺配对由 ErbLoader.cs:1593-1595 告警 MissingCorresponding。
+  errors: 非 TRY 变体在函数未定义/参数转换失败时抛 CodeEE；TRY 变体改跳 CATCH 末尾。
+  display_effect: 转入被调函数（Call）或目标标签（Jump）。
+  source: fork-src Instraction.Child.cs:3950-4066; FunctionIdentifier.cs:364-369,490-519,562-570
+  aliases: CALLSTR, JUMPSTR, TRYCALLSTR, TRYJUMPSTR, TRYCCALLSTR, TRYCJUMPSTR
+  register: fork-src FunctionIdentifier.cs:364-369
+  confidence: high
+  flag: 33
+  flag_by_alias:
+    # fork 真值：TRYCCALLSTR = 32947（含 IS_TRYC 32768），TRYCALLSTR = 163；
+    # 本移植侧 FunctionCode 登记为 163/163（不置 IS_TRYC 位，该位在运行期无读取接口，
+    # 由 TRYC_CODES 显式集合判定，见 FunctionCode.kt:126-131）——差异见 verify-notes §23。
+    # CALLSTR/JUMPSTR/TRYJUMPSTR/TRYCJUMPSTR 的 fork flag（33/97/227/33011）暂不登记：
+    # 这 4 名尚未进 FunctionCode 枚举、语料零使用，见 verify-notes §23 的 TODO(verify)。
+    TRYCALLSTR: 163
+    TRYCCALLSTR: 163
+  flag_source: fork-src Instraction.Child.cs:3957-3960 (FLOW_CONTROL|FORCE_SETARG|IS_JUMP|IS_TRY|IS_TRYC|PARTIAL) + FunctionIdentifier.cs:364-369 (EXTENDED 只加在 TRY 家族), 566 (flag = instruction.Flag | additionalFlag)
+- name: SEQUENCEINPUT
+  kind: input
+  arg_form: StrExpressionArgument (STR_EXPRESSION)
+  semantics: 预置下一次输入等待的提交序列。fork 侧是 FunctionMethod（不是 instruction）：argumentTypeArray = [String]、ReturnType = Integer、CanRestructure = false，函数体把唯一字符串实参整段写入 Process.sequenceInputValue 并置 hasSequenceInput = true，返回 0。下一次 WaitInput / WaitInputNoFocus 首行检查 hasSequenceInput，命中即 SimulatePressEnter：取走该串、清两个标志，把整串当「用户按下回车」交给 PressEnterKey，按 \n 拆段后逐段 RunEmueraProgram。整串只用一次，可为空串；DISABLE_INPUT_MACRO 生效时不再做宏展开，但 \n 分段保留。4.981 全包唯一调用点 USERCOM.ERB:177（@"-1\n%MACRO_PRESET:MACRO_INDEX%"，即「取消 + 预设宏」一次喂给后续输入）。
+  errors: 装载期实参必须是 1 个字符串表达式（argumentTypeArray = [String]）；运行期无错误路径（恒返回 0）。
+  display_effect: 无直接显示效果；被消费的那次等待不再阻塞用户。
+  source: fork-src Creator.Method.cs:9691-9705; Creator.cs:447; Process.SystemProc.cs:117-118; EmueraConsole.cs:704-722,783-788,1419-1530
+  aliases: SEQUENCEINPUT
+  register: fork-src Creator.cs:447
+  confidence: medium
+  flag: 6
+  flag_source: fork-src Creator.cs:447（methodList）+ FunctionIdentifier.cs:4135-4142（methodInstruction 合成 flag = METHOD_SAFE|EXTENDED）
+- name: SETIMAGELAYERL
+  kind: display
+  arg_form: SpSetImageLayerLArgument (SP_SETIMAGELAYERL)
+  semantics: 行锚定版 SETIMAGELAYER。8 个实参槽 = spriteName(String), depth(Integer), xpos(Integer), ypos(Integer), width(Integer), height(Integer), opacity(Integer), CM_ARRAY(Void)，minArg = 2，后 6 槽可缺省（缺省 xpos/ypos/width/height = 0、opacity = 255、CM_ARRAY = null）。装载期只显式校验第 1 参 String、第 2 参 Integer，其余槽不校验类型，超 8 个实参静默丢弃。执行时以 Console.GetLineNo（显示行索引，非 LINECOUNT）为锚点；height <= 0 时回落到 sprite 的 DestBaseSize.Height；x = DrawingParam_ShapePositionShift + xpos，y = GetLinePointY(lineNo) + LineHeight - ClientHeight + (imageHeight - LineHeight) + ypos；最后 SetImageLayer(..., followScroll: true)——followScroll 恒 true、无 lineNo 实参，xpos/ypos 与 HTML img 同口径（xpos=0,ypos=0 时与该行 img 重合）。
+  errors: 实参不足 2 个报 NotEnoughArguments；第 1/2 参为空或类型不符报 IncorrectArg（level 2，整条不执行）。后 6 槽不校验类型。
+  display_effect: 在 depth 指定的图层描画 sprite，锚定到当前显示行并随滚动跟随。
+  source: fork-src Instraction.Child.cs:4161-4209; ArgumentBuilder.cs:2679-2728,255; FunctionArgType.cs:95; FunctionIdentifier.cs:283
+  aliases: SETIMAGELAYERL
+  register: fork-src FunctionIdentifier.cs:283
+  confidence: high
+  flag: 6
+  flag_source: fork-src Instraction.Child.cs:4166 (METHOD_SAFE|EXTENDED)
 summary:
-  total: 169
+  total: 177
   by_kind:
     call: 4
     data: 4
     debug: 2
-    display: 48
-    flow: 24
-    input: 15
+    display: 52
+    flow: 25
+    input: 18
     io: 13
     other: 26
     variable: 33
   by_confidence:
-    high: 165
-    medium: 4
+    high: 172
+    medium: 5
 
 # 条目名型 ghost 的登记（条目名 = 实现类名去 _Instruction 后缀，见 meta.note；它们本身不是 funcDic 注册名）。
 # 注册面由各条目 aliases 承载。tools/spec_crosscheck.py 逐条核对「C# 确有 <条目名>_Instruction 实现类

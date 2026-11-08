@@ -1,11 +1,17 @@
 package com.eratw.port.render.button
 
+import com.eratw.port.core.host.FontDisplayWidth
+import com.eratw.port.core.host.StaticFontDisplayWidth
 import com.eratw.port.render.DisplayRow
 import com.eratw.port.render.Grid
 import com.eratw.port.render.HitTarget
 import com.eratw.port.render.RunKind
 import com.eratw.port.render.TextRun
+import com.eratw.port.render.adapter.DivChildDraw
+import com.eratw.port.render.adapter.DivOverlayPlanner
 import com.eratw.port.render.displaylist.InlineGraphic
+import com.eratw.port.render.glyph.CellMetrics
+import com.eratw.port.render.view.GraphicGeometry
 
 /**
  * `PRINTBUTTON` 命中区与点击回环（契约 m-button）。
@@ -53,6 +59,22 @@ import com.eratw.port.render.displaylist.InlineGraphic
  * （`PrintStringBuffer.cs:224-235`）并在下一行从 0 重新排点（`PrintStringBuffer.cs:242-249`），
  * 所以跨行的第二段 `colStart` 就是本行游标累加出来的位置（通常是 0）。
  *
+ * ## 行内纵向命中（IMG-A4 I2）
+ *
+ * 原版命中路由除列判外还对**每个节点**判行内纵向范围 `num4 < Top || num4 > Bottom`
+ * （`EmueraConsole.cs:2368`；`num4` 是点击点相对行顶的像素，`:2333,2356` 折出）。
+ * 节点盒逐类出处：立绘图 `ConsoleImagePart.cs:31-33,81,93`（`[ypos, ypos+高]`）、
+ * 矩形件 `ConsoleRectangleShapePart.cs:19-21,34-35`、文本件与 Space
+ * `AConsoleDisplayNode.cs:29-31` 的缺省 `[0, FontSize]`。本层此前「按整行判定，无纵向
+ * 子范围」—— 那条口径对文本段成立（缺省带在语料 `LINE HEIGHT == FONT SIZE == 18` 下
+ * 就是整行），对立绘段**不成立**（`<img height='9px'>` 只盖半行，行内其余像素原版点不中）。
+ * A4 起图形段入表时同记一道**行内纵向门**（[attach] 的 `gate`），带纵向信息的调用方走
+ * [hitInline] 加严判定；无纵向信息的既有调用方走 [hit]，行为逐位不变。生产调用链已切换
+ * （`CanvasConsoleView` 的点击/按下高亮/长按提示/`MOUSEB()` 四条路都走 `hitInline`，
+ * 见该类的 `cellHitAt`），纯 JVM 侧未接线的调用方仍可用 [hit] 拿到接线前口径。
+ * 溢出图形（跨行立绘）的「点到图身上」解析归 `view/GraphicTapAnchor`（逃逸支
+ * `EmueraConsole.cs:2420` 的同构面），与本函数的非逃逸支互补。
+ *
  * ## 值的类型与回环
  * `value` 是 Long（数值按钮）或 String（字符串按钮），源自 `PRINTBUTTON` 的
  * 操作数类型分派：`GetOperandType() == typeof(long)` 走 `PrintButton(text, long)`，
@@ -92,7 +114,14 @@ import com.eratw.port.render.displaylist.InlineGraphic
  * 再只把它们传给绘制（`ConsoleButtonString.cs:317-321,368-373`），
  * 而 `ButtonIsSelected`/`ButtonIsPointing` 只做引用比较（`EmueraConsole.cs:830-838`）。
  */
-class ButtonLayer {
+class ButtonLayer(
+    /**
+     * 字体感知宽度尺：缺省静态网格（与接线前 [Grid.cells] 逐值相同）。
+     * 命中列区间必须与 [com.eratw.port.render.displaylist.DisplayList] 的列推进同一把尺，
+     * 否则 `SETFONT` 段上「看得见」与「点得到」会错位。
+     */
+    private val fontWidth: FontDisplayWidth = StaticFontDisplayWidth,
+) {
 
     private val targets = ArrayList<HitTarget>()
 
@@ -112,7 +141,24 @@ class ButtonLayer {
      */
     private val tipRanges = ArrayList<TipRange>()
 
+    /**
+     * 与 [targets] 同下标的**行内纵向门**表（IMG-A4 I2）：条目 = 该目标跨度里的图形段
+     * （原版 `ConsoleImagePart` / `ConsoleShapePart` 节点）的列区间，命中时按图元节点的
+     * `Top/Bottom` 行内纵盒判（[hitInline]）。null = 该目标全由文本段组成（无纵向门，
+     * 原版文本节点的 `Top/Bottom` 恒为 `[0, FontSize]` ≈ 语料口径下的整行）。
+     * 每次 [attach] 先 clear，与 [targets] 同生命周期；稳态复用分支不重建。
+     */
+    private val inlineGates = ArrayList<ArrayList<InlineGate>?>()
+
     private class TipRange(val row: Int, val start: Int, val end: Int, val text: String)
+
+    /**
+     * 行内纵向门（IMG-A4 I2）：目标跨度里一个图形段的列区间 + 图元负载。
+     * 纵盒不在 [attach] 时算 —— [InlineGraphic.Rect] 的下沿依赖生效字号
+     * （`ConsoleRectangleShapePart.cs:35` 的 `Math.Max(Config.FontSize, …)`），
+     * 而本层是纯格口径层、不持字号，命中时随 [hitInline] 的入参现算（见 [nodeVerticalBox]）。
+     */
+    private class InlineGate(val colStart: Int, val colEnd: Int, val graphic: InlineGraphic)
 
     /** 上一次 [attach] 的行窗口（逐元素引用比较的基准，见 [attach] 的复用分支）。 */
     private var attachedRows: List<DisplayRow>? = null
@@ -121,6 +167,108 @@ class ButtonLayer {
     private var pointerCol = -1
     private var pointerAcceptance = ButtonAcceptance.ANY
     private var pointerDown = false
+
+    /**
+     * div 子行按钮的命中表（帧口径：像素几何）。
+     *
+     * 与 [targets] **分开存**：格坐标表只服务正文行（原版 `displayLineList` 各行，
+     * `EmueraConsole.cs:2358-2361`），div 子行的按钮根本不在那张表里（CDP 子行不进
+     * 行列表），命中走原版逃逸段那一条 `TestChildHitbox`（`ConsoleDivPart.cs:134-172`）。
+     * 每次 [attachDiv] 整表替换，顺序即原版命中扫描序（见 [attachDiv]）。
+     */
+    private val divHits = ArrayList<DivHit>()
+
+    /** 与 [divHits] **同下标**的提示原文（null = 该按钮没有 `title`）。 */
+    private val divTips = ArrayList<String?>()
+
+    /** 与 [divHits] 的 `blockIndex` **同下标**的块命中矩形（C# CDP :140 的盒矩形预判）。 */
+    private val divBlockBoxes = ArrayList<DivBox>()
+
+    /** 本帧 div 命中几何（像素 ↔ 行列换算的唯一输入）；null = 没有 div 覆盖层。 */
+    private var divGeometry: DivHitGeometry? = null
+
+    /** 像素指针（div 命中/焦点用；与 [pointerRow]/[pointerCol] 的格坐标指针各自独立）。 */
+    private var pointerXPx = NO_POINTER
+    private var pointerYPx = NO_POINTER
+    private var pointerPixelDown = false
+
+    /** 块命中矩形（设备像素，画布坐标；C# `ConsoleDivPart.cs:140` 的 `Rectangle` 近似）。 */
+    private class DivBox(val x: Float, val y: Float, val width: Float, val height: Float)
+
+    /**
+     * div 子行按钮的**焦点标记**：块下标 + 子行号 + 该按钮在子行内的格区间。
+     *
+     * 判据与原版同形：焦点按**按钮身份**算，与它在不在 div 内无关
+     * （`ConsoleButtonString.cs:317-320` 的 `isFocus = IsButton && ButtonIsSelected(this)`）；
+     * 绘制侧拿它比对「块下标 + 子行号 + 格区间相交」决定换不换色
+     * （`ConsoleStyledString.cs:105-111`）。
+     *
+     * @property blockIndex `DivOverlayPlanner.Plan.all` 的下标（每帧稳定，见 [attachDiv]）
+     * @property childRow 块内子行号（`DivOverlayPlanner.Block.children` 的下标）
+     * @property colStart 子行内起始半角格（右开区间的左沿）
+     * @property colEnd 子行内结束半角格（右开）
+     */
+    data class DivFocus(
+        val blockIndex: Int,
+        val childRow: Int,
+        val colStart: Int,
+        val colEnd: Int,
+    )
+
+    /**
+     * div 子行按钮的命中项（**像素**几何，画布坐标）。
+     *
+     * 几何出处是 `ConsoleDivPart.TestChildHitbox`（CDP :134-172）：块矩形宽用脚本 `width`
+     * （**不是**绘制侧的 `width + 2`，CDP :140 对 :178）、子行左沿 = 内容盒左沿
+     * （CDP :134 的 `ShiftChildrenX(PointX + xOffset + divXOffset)`）、子行行条顶 =
+     * 内容盒顶 + 子行号 × 行高（CDP :169 的 `relPointY += LineHeight`）。
+     *
+     * @property blockIndex `DivOverlayPlanner.Plan.all` 的下标（与 [DivFocus.blockIndex] 同源）
+     * @property childRow 块内子行号
+     * @property depth 块层序（命中优先级：负 → 正文行 → 0 → 正，见 [hitAt]）
+     * @property colStart 子行内起始半角格
+     * @property colEnd 子行内结束半角格（右开）
+     * @property value 按钮值（与 [TextRun.buttonValue] 同源：Long 或 String）
+     * @property label 按钮上印的字（图形按钮为空串）
+     * @property xPx 命中矩形左沿（画布像素）
+     * @property yPx 命中矩形上沿（画布像素）
+     * @property widthPx 命中矩形宽（像素）
+     * @property heightPx 命中矩形高（像素）
+     */
+    class DivHit(
+        val blockIndex: Int,
+        val childRow: Int,
+        val depth: Int,
+        val colStart: Int,
+        val colEnd: Int,
+        val value: Any,
+        val label: String,
+        val xPx: Float,
+        val yPx: Float,
+        val widthPx: Float,
+        val heightPx: Float,
+    ) {
+        override fun toString(): String =
+            "DivHit(block=$blockIndex, row=$childRow, depth=$depth, " +
+                "cols=[$colStart,$colEnd), value=$value, label=$label, " +
+                "rect=($xPx,$yPx,$widthPx,$heightPx))"
+    }
+
+    /**
+     * div 命中/绘制的**帧几何**：像素 ↔ 行列换算的唯一输入（帧入口每帧给一次）。
+     *
+     * @property metrics 像素 ↔ 半角格换算器（与绘制侧同一份，否则「画在哪」与「点哪里」分叉）
+     * @property rowCount 绘制口径行数（`ConsoleScreen.visibleRows().size`）
+     * @property canvasHeightPx 画布高（行顶公式 `canvasHeight - (rowCount - row) * lineHeight` 的基准）
+     * @property hitRowOffset 绘制行下标 → 命中行下标 的加数
+     *   （`ConsoleScreen.visibleRowBase - hitRowBase`；绘制窗口比命中窗口多一排被裁掉的溢出行）
+     */
+    class DivHitGeometry(
+        val metrics: CellMetrics,
+        val rowCount: Int,
+        val canvasHeightPx: Int,
+        val hitRowOffset: Int,
+    )
 
     /**
      * 重建命中表：按 `rows` 序、行内按段序扫描，列游标对全部段推进，
@@ -172,6 +320,7 @@ class ButtonLayer {
         targets.clear()
         ids.clear()
         tipRanges.clear()
+        inlineGates.clear()
         var rowIndex = 0
         while (rowIndex < rows.size) {
             val row = rows[rowIndex]
@@ -188,6 +337,13 @@ class ButtonLayer {
                 val graphicInSourceButton = run.graphic != null &&
                     (run.kind == RunKind.IMAGE || run.kind == RunKind.SHAPE) &&
                     run.buttonId != ID_UNKNOWN
+                // IMG-A4 I2：入表的图形段同时成为该目标的行内纵向门（命中时按图元节点
+                // 的 Top/Bottom 判，见 [hitInline]）。文本段无门（原版文本节点恒为整行带）。
+                val gate = if (graphicInSourceButton && width > 0) {
+                    InlineGate(col, col + width, run.graphic!!)
+                } else {
+                    null
+                }
                 if (value != null && width > 0 && (run.kind == RunKind.BUTTON || graphicInSourceButton)) {
                     val lastIndex = targets.size - 1
                     val last = if (lastIndex >= 0) targets[lastIndex] else null
@@ -201,9 +357,16 @@ class ButtonLayer {
                             value,
                             last.label + run.text,
                         )
+                        if (gate != null) {
+                            val gates = inlineGates[lastIndex] ?: ArrayList<InlineGate>(2).also {
+                                inlineGates[lastIndex] = it
+                            }
+                            gates.add(gate)
+                        }
                     } else {
                         targets.add(HitTarget(rowIndex, col, col + width, value, run.text))
                         ids.add(run.buttonId)
+                        inlineGates.add(if (gate != null) ArrayList(listOf(gate)) else null)
                     }
                 }
                 run.tooltip?.let { tip ->
@@ -235,7 +398,14 @@ class ButtonLayer {
         return true
     }
 
-    /** 当前命中表，行优先、行内列升序（即 [attach] 的扫描序，确定性）。 */
+    /**
+     * 当前**格坐标**命中表（行优先、行内列升序，即 [attach] 的扫描序，确定性）。
+     *
+     * 只列正文行的格坐标表 —— **div 子行按钮不在其中**：原版子行不进
+     * `displayLineList` 的行列表（`EmueraConsole.cs:2358-2361` 只扫那些行的 Buttons），
+     * 覆盖块的命中走另一条 `ConsoleDivPart.TestChildHitbox`（CDP :134-172）。
+     * div 的命中项见 [divTargets]（像素几何）。
+     */
     fun all(): List<HitTarget> = targets.toList()
 
     /** 不做类型筛选的命中查询（等价 `hit(row, col, ButtonAcceptance.ANY)`）。 */
@@ -268,6 +438,119 @@ class ButtonLayer {
         return targets.firstOrNull {
             it.row == row && col in it.colStart until it.colEnd && acceptance.accepts(it.value)
         }
+    }
+
+    /**
+     * 行内矩形命中（IMG-A4 I2）：在 [hit] 的列门之上加**图元段**的行内纵向门。
+     *
+     * 原版命中路由对按钮内的每个节点都判 `PointX > x || PointX + Width < x ||
+     * num4 < Top || num4 > Bottom`（`EmueraConsole.cs:2368`；`num4` = 点击点相对行顶的
+     * 像素，`EmueraConsole.cs:2333,2356` 逐行累加折出）—— 即 x 与 y 都在**该节点自己的
+     * 矩形**里才算命中，不是整行。本层列门就是那条 x 判式的整数网格形态（[hit] 的
+     * KDoc），此前缺的是纵向半边：本函数补上。两端**闭区间**照抄 `:2368` 的
+     * `<`/`>` 跳过判（y ∈ [Top, Bottom]，逃逸支 `:2420` 同形）—— y 是像素域连续量，
+     * 没有列门那侧「整数格右沿归下一格」的量化问题，不取半开。
+     *
+     * 节点纵盒的逐类出处见 [nodeVerticalBox]；文本段无门（覆盖列无门 = 整行带，直接命中）。
+     * [InlineGraphic.Space] 的门盒虽按 `[0, FontSize]` 计（`AConsoleDisplayNode.cs:29-31`
+     * 的缺省带，Space 不覆写），但那正是整行带 —— 语料口径
+     * `LINE HEIGHT == FONT SIZE == 18`（`emuera.config:22-23`）下与「无门」逐位同解
+     * （见类文档「行内纵向命中」一节的取舍）。
+     *
+     * 与 [hit] 的关系：[hit] 是**无纵向信息调用方**的既有口径（整个行高都可点），
+     * 行为逐位不变；本函数是带 `yInRowPx`（点击点相对行顶的像素）的**加严面**，
+     * 图形段列上 y 出了图元纵盒就不命中。**生产调用链已接**：`CanvasConsoleView` 的
+     * `cellHitAt` 把 tapY 折成行内像素后，点击派发（`ConsoleScreen.clickInline`）、按下高亮、
+     * 长按提示与 `MOUSEB()` 指向态四条路都走本函数（同一份 `CellHit` 产物）。
+     * 溢出图形（跨行立绘）的点击解析归 `view/GraphicTapAnchor`（它自带纵向判式，
+     * 且需要跨行解析锚行，与本函数的「同一行内」支互补）。
+     *
+     * **与本层纵盒的一处已知口径差（不是 bug，是原版同样如此）**：`nodeVerticalBox` 只按
+     * `ypos`/`num` 给盒（`ConsoleImagePart.cs:81,93` 的 `Top/Bottom`），**不含** sprite 的
+     * `DestBasePosition` 位移 —— 绘制侧 `drawImage` 会把该位移加进目标矩形
+     * （`ASpriteSingle.cs:79-85`）。原版命中路由读的也是 `Top/Bottom`（`:2368`），同样不含
+     * 位移 ⇒ 两侧都「偏」，方向与量级一致；端口在压缩行（k<1）上把位移也乘了 k，错位反而
+     * 更小。带 `DestBasePosition` 的语料形态见 `As06MARK-IV/拼接.xml`，
+     * TODO(verify)：真机读数待对拍（卡点＝无 PC 截图）。
+     *
+     * ## 压缩行的纵向 k（B1）
+     *
+     * [RowLayout] 会把「纯图行」的行高压到低于执行行高，绘制侧随即把图按
+     * `k = GraphicGeometry.artRowScale(...)` 缩短（`CanvasConsoleView.drawImage` 的
+     * `place[3] * k`）。命中侧此前按段自带的 `heightPx` 判纵盒 ⇒ 压缩行上的图按钮，
+     * 点击盒比图高出一截（图上方的空白也吃点击）。
+     *
+     * 现在纵盒高度乘同一个 k（[GraphicGeometry.nodeRowScale] / [GraphicGeometry.scaledVerticalBox]，
+     * 与绘制侧共一份算式，**上沿不乘**，理由见 [GraphicGeometry.scaledVerticalBox] 的 KDoc）。
+     * 行几何由调用方在命中时给：`rowHeightPx` = `RowLayout.Plan.heights[row]`、
+     * `lineHeightPx` = `Config.LineHeight` 的落地值、`pureArtRow` = `RowLayout.Plan.artOnly[row]`。
+     * 三者缺省（0 / 0 / true）时 [GraphicGeometry.artRowScale] 的 `lineHeight <= 0` 守卫让
+     * k 恒 1 = **压缩前的旧口径**，既有调用方行为逐位不变。
+     *
+     * @param rowHeightPx 该行在当前布局里的高度（像素）；非正 = 调用方不知道行几何（k = 1）
+     * @param lineHeightPx 执行行高（像素）；非正 = 同上。**只给 rowHeightPx 不给本参数不会缩放**
+     *   （守卫在 [GraphicGeometry.artRowScale] 里），接线时必须一起给
+     * @param pureArtRow 该行是否只有图片段（缺省 true：行高没被压时 `artRowScale` 本来就返回 1，
+     *   默认值不会误缩；压缩行则按缩后的图高判，方向是「少命中」而非「错命中」）
+     */
+    fun hitInline(
+        row: Int,
+        col: Int,
+        yInRowPx: Float,
+        fontSizePx: Int,
+        acceptance: ButtonAcceptance = ButtonAcceptance.ANY,
+        rowHeightPx: Float = 0f,
+        lineHeightPx: Float = 0f,
+        pureArtRow: Boolean = true,
+    ): HitTarget? {
+        if (row < 0 || col < 0) {
+            return null
+        }
+        for (index in targets.indices) {
+            val target = targets[index]
+            if (target.row != row || col !in target.colStart until target.colEnd || !acceptance.accepts(target.value)) {
+                continue
+            }
+            // 覆盖该列的段没有纵向门（文本段）→ 原版文本节点的缺省带 ≈ 整行（语料口径下
+            // 逐位等价，见 [nodeVerticalBox] 与类文档）→ 直接命中。门存在但列不落在任何门上
+            // （混排按钮的文本列）同理。图形段列才按节点盒加严。
+            val gates = inlineGates.getOrNull(index) ?: return target
+            val gate = gates.firstOrNull { col in it.colStart until it.colEnd } ?: return target
+            val box = nodeVerticalBox(gate.graphic, fontSizePx)
+            // B1：压缩行按绘制侧同一个 k 收窄纵盒（上沿不动、只缩高度，见 GraphicGeometry）。
+            val k = GraphicGeometry.nodeRowScale(gate.graphic, pureArtRow, rowHeightPx, lineHeightPx)
+            val hitBox = GraphicGeometry.scaledVerticalBox(box.first, box.second, k)
+            // 图形段纵盒没盖住该 y：原版此时继续查同按钮的其余节点（:2366-2382 的
+            // foreach-continue），但节点的列区间互不重叠 ⇒ 该列上没有第二个候选，
+            // 与「无命中」同解；后续条目互不重叠（见类文档），也不必再扫。
+            return if (yInRowPx >= hitBox[0] && yInRowPx <= hitBox[1]) target else null
+        }
+        return null
+    }
+
+    /**
+     * 图元节点的行内纵盒 `[Top, Bottom]`（相对行顶，像素）—— 原版命中路由读的那两个字段，
+     * 逐类出处：
+     * - [InlineGraphic.Image] → `ConsoleImagePart.Top/Bottom`（`ConsoleImagePart.cs:31,33`
+     *   覆写 + `:81` 的 `top = ypos 折算`、`:93` 的 `bottom = top + num`）；
+     *   本层 [InlineGraphic.Image.yOffsetPx]/[InlineGraphic.Image.heightPx] 就是折算后的
+     *   `(top, num)`（负高翻正在生产侧已完成，`InlineGraphic.fixNegativeExtent`）；
+     * - [InlineGraphic.Rect] → `ConsoleRectangleShapePart.Top/Bottom`
+     *   （`ConsoleRectangleShapePart.cs:19-21` 覆写 + `:34-35`：
+     *   `top = Math.Min(0, rect.Y)`、`bottom = Math.Max(Config.FontSize, rect.Y + rect.Height)`，
+     *   矩形件无论摆哪都至少盖住一行字）；
+     * - [InlineGraphic.Space] → 无覆写，走 `AConsoleDisplayNode.cs:29-31` 的缺省
+     *   `[0, FontSize]`（`ConsoleSpacePart` 不动纵盒）。
+     *
+     * 注意与 `view/GraphicGeometry.escapedLineBox` 的差别：那份是**逃逸判**的纵盒
+     * （Space 返回 `[0,0]` = 永不溢出），本份是**命中判**的节点盒 —— Space 参与按钮时
+     * 原版按节点缺省带整行判，两者不能混用。
+     */
+    private fun nodeVerticalBox(graphic: InlineGraphic, fontSizePx: Int): Pair<Int, Int> = when (graphic) {
+        is InlineGraphic.Image -> graphic.yOffsetPx to (graphic.yOffsetPx + graphic.heightPx)
+        is InlineGraphic.Rect ->
+            minOf(0, graphic.yOffsetPx) to maxOf(fontSizePx, graphic.yOffsetPx + graphic.heightPx)
+        is InlineGraphic.Space -> 0 to fontSizePx
     }
 
     /** 命中并回环一步：返回该次点击喂给 VM 的字符串（无命中给 null）。 */
@@ -328,6 +611,263 @@ class ButtonLayer {
         pointerCol = -1
         pointerDown = false
         pointerAcceptance = ButtonAcceptance.ANY
+    }
+
+    /**
+     * 重建 **div 子行**的命中表（CONTRACT-DIV-HIT2）：吃一帧的覆盖规划 + 像素几何。
+     *
+     * ## 扫描序（= 原版命中扫描序）
+     *
+     * 原版把逃逸块的 depth 键 **升序**排好逐个处理（`EmueraConsole.cs:2343` 的
+     * `Array.Sort(array)` + :2347-2434 的循环），并在第一个键 `>= 0` 处先插一趟**正文行**
+     * 扫描（:2350-2396 的 `flag3` 分支）⇒ 命中优先级是
+     * **depth < 0（升序）→ 正文行 → depth == 0 → depth > 0（升序）**。
+     * 本表就按这个顺序摊平（[hitAt] 直接线性走）：
+     * - 负 depth **升序**：越负越靠上（绘制侧 `plan` 是降序画，最后一笔在最上面）；
+     * - depth == 0 的块在正文行之后（CDP 的 depth 0 槽：:2403 的 `num7 != 0 || containsKey(0)`）；
+     * - 正 depth **升序**：depth 1 盖 depth 2。
+     *
+     * ## 几何（逐条出处）
+     *
+     * 块矩形宽用脚本 `width`（**不是**绘制侧的 `width + 2`）：CDP :140 与 :178 的差；
+     * 矩形 y 是**内容盒顶**（CDP :140 的 `relPointY + PointY + yOffset`，`yOffset` =
+     * margin+padding+border 的上边和）；子行行条顶 = 内容盒顶 + 子行号 × 行高（CDP :169）；
+     * 子行左沿 = 内容盒左沿（CDP :134 的 `ShiftChildrenX(PointX + xOffset + divXOffset)`，
+     * 其中 `divXOffset` 正是 margin+padding+border 的左边和 ⇒ 恰等于内容盒 x）。
+     *
+     * **与原版的一处近似**：`margin` 不进 `DivOverlayPlanner.Block`，矩形 x/高按
+     * 「margin 全 0」取（即 `borderRect` 的 x 与高，宽减 2）。语料带 margin 的 div 极少，
+     * 差异只落在块外沿几像素 —— TODO(verify)：真要精确得让 Block 带上 margin 四值
+     * （`adapter/DivOverlay.kt` 是 C 路共用文件，本路不动）。
+     *
+     * 每帧整表替换（块的像素几何只由「行顶 + 块内几何」决定，与滚动位置无关时也仍按帧给，
+     * 免得另造一份失效判据）。子行按钮的 run 切片吃 `DivOverlayPlanner.ChildRow.runs`
+     * —— 与绘制侧的 `ChildRow.cmds` **同一次 `DivChildDraw.wrap` 的产物**，画与点因此
+     * 同源（重折行/展平都不在命中侧另起一趟）。
+     *
+     * @param plan 覆盖规划（`DivOverlayPlanner.Plan` 或由 `DivOverlayFrame` 重建的同形清单；
+     *   `blockIndex` 就是 `plan.all` 的下标 = 绘制侧 behind/front 两层的拼接下标）
+     * @param geometry 像素 ↔ 行列换算（[DivHitGeometry]）
+     */
+    fun attachDiv(plan: DivOverlayPlanner.Plan, geometry: DivHitGeometry) {
+        divHits.clear()
+        divTips.clear()
+        divBlockBoxes.clear()
+        divGeometry = geometry
+        val metrics = geometry.metrics
+        collectDivHits(plan.behindText, 0, metrics)
+        collectDivHits(plan.inFrontOfText, plan.behindText.size, metrics)
+        // 组内按 depth 升序、同 depth 保持登记序（Kotlin sortedBy 稳定）：
+        // 负 depth → depth 0 → 正 depth 即原版 Array.Sort 的键序（正文行由 hitAt 插在中段）。
+        val ordered = ArrayList<DivCandidate>(divHits.size)
+        for (i in divHits.indices) ordered.add(DivCandidate(divHits[i], divTips[i]))
+        ordered.sortBy { it.hit.depth }
+        divHits.clear()
+        divTips.clear()
+        for (candidate in ordered) {
+            divHits.add(candidate.hit)
+            divTips.add(candidate.tooltip)
+        }
+    }
+
+    /** 清空 div 命中表（没有覆盖块的帧；帧入口在 `divOverlay.isEmpty` 时调）。 */
+    fun clearDiv() {
+        divHits.clear()
+        divTips.clear()
+        divBlockBoxes.clear()
+        divGeometry = null
+    }
+
+    /** 本帧 div 子行按钮表（顺序 = 原版命中扫描序，见 [attachDiv]）。 */
+    fun divTargets(): List<DivHit> = divHits.toList()
+
+    /**
+     * 当前像素指针下的 div 焦点（null = 没有 div 按钮被指着）。
+     *
+     * 「指着」按原版 `ButtonIsPointing` 的形状（`ConsoleButtonString.cs:320`）落到命中表上：
+     * 指针赢下 [hitAt] 那条扫描链才算 —— 被正文行按钮盖住的 div 按钮不算焦点。
+     */
+    fun focusedDiv(): DivFocus? {
+        val hit = hitAt(pointerXPx, pointerYPx) ?: return null
+        return DivFocus(hit.blockIndex, hit.childRow, hit.colStart, hit.colEnd)
+    }
+
+    /** 当前像素指针的 div 按下态（原版 `isSelecting` 对应的那一路；抬起即灭）。 */
+    fun pressedDiv(): DivFocus? = if (pointerPixelDown) focusedDiv() else null
+
+    /**
+     * 像素命中：返回该像素下（按原版扫描序）**第一个**命中的 div 子行按钮；
+     * null = 该像素没有 div 命中，或正文行按钮按原版优先级赢走了它。
+     *
+     * 顺序与原版一致（见 [attachDiv]）：负 depth（升序）→ **正文行** → depth 0 → 正 depth
+     * （升序）。正文行走 [hit]（格坐标）老路，本函数因此只回 div 项 ——
+     * 调用方拿到 null 就落回「像素 → 格 → [hit]」那条既有路径。
+     *
+     * 块矩形是 CDP :140 的预判（`Rectangle.Contains`）：矩形外不扫子行；子行按钮自身的
+     * 矩形再判一次（CDP :152/:159 的 `PointX <= x <= PointX + Width` 与
+     * `Top <= y <= Bottom` 换成整数半开区间 —— 与 [hit] 的格区间口径一致）。
+     *
+     * @param xPx 画布像素 x（可负，负直接不命中：原版鼠标坐标天然非负）
+     * @param yPx 画布像素 y
+     */
+    fun hitAt(xPx: Int, yPx: Int): DivHit? {
+        val geometry = divGeometry ?: return null
+        if (xPx == NO_POINTER || yPx == NO_POINTER || xPx < 0 || yPx < 0) return null
+        var i = 0
+        while (i < divHits.size) {
+            val hit = divHits[i]
+            if (hit.depth >= 0) break
+            if (divContains(hit, xPx, yPx)) return hit
+            i++
+        }
+        // 正文行（原版 depth 0 槽的那一趟扫描）：盖住像素就由正文行赢，本函数回 null。
+        if (rowTargetAt(geometry, xPx, yPx) != null) return null
+        while (i < divHits.size) {
+            val hit = divHits[i]
+            if (divContains(hit, xPx, yPx)) return hit
+            i++
+        }
+        return null
+    }
+
+    /**
+     * 像素长按提示（div 与正文行同一优先级链）：返回该像素赢下的提示原文，null = 没有提示。
+     *
+     * 原版 ToolTip 取的是光标下那条 `ConsoleButtonString.Title`（`EmueraConsole.cs:1891-1917`），
+     * 而光标下是哪条按钮由与点击同一套扫描决定 —— 所以这里复用 [hitAt] 的优先级，
+     * 只是把「命中」换成「有 title」。
+     *
+     * @param xPx 画布像素 x
+     * @param yPx 画布像素 y
+     */
+    fun tooltipAt(xPx: Int, yPx: Int): String? {
+        val geometry = divGeometry ?: return pixelRowTooltip(null, xPx, yPx)
+        if (xPx == NO_POINTER || yPx == NO_POINTER || xPx < 0 || yPx < 0) return null
+        var i = 0
+        while (i < divHits.size) {
+            val hit = divHits[i]
+            if (hit.depth >= 0) break
+            if (divContains(hit, xPx, yPx)) return divTips[i]
+            i++
+        }
+        val rowHit = rowTargetAt(geometry, xPx, yPx)
+        val rowTip = pixelRowTooltip(geometry, xPx, yPx)
+        // 正文行赢的判据两条都算：可点按钮（[rowTargetAt]）与不可点文本的 `title`
+        // （原版连非按钮的 ConsoleButtonString.Title 也赋值，HtmlManager.cs:841-847）。
+        if (rowHit != null || rowTip != null) return rowTip
+        while (i < divHits.size) {
+            val hit = divHits[i]
+            if (divContains(hit, xPx, yPx)) return divTips[i]
+            i++
+        }
+        return null
+    }
+
+    /**
+     * 记录**像素**指针（div 命中/焦点用）：与 [setPointer] 的格坐标指针各自独立，
+     * 因为 div 子行按钮不在行列表里、没有「行下标 × 列」这组坐标。
+     *
+     * @param xPx 画布像素 x（客户区坐标，与 `hitAt` 同一套）
+     * @param yPx 画布像素 y
+     * @param pressed 是否按下（原版 `isSelecting` 那一路）
+     */
+    fun setPointerPx(xPx: Int, yPx: Int, pressed: Boolean) {
+        pointerXPx = xPx
+        pointerYPx = yPx
+        pointerPixelDown = pressed
+    }
+
+    /** 清空像素指针（指针离开客户区 / 刷新后）。 */
+    fun clearPointerPx() {
+        pointerXPx = NO_POINTER
+        pointerYPx = NO_POINTER
+        pointerPixelDown = false
+    }
+
+    /** 收集一层块的命中项（[attachDiv] 的两趟之一；[blockIndexBase] 是该层在 `plan.all` 的起下标）。 */
+    private fun collectDivHits(
+        blocks: List<DivOverlayPlanner.Block>,
+        blockIndexBase: Int,
+        metrics: CellMetrics,
+    ) {
+        for ((offset, block) in blocks.withIndex()) {
+            val blockIndex = blockIndexBase + offset
+            val rect = block.borderRectPx
+            val box = block.contentBoxPx
+            while (divBlockBoxes.size <= blockIndex) divBlockBoxes.add(DivBox(0f, 0f, 0f, 0f))
+            divBlockBoxes[blockIndex] = DivBox(
+                x = rect.x.toFloat(),
+                y = box.y.toFloat(),
+                width = (rect.width - DIV_WIDTH_FUDGE).toFloat(),
+                height = rect.height.toFloat(),
+            )
+            if (box.width <= 0) continue
+            for ((childRow, child) in block.children.withIndex()) {
+                // 折行后的可视行：列号仍相对本行左沿（`DrawCmd.colStart` 的口径，焦点比对
+                // `DivFocus` 同式），行对齐偏移折像素只加在命中 x 上 —— 与绘制侧的
+                // `originX = 内容盒左沿 + alignOffset` 同一式（ConsoleDisplayLine.cs:80-90）。
+                val spans = DivChildDraw.buttonSpans(child.runs, metrics)
+                if (spans.isEmpty()) continue
+                val rowLeftPx = box.x + metrics.cellsToPixels(child.alignOffsetCells)
+                for (span in spans) {
+                    val x = rowLeftPx + metrics.cellsToPixels(span.colStart)
+                    val width = metrics.cellsToPixels(span.colEnd) - metrics.cellsToPixels(span.colStart)
+                    divHits.add(
+                        DivHit(
+                            blockIndex = blockIndex,
+                            childRow = childRow,
+                            depth = block.depth,
+                            colStart = span.colStart,
+                            colEnd = span.colEnd,
+                            value = span.value,
+                            label = span.label,
+                            xPx = x.toFloat(),
+                            yPx = (child.yPx + span.topPx).toFloat(),
+                            widthPx = maxOf(1, width).toFloat(),
+                            heightPx = maxOf(1, span.bottomPx - span.topPx).toFloat(),
+                        ),
+                    )
+                    divTips.add(span.tooltip)
+                }
+            }
+        }
+    }
+
+    /** 一个候选（命中项 + 提示），排序期用。 */
+    private class DivCandidate(val hit: DivHit, val tooltip: String?)
+
+    /** 命中项是否命中该像素（块矩形 CDP :140 预判 + 子行按钮矩形 CDP :152/:159）。 */
+    private fun divContains(hit: DivHit, xPx: Int, yPx: Int): Boolean {
+        val box = divBlockBoxes.getOrNull(hit.blockIndex) ?: return false
+        if (xPx < box.x || xPx >= box.x + box.width || yPx < box.y || yPx >= box.y + box.height) {
+            return false
+        }
+        return xPx >= hit.xPx && xPx < hit.xPx + hit.widthPx &&
+            yPx >= hit.yPx && yPx < hit.yPx + hit.heightPx
+    }
+
+    /** 像素 → 正文行的命中目标（绘制行号换成命中行号后走 [hit]；不在窗口内返回 null）。 */
+    private fun rowTargetAt(geometry: DivHitGeometry, xPx: Int, yPx: Int): HitTarget? {
+        val lineHeight = geometry.metrics.lineHeight
+        if (lineHeight <= 0 || geometry.rowCount <= 0 || geometry.canvasHeightPx <= 0) return null
+        if (yPx >= geometry.canvasHeightPx) return null
+        // 行顶公式 rowTopPx(row) = canvasHeight - (rowCount - row) * lineHeight 的逆：
+        // 距画布底的整行数 = (canvasHeight - 1 - y) / lineHeight。
+        val fromBottom = (geometry.canvasHeightPx - 1 - yPx) / lineHeight
+        val drawRow = geometry.rowCount - 1 - fromBottom
+        val hitRow = drawRow + geometry.hitRowOffset
+        return hit(hitRow, geometry.metrics.pixelsToCells(xPx))
+    }
+
+    /** 像素 → 正文行的长按提示（[rowTargetAt] 的同一条换算；行外返回 null）。 */
+    private fun pixelRowTooltip(geometry: DivHitGeometry?, xPx: Int, yPx: Int): String? {
+        if (geometry == null) return null
+        val lineHeight = geometry.metrics.lineHeight
+        if (lineHeight <= 0 || geometry.rowCount <= 0 || geometry.canvasHeightPx <= 0) return null
+        if (yPx >= geometry.canvasHeightPx) return null
+        val fromBottom = (geometry.canvasHeightPx - 1 - yPx) / lineHeight
+        val drawRow = geometry.rowCount - 1 - fromBottom
+        return tooltip(drawRow + geometry.hitRowOffset, geometry.metrics.pixelsToCells(xPx))
     }
 
     /** 该目标当前是否处于焦点（指着）态 —— 纯绘制标记。 */
@@ -423,11 +963,20 @@ class ButtonLayer {
      */
     private fun runWidth(run: TextRun): Int {
         val graphic = run.graphic
-        return if (graphic != null) graphic.widthCells else Grid.cells(run.text)
+        return if (graphic != null) graphic.widthCells else fontWidth.cells(run.text, run.fontName)
     }
 
     private companion object {
         /** [TextRun.buttonId] 的「身份未知」取值：手工构造的 run 走老口径（值相同 + 列号相接就并）。 */
         const val ID_UNKNOWN = -1
+
+        /** 「没有像素指针」哨兵（[pointerXPx]/[pointerYPx] 的初值；合法画布像素非负）。 */
+        const val NO_POINTER = Int.MIN_VALUE
+
+        /**
+         * 绘制侧块矩形宽里的官方 fudge：`ConsoleDivPart.cs:178` 的 `width + 2`
+         * （命中侧 CDP :140 用的是裸 `width`，差的就是这 2 像素）。
+         */
+        const val DIV_WIDTH_FUDGE = 2
     }
 }

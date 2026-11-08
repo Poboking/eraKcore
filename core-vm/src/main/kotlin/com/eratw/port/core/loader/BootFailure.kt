@@ -76,15 +76,17 @@ object BootFailures {
     /**
      * 堆不足的唯一文案（`OutOfMemoryError` 与装载前预检共用；宿主只加「启动失败：」标题）。
      *
-     * 机器容量口径来自实测读数（`ProgramLoader.estimatedHeapBytes` 的标定表）：
-     * 全量产物 `program.erbc` ≈ 316 MiB + `program.meta` ≈ 47 MiB，段 3 惰性化之后
-     * **解码内部实时高水位**实测 342.6 MiB、装载后 post-GC 常驻 +100.5 MiB；
-     * 旧口径「装载后常驻 628.6 MiB」是整池解码时代的读数，512 MB 堆在那时才必 OOM
-     * （M5-BOOT/M8-DEVICE-BOOT 真机实测）。走到这句说明连惰性档的高水位都没装下，
-     * 所以仍按机型档位提示。`largeHeap` 已在 `app/src/main/AndroidManifest.xml:6` 打开。
+     * 句里**不再写任何 MiB 数字**（2026-10-30 改）：旧句「解码峰值约需 350–420 MiB」是
+     * mem 系列改造前的标定读数，与真机失败屏实测（峰值 167 MiB / 上限 512 MiB 仍 OOM，
+     * vivo V2199A）直接矛盾 —— 装载解码峰值的内存优化早已把它压下去，这句反而让排障者
+     * 以为「读数没到就该成功」，掩盖了 OOM 真正的发生点（校验之后的 INTERN / meta /
+     * session 装配盲区，或 native 侧分配失败被 [classify] 归并到本分支）。
+     * 「largeHeap 已开」保留：它排掉「忘了开 largeHeap」这一最常见的自查项；
+     * 挡位本身（`dalvik.vm.heapsize`）是系统属性，应用无法调高。
+     * `largeHeap` 已在 `app/src/main/AndroidManifest.xml:6` 打开。
      */
     const val HEAP_SHORTAGE_TEXT =
-        "堆不足（全量装载的解码峰值约需 350–420 MiB；largeHeap 已开，仍不足请用 ≥6 GB RAM 机型）"
+        "堆不足（largeHeap 已开；挡位由系统决定，应用无法调高，仍不足请用 ≥6 GB RAM 机型）"
 
     /** 分类入口。永远返回非 null；无法归类的进 [BootFailureKind.OTHER]。 */
     fun classify(t: Throwable): BootFailure {

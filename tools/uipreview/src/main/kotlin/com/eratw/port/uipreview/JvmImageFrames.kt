@@ -2,6 +2,7 @@ package com.eratw.port.uipreview
 
 import com.eratw.port.core.host.GraphicsBuffer
 import com.eratw.port.core.host.RuntimeAux
+import com.eratw.port.core.host.SPRITE_SLOT
 import com.eratw.port.core.host.SpritePool
 import com.eratw.port.render.adapter.HtmlRunFlatten
 import com.eratw.port.render.view.ImageFrame
@@ -238,8 +239,13 @@ class JvmImageFrames(
         (width and 0xFFFF) shl 16 or (height and 0xFFFF)
 
     private companion object {
-        /** `GraphicsMethods.kt` 的 sprite 槽名（core 侧私有常量，platform SpriteBitmapSource 同款复述）。 */
-        const val SLOT_SPRITE = "sprite"
+        /**
+         * `store.aux` 的 sprite 槽名：**唯一来源 = core 的 [SPRITE_SLOT]**（与
+         * `GraphicsMethods`/`BuiltinHost` 同一份常量），本类不再复述字面量。早先这里写
+         * `"sprite"` 并注为「core 侧私有常量」，与 platform 的 `SpriteBitmapSource.SLOT_SPRITE`
+         * 一起构成三处字面量 —— 改一处漏一处就是「查图恒空」。
+         */
+        const val SLOT_SPRITE = SPRITE_SLOT
 
         /** 候选目录：`resources` 是原版内容根（AppContents.cs:109-115），img/dat 是语料实测存在的变体。 */
         val CANDIDATE_DIRS = listOf("resources", "img", "dat")

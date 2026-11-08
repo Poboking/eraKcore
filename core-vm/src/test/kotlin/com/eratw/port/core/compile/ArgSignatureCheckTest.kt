@@ -229,6 +229,87 @@ class ArgSignatureCheckTest {
     }
 
     // ------------------------------------------------------------------
+    // ENGFIX3 B4 遗留①：成对变参组判据接池遍历面（表达式位接线）
+    //
+    // 判据 = VariadicGroup.violates（Builtins 注册表单一声明源），与 erbcc 语句位
+    // pairedArgLoadWarning 同源。原版表达式位调用点 IdentifierDictionary.cs:576-585
+    // （GetFunctionMethod → CheckArgumentType → CheckArgumentTypeEx），与语句位
+    // ArgumentParser.cs:1119-1127 同走 FunctionMethod.cs:186-193 的 MatchVariadicGroup。
+    // DT 两族签名：DT_ROW_ADD = 1+2n 或数组形态 4 参；DT_ROW_SET = 2+2n 或 5 参
+    // （MapDataTableMethods.kt:180/:193，第二份形态见 FunctionMethodCreator.cs:2141-2199）。
+    // 反向证明：撤掉 checkOneBuiltin 的 variadicGroup 判据块 ⇒ 本节全部判红；恢复判绿。
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `表达式位成对变参组违规 - 告警一条`() {
+        // 表达式位 BUILTIN 节点保持不降级（lowerFuncCall），FuncCall 留在语句池 ⇒ 池遍历面可判
+        val program = compile(Fn("CALLER", listOf("@CALLER", "A = DT_ROW_ADD(\"T\", \"c\")", "RETURN")))
+        val ws = ArgSignatureCheck.checkProgram(program)
+        assertEquals(1, ws.size, "2 参 = 固定前缀 1 后余 1，不成对：$ws")
+        val w = ws.single()
+        assertEquals(ArgSignatureWarningKind.VARIADIC_GROUP, w.kind)
+        assertEquals("DT_ROW_ADD", w.callee)
+        assertEquals(2, w.argc)
+        assertEquals(1, w.arity, "arity 读数 = 固定前缀")
+        assertTrue(w.message.contains("参数个数不成对"), "文案：${w.message}")
+        assertTrue(w.message.contains("1+2n"), "文案带成对口径：${w.message}")
+    }
+
+    @Test
+    fun `表达式位成对变参组 - 合法形态不判`() {
+        val program = compile(
+            Fn(
+                "CALLER",
+                listOf(
+                    "@CALLER",
+                    "A = DT_ROW_ADD(\"T\")",
+                    "A = DT_ROW_ADD(\"T\", \"c\", 1)",
+                    "A = DT_ROW_ADD(\"T\", \"c\", 1, \"d\", 2)",
+                    "A = DT_ROW_ADD(\"T\", \"c\", 1, \"d\")",
+                    "A = DT_ROW_SET(\"T\", 1, \"c\", 1, \"d\", 2)",
+                    "A = DT_ROW_SET(\"T\", 1, \"c\", 1, \"d\")",
+                    "RETURN",
+                ),
+            ),
+        )
+        assertTrue(
+            ArgSignatureCheck.checkProgram(program).isEmpty(),
+            "1 参只建行、1+2n、数组形态 4/5 参全放行",
+        )
+    }
+
+    @Test
+    fun `表达式位 DT_ROW_SET 违规与下界以下归个数闸`() {
+        // 7 参 = 固定前缀 2 后余 5，不成对（与 erbcc PairedArgLoadCheckTest 同口径）
+        val bad = compile(
+            Fn("CALLER", listOf("@CALLER", "A = DT_ROW_SET(\"T\", 1, \"c\", 1, \"d\", 2, \"e\")", "RETURN")),
+        )
+        val ws = ArgSignatureCheck.checkProgram(bad)
+        assertEquals(1, ws.size, "7 参不成对，只报一条：$ws")
+        assertEquals(ArgSignatureWarningKind.VARIADIC_GROUP, ws.single().kind)
+
+        // 下界以下（minGroupArgs=4）归个数闸职责，成对判据不判（violates 的下界口径）
+        val below = compile(Fn("CALLER", listOf("@CALLER", "A = DT_ROW_SET(\"T\", 1)", "RETURN")))
+        val ws2 = ArgSignatureCheck.checkProgram(below)
+        assertEquals(1, ws2.size, "2 参低于下界 4，归 TOO_FEW 个数闸：$ws2")
+        assertEquals(ArgSignatureWarningKind.TOO_FEW, ws2.single().kind)
+    }
+
+    @Test
+    fun `用户方法遮蔽同名内建 - 成对判据不判`() {
+        // 用户 #FUNCTION 先于内建（IdentifierDictionary.cs:548-565）：调用位被编译成
+        // _CALL + 返回哨兵，不落内建 FuncCall ⇒ 池遍历面无可判节点（个数闸照走用户位）
+        val program = compile(
+            Fn("CALLER", listOf("@CALLER", "A = DT_ROW_ADD(\"T\", \"c\")", "RETURN")),
+            Fn("DT_ROW_ADD", listOf("@DT_ROW_ADD", "RETURN")),
+        )
+        assertTrue(
+            ArgSignatureCheck.checkProgram(program).none { it.kind == ArgSignatureWarningKind.VARIADIC_GROUP },
+            "用户函数遮蔽内建，不按内建成对判据",
+        )
+    }
+
+    // ------------------------------------------------------------------
     // 兼容口径与产物不变性
     // ------------------------------------------------------------------
 

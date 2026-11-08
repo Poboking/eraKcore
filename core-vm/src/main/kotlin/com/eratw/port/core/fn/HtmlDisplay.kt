@@ -199,7 +199,7 @@ data class HtmlPrintRow(
      * 不含折行语义：原版按 `Config.DrawableWidth` 折行（PrintStringBuffer.cs:242-251），
      * 那一步归宿主（它才知道窗口宽）。
      */
-    val cells: Int get() = CellWidth.of(visibleText)
+    val cells: Int get() = CellWidth.displayCells(visibleText)
 }
 
 /**

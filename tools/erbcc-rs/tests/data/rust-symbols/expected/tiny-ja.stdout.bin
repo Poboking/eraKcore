@@ -1,0 +1,12 @@
+=== 符号表 ===
+配置: IgnoreCase=true SortFilenames=true DebugMode=false Collator=JA_JP 宏 1 个（含展开体） ERH #DIM CONST 声明 1 条
+尺寸可解常量 2 个  不可求值丢弃声明: 收集前 0 → 收集后 0
+定义 2  唯一名 2  重名 0（非事件 0 / 事件 0）  被遮蔽 0  方法 0
+
+=== 比较器自检（ja-JP Collator vs ORDINAL）===
+文件数 2  绝对位置位移 0（含被动位移，仅供观察）
+重名定义文件 0 个，两两相对次序翻转 0 / 0 对
+重名组 0  定义集合/次序翻转 0  事件执行序翻转 0
+结论: PASS（两比较器对本语料的重名解析结论一致）
+
+符号表摘要: C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\sym-probe\base\tiny-ja.json

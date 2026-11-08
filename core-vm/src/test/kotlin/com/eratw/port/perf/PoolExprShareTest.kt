@@ -16,7 +16,6 @@ import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotSame
 import kotlin.test.assertSame
-import kotlin.test.assertTrue
 
 /**
  * M6-MEMCODE 的**表达式池与语句 args 交叉去重**契约（`Program.internStatementArgs` 的种子段）。
@@ -27,7 +26,12 @@ import kotlin.test.assertTrue
  *    data class 值（含 `line`/`col`）在规范化前后**逐字段不变**：装载差分测试
  *    （`ErbcStreamEquivalenceTest` / `MmapLoaderTest`）就是靠这条逐下标对拍。
  *    反例守卫：种子段一旦挪到语句段之后，语句侧的 `line`/`col` 会污染池根，池侧对拍当场红。
- * 2. **共享**：与池内形态相同的语句参数结点换成池实例（`===`），不再各存一份。
+ * 2. **折叠判据 = 逐字段全等（含 `line`/`col`，INTERN-STMT）**：只有与池内形态**且行列号**
+ *    全等的语句参数结点才换成池实例（`===`）；只差行列号的两侧各自保真。
+ *    旧口径（本文件 2026-10 版本）在这里钉的是「同形态即折叠」，于是语句侧落盘的
+ *    `line`/`col` 被换成池内代表的值 —— 规约 `specs/erbc-format.md` §5.3 把「两条只差行列号的
+ *    表达式被错误合并」直接写成缺陷口径，`MappedCodeSourceTest` 的真实产物用例
+ *    （映射装载 vs 全读装载的 `.erbc` 再编码逐字节相同）据此判红。
  * 3. **幂等**：第二次调用返回同一份读数，池根与语句参数身份都不再变。
  * 4. **边界**：`ArgInterner` 只能就地改写**列表字段**；`val` 单值字段（`ExpressionArgument.term`、
  *    `SpSetArgument.term` 等）只能下降登记、无法写回 —— 这类参数结点本波仍各存一份。
@@ -39,7 +43,7 @@ class PoolExprShareTest {
     @Test
     fun `列表参数并入表达式池且池根身份不变`() {
         val b = CodeBuilder()
-        // 语句参数里的字面量：line/col = 3/4（与池根故意不同，验证 line/col 不参与结构比较）
+        // 语句参数里的字面量：line/col = 3/4（与池根故意不同，验证行列号参与结构比较、不跨行列折叠）
         val argStmt = InstructionStmt(
             FunctionCode.PRINT,
             ExpressionArrayArgument(arrayListOf(IntLiteral(7L, 3, 4))),
@@ -59,12 +63,18 @@ class PoolExprShareTest {
         // 1) 池根身份与值不变（含 line/col）
         assertSame(before, after, "池根实例不该被换掉（种子段必须先入表）")
         assertEquals(IntLiteral(7L, 9, 9), after, "池根 data class 值（含 line/col）必须逐字段不变")
-        // 2) 语句侧已并入池实例（列表字段就地改写）
+        // 2) 语句侧**不再**折进池根：两条只差 `line`/`col` 的表达式必须各自保真
+        //    （INTERN-STMT 改的正是这一条。旧口径在这里 assertSame「同形态的语句参数结点应换成
+        //    池内代表实例」，代价是把池根的 9/9 写进本该落 3/4 的槽位，`.erbc` 再编码随之漂移：
+        //    `specs/erbc-format.md` §5.3「`line`/`col` 必须逐字往返……两条只差行列号的表达式会被
+        //    错误合并」把这种并合直接点名为缺陷口径，`MappedCodeSourceTest` 的真实产物用例按
+        //    「映射装载 vs 全读装载再编码逐字节相同」判红。）
         val term = (p.statement(0).args as ExpressionArrayArgument).terms[0]
-        assertSame(after, term, "同形态的语句参数结点应换成池内代表实例")
-        // 3) 读数：语句数不含种子行
+        assertNotSame(after, term, "只差行列号的语句参数结点不得折进池根代表实例")
+        assertEquals(IntLiteral(7L, 3, 4), term, "语句侧结点的 line/col 必须原样读回")
+        // 3) 读数：语句数不含种子行；本次没有任何跨行列号的合并可折 ⇒ merged 为 0
         assertEquals(1, stats.statements, "读数里的语句数应扣掉池种子行")
-        assertTrue(stats.merged >= 1, "至少应合并 1 个语句侧结点，实际 ${stats.merged}")
+        assertEquals(0, stats.merged, "同形异行列号不再折叠后，本产物不该有合并读数，实际 ${stats.merged}")
     }
 
     /** 整棵子树共享：`Binary(1 + 2)` 两侧各一份 → 语句侧整棵让位，池根行号不被覆盖。 */
@@ -88,9 +98,11 @@ class PoolExprShareTest {
 
         val pool = p.expr(poolIndex)
         val stmtTerm = (p.statement(0).args as ExpressionArrayArgument).terms[0]!!
-        assertSame(pool, stmtTerm, "整棵子树应换成池根实例")
+        // INTERN-STMT：整棵子树同样不再折进池根（子树两侧只差行列号）；旧口径在这里 assertSame。
+        assertNotSame(pool, stmtTerm, "只差行列号的子树不得整体折进池根实例")
+        assertEquals(stmtTree, stmtTerm, "语句侧子树逐字段原样读回（含 line/col）")
         assertEquals(8, pool.line, "池根行号仍是自己的（未被语句侧覆盖）")
-        assertEquals(8, stmtTerm.line, "共享实例行号 = 池根行号；语句侧原值 5 不再保留（与 ArgInterner 同口径）")
+        assertEquals(5, stmtTerm.line, "语句侧子树保留自己的行号 5；旧口径把它换成池根的 8，落盘即漂移")
     }
 
     /**
@@ -147,14 +159,19 @@ class PoolExprShareTest {
         val b = CodeBuilder()
         b.statement(InstructionStmt(FunctionCode.PRINT, ExpressionArgument(IntLiteral(1L, 1, 1)), 1, "PRINT 1"))
         b.statement(InstructionStmt(FunctionCode.PRINT, ExpressionArgument(IntLiteral(1L, 2, 2)), 2, "PRINT 2"))
+        // 第三条与第二条**逐字段全等**（含行列号）：INTERN-STMT 之后这是唯一还允许合并的形态
+        b.statement(InstructionStmt(FunctionCode.PRINT, ExpressionArgument(IntLiteral(1L, 2, 2)), 2, "PRINT 2"))
         b.emit(Opcode._EVAL_INT, 0, SlotAddr.local(0), 0, 1)
         val p = build(b)
 
         val stats = p.internStatementArgs()
 
         assertEquals(0, p.exprCount, "本产物没有表达式池")
-        assertEquals(2, stats.statements, "种子行不该算进语句数")
-        assertSame(p.statement(0).args, p.statement(1).args, "同形态语句参数仍应共享")
+        assertEquals(3, stats.statements, "种子行不该算进语句数")
+        // INTERN-STMT：旧口径这里 assertSame(statement(0).args, statement(1).args)——
+        // 两条只差行列号的参数被折成同一实例，落盘的 line/col 随代表实例漂移。
+        assertNotSame(p.statement(0).args, p.statement(1).args, "只差行列号的参数不再共享")
+        assertSame(p.statement(1).args, p.statement(2).args, "逐字段全等（含行列号）的参数仍照常共享同一实例")
     }
 
     private fun build(b: CodeBuilder): Program {

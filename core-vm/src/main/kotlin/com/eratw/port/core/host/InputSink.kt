@@ -76,6 +76,14 @@ data class InputRequest(
      * （未知时由控制台退回行水位近似，见 `LineBufferConsoleSink.noteInputWait`）。
      */
     val scriptLine: Long = -1L,
+    /**
+     * 本次等待是否允许对用户输入做宏展开（4.981 上游 `DISABLE_INPUT_MACRO` 关、`ENABLE_INPUT_MACRO` 开）。
+     *
+     * 由语句层（`sem.ExecContext.inputMacroEnabled`）随每条请求下发；缺省 true = 原版输入框的
+     * 常规行为。消费方是输入/渲染宿主的文本框，不在 core-vm 内。reference 全文零命中，
+     * 语义按语料用法推定（`DLC/实用设置补丁/实用设置.ERB:571-573`）。
+     */
+    val macroEnabled: Boolean = true,
 ) {
     enum class InputType { INT, STR }
 
@@ -125,6 +133,20 @@ data class InputRequest(
  * AnyValue 二选一（:1256-1274），其余取值形态按 [InputRequest.type] 写一个。
  * 缺省两个都为 true，使既有「INT 请求只读 [intValue]、STR 请求只读 [strValue]」的宿主实现
  * 与测试桩不必跟着改。
+ *
+ * ## 附加槽（[resultIntSlots] / [resultStrSlots]）
+ *
+ * 原版窗口侧一次鼠标按下会经 `Process.InputInteger(idx, i)` / `InputString(idx, s)`
+ * 写**多个下标**（`MinorShift.Emuera.Forms/MainWindow.cs:828/:832/:834/:847`），
+ * 之后 `PressEnterKey` 才把按钮值交到**主槽** `RESULT:0`（`EmueraConsole.cs:1135`
+ * 的 `process.InputInteger(result)`）。旧契约只有「一个 int + 一个 str」，把这些下标
+ * 全挤进主通道 ⇒ 语料 `QOL_USERCOM.ERB @COM_OPTION` 的
+ * `INPUT -1, 1` / `MOUSE_BTN = RESULT:1` 永远读不到左键标记，子选单点击因此不生效。
+ * 本层把它们扩成按**下标**索引的附加写入表：主槽仍由 `writes*` 与语句层写，附加槽由
+ * 语句层在 [InputSink.waitInput] 返回后统一写回（单一汇聚点，flat/object-tree 双通道同覆盖）。
+ * 缺省空表 = 键盘提交等无附加槽的常规交付，零分配、不改既有行为。
+ * 这张表同时是既有登记项（取色 `RESULT:6/3`、CBG 按钮 `RESULT:4`、
+ * `INPUTMOUSEKEY` 的 `RESULT:0..5` 五元组）走向忠实槽位的通用通道。
  */
 data class InputOutcome(
     val intValue: Long = 0L,
@@ -141,6 +163,22 @@ data class InputOutcome(
     val writesInt: Boolean = true,
     /** 本次交付是否写 RESULTS（原版 `process.InputString`，Process.cs:432-436）。 */
     val writesStr: Boolean = true,
+    /**
+     * 额外要写的 RESULT 数组槽（下标 → 整数值），**不得含主槽 0**（主槽由 `writesInt`
+     * 与语句层写）。对应原版 `Process.InputInteger(long idx, long i)`（Process.cs:404-408）
+     * 的 `idx != 0` 调用：`MainWindow.cs:828` 写 `RESULT:3`（遮罩取色）、`:832` 写
+     * `RESULT:2`（修饰键）、`:847`/`:864` 写 `RESULT:1`（鼠标按钮，左=1/右=2/中=3）。
+     *
+     * 由语句层在 [InputSink.waitInput] 返回后统一写回；空表 = 无附加槽（键盘提交的常规情形）。
+     */
+    val resultIntSlots: Map<Int, Long> = emptyMap(),
+    /**
+     * 额外要写的 RESULTS 数组槽（下标 → 字符串），**不得含主槽 0**。对应原版
+     * `Process.InputString(long idx, string s)`（Process.cs:432-436）：
+     * `MainWindow.cs:834` 的 `InputString(1L, selectedString)` 把命中的按钮文本写进
+     * `RESULTS:1`，`:860` 的空白处点击同理。
+     */
+    val resultStrSlots: Map<Int, String> = emptyMap(),
 )
 
 /**

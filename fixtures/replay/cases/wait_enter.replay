@@ -1,0 +1,13 @@
+# WAIT：EnterKey 形态的一次等待。一条提交（空文本回车）即推进；
+# 该形态不写 RESULT/RESULTS（doInputToEmueraProgram 的 switch 里没有 EnterKey 分支）。
+case: wait_enter
+target: REPLAY_WAIT_ENTER
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:762-784
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:876-895
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1119-1287
+--- inputs
+submit
+--- expect-console
+START-WAIT-ENTER
+AFTER-WAIT
+END-WAIT-ENTER

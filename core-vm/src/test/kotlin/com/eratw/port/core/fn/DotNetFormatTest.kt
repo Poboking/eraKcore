@@ -25,6 +25,9 @@ import org.junit.jupiter.api.Assumptions
  *    本文件的 111 条期望值由脚本从下述测试体里反解出来，再同时喂给 dotnet 与 [formatDotNet]，
  *    两侧读数均为 ok=111 / mismatch=0 —— 每条期望值都是实测，不是推算。
  * 3. 语料实际格式串 —— 由最后一个用例在 `ERATW_CORPUS` 下现扫，不写死语料绝对路径。
+ * 4. X10（4.981 语料新增）的期望值由本机 Windows PowerShell 5.1（.NET Framework 4.8，
+ *    Emuera 同框架）逐值实测补齐：正数与 0 左补零到 10 位；负数按 64 位补码全宽输出
+ *    （不抛异常、无负号）；实际位数超过精度时不截断。
  *
  * 舍入口径结论（实测，非猜）：自定义格式在小数位不足时是**远离零舍入**（等价 MidpointRounding.AwayFromZero），
  * 不是 ToNearestEven，也不是 ToZero —— 见 [小数位不足时按远离零舍入] 的 5 / 25 / 125 / 1245 四例；
@@ -140,6 +143,16 @@ class DotNetFormatTest {
         assertEquals("000000FF", fmt(255L, "X8"))                // 同一条黄金基准行
         assertEquals("00002a", fmt(42L, "x6"))
         assertEquals("ffffffffffffffff", fmt(-1L, "x6"))
+        // "X10"：4.981 语料 ERB/fromEN/Addition/Marriage/Add_Wife the Dust.ERB:149
+        // 的 %TOSTR(CODE, "X10")%。.NET Framework 4.8 实测：正数与 0 左补零到 10 位；
+        // 负数按 64 位补码全宽输出（不抛异常、无负号）；位数已超精度时不截断。
+        assertEquals("0000000000", fmt(0L, "X10"))
+        assertEquals("000000002A", fmt(42L, "X10"))
+        assertEquals("00000000FF", fmt(255L, "X10"))
+        assertEquals("7FFFFFFFFFFFFFFF", fmt(Long.MAX_VALUE, "X10"))
+        assertEquals("FFFFFFFFFFFFFFFF", fmt(-1L, "X10"))
+        assertEquals("FFFFFFFFFFFFFFD6", fmt(-42L, "X10"))
+        assertEquals("8000000000000000", fmt(Long.MIN_VALUE, "X10"))
     }
 
     // -----------------------------------------------------------------------
@@ -235,7 +248,7 @@ class DotNetFormatTest {
     @Test
     fun `Long 两端不经过取负不溢出`() {
         // Long.MIN_VALUE 取负会溢出；实现全程走 BigInteger，实测表逐值一致
-        val formats = listOf("000", "00", "0", "#,###", "#,##0", "0,.###", "D2", "D3", "X", "X6", "0%")
+        val formats = listOf("000", "00", "0", "#,###", "#,##0", "0,.###", "D2", "D3", "X", "X6", "X10", "0%")
         for (format in formats) {
             for (value in edgeValues) {
                 fmt(value, format)                              // 只要求不抛、不溢出
@@ -276,8 +289,9 @@ class DotNetFormatTest {
         }
         assertTrue(found.isNotEmpty(), "语料扫描没提取到任何带格式参数的调用（扫描器失配或语料根不对）")
 
-        // 2026-10 全库枚举出的语料格式串全集（13 处去重后 12 种）
-        val corpusFormats = setOf("000", "00", "0", "#,###", "#,##0", "0,.###", "D2", "D3", "X", "X2", "X6", "x6")
+        // 语料格式串全集：4.980 全库 13 处去重后 12 种；4.981 新增 X10 一处
+        // （ERB/fromEN/Addition/Marriage/Add_Wife the Dust.ERB:149 的 TOSTR(CODE, "X10")）
+        val corpusFormats = setOf("000", "00", "0", "#,###", "#,##0", "0,.###", "D2", "D3", "X", "X2", "X6", "x6", "X10")
         val unexpected = found.filter { it !in corpusFormats }
         assertTrue(unexpected.isEmpty(), "语料里出现未登记的格式串 $unexpected（需补实现并跑 dotnet 对照）")
         // 每种格式在边界值上都不抛错（这就是本轮改造的验收点：真实语料不再撞 CodeEE）
@@ -300,6 +314,7 @@ class DotNetFormatTest {
             "X2" to (999L to "3E7"),
             "X6" to (42L to "00002A"),
             "x6" to (42L to "00002a"),
+            "X10" to (255L to "00000000FF"),
         )
         for ((format, pair) in oneShot) {
             assertEquals(pair.second, fmt(pair.first, format), "格式串 \"$format\" 与实测读数不符")

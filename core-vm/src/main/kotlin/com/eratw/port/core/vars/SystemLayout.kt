@@ -124,6 +124,28 @@ object SystemLayout {
     val localInt: List<Pair<String, Int>> = listOf("LOCAL" to VC.LOCAL_VAR, "ARG" to VC.ARG)
     val localStr: List<Pair<String, Int>> = listOf("LOCALS" to VC.LOCALS, "ARGS" to VC.ARGS)
 
+    /**
+     * 4.981 fork 的函数局部**浮点**变量（低 16 位 = `VariableFloatArrayLength` 槽位）。
+     *
+     * 登记源：fork-src `VariableData.cs:376-379`（`localvarTokenDic.Add` —— 与 LOCAL/ARG 同一张表，
+     * **不在** `varTokenDic` 里 ⇒ 永不成为存档条目，也解释了本表为什么排在 [localStr] 之后、
+     * 与 [localInt] 同族）。出厂长度各 10（spec: fork-src `ConstantData.cs:211-217`），
+     * 可被 `VARIABLESIZE.CSV` 的浮点行改写（spec: fork-src `ConstantData.cs:532-533`），
+     * 再按函数由 `#LOCALFSIZE` / 形参声明拉长。
+     */
+    val localFloat: List<Pair<String, Int>> = listOf("LOCALF" to VC.LOCALF, "ARGF" to VC.ARGF)
+
+    /**
+     * 4.981 fork 的 0 维系统浮点（`dataFloat` 列的包装）。
+     *
+     * 登记源：fork-src `VariableData.cs:182` 的 `varTokenDic.Add("RESULTF",
+     * FloatScalarVariableToken)` —— 与 [localFloat] 不同，它**在** varTokenDic 里，
+     * 但 code 带 `__EXTENDED__` 位 ⇒ [VariableCode.isSavedata] 判否，不进档（同
+     * `specs/variables.yaml` float_vars.scalars 与本仓 `SaveTextFormat.kt` 的口径）。
+     * 槽位 1 = `dataFloat[1]`（列长 `__COUNT_STRING__` = 2，spec: fork-src `VariableData.cs:155`）。
+     */
+    val floatScalar: List<Pair<String, Int>> = listOf("RESULTF" to VC.RESULTF)
+
     /** 伪变量/常量注册。spec: VariableData.cs:3153-3179 */
     val pseudo: List<Triple<String, Int, PseudoKind>> = listOf(
         Triple("RAND", VC.RAND, PseudoKind.RAND),

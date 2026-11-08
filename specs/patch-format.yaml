@@ -1,0 +1,376 @@
+# patch-format.yaml — 补丁产物（patch.erbc）格式规约 v1
+#
+# 状态：v1 定稿（R7 波 B）。字段表与 <internal-workdir>/CONTRACT-R7-B.md §2/L3 逐字段一致 ——
+#   字段名、顺序、类型、必填性**不许两边各自演化**；任何一侧改动都必须同时改另一侧。
+# 上位决策：eratw-架构决策记录.md ADR-011（补丁通道边界：编译只在导入路径、装载只读产物、失败整体回退）。
+# 容器侧权威：eratw-android/specs/erbc-format.md。补丁体是**内嵌一份完整合法的 .erbc**，
+#   本规约**不新造容器**，也**不升** `ErbcFormat.VERSION_1`（core/code/ErbcFormat.kt:42）。
+# 代码侧：core-vm/src/main/kotlin/com/eratw/port/core/patch/PatchHeader.kt、PatchArtifacts.kt。
+#
+# 术语：
+#   base       = 随包 program.erbc 装载出的 Program（唯一，补丁只追加、不改写）
+#   补丁体     = `---` 之后的原始 .erbc 字节（本身是一个完整容器，可独立被 ErbcReader 校验）
+#   计数       = Program 的六个读数：instructionCount / functionCount / statementCount /
+#                stringCount / longCount / exprCount
+#
+# 证据口径：source 一律为「相对 eratw-android/ 的路径:行号」或「仓库根相对路径:行号」。
+
+schema: 1
+
+meta:
+  contract: <internal-workdir>/CONTRACT-R7-B.md:83-100
+  decision: eratw-架构决策记录.md ADR-011
+  container_spec: eratw-android/specs/erbc-format.md
+  implementation: core-vm/src/main/kotlin/com/eratw/port/core/patch/PatchHeader.kt、PatchArtifacts.kt
+  version: 1
+  status: 定稿
+  # 契约字段表用中文类型名，本文件用英文记号；一一对应，不许出现第三种写法。
+  type_map:
+    int: 整数
+    quoted: 引号串
+    terminator: '—'
+
+# ---------------------------------------------------------------------------
+# 一、文件整体形态
+# ---------------------------------------------------------------------------
+container:
+  # 文本头 + 分隔行 + 原始字节，三段拼接，中间不插空行、不插注释
+  form: '文本头（UTF-8、LF、逐行 `key value`）+ 一行 `---` + 原始 .erbc 字节'
+  header_encoding: 'UTF-8，无 BOM'
+  line_ending: 'LF；出现 CR 即拒绝（不静默归一）'
+  key_value_separator: '单个 ASCII 空格；键与值之间不得有多余空白'
+  terminator: '---'
+  terminator_note: '独占一行、前后无空白；其后第一个字节即补丁体的第 0 字节'
+  body: '内嵌一份完整合法的 .erbc（与 program.erbc 同容器格式，可独立过 ErbcReader 的全部自检）'
+  body_must_not: '不新造容器、不定义新 magic、不定义新段表、不升 ErbcFormat.VERSION_1'
+  body_version_evidence: core-vm/src/main/kotlin/com/eratw/port/core/code/ErbcFormat.kt:42
+  body_version_policy: '容器版本只表达容器（见 erbc-format.md:527-528）；补丁格式版本由头部 erbc-patch 表达，两者解耦'
+  container_untouched_evidence: <internal-workdir>/CONTRACT-R7-B.md:111
+
+# ---------------------------------------------------------------------------
+# 二、文本头字段表（顺序固定；缺一即拒、多一即拒、乱序即拒）
+# ---------------------------------------------------------------------------
+# type: int = 十进制整数（无符号十进制字面量，禁止前导 +、禁止 0x 十六进制）；
+#       quoted = 双引号串（引号是线格式的一部分，读侧去引号后取值）
+fields:
+  - name: erbc-patch
+    index: 0
+    type: int
+    required: true
+    meaning: '补丁格式版本；v1 = 1，v2 = 2（写侧恒写 2）'
+    check: '只接受 1 或 2。大于 2 直接拒绝（不猜、不做向前兼容解释）；小于 1 或非整数同样拒绝'
+    version_history:
+      v1: '15 必需字段 + 可选段 private-dims（记录无浮点原子）—— R7-E1 定形'
+      v2: '同 15 字段与 ---；private-dims 记录在 isPrivate 后插 isFloat、行尾追加 defaultsFloat，承载 4.981 的 #DIMF（必需位插入 ⇒ 升版本号）'
+    source: <internal-workdir>/CONTRACT-R7-B.md:85
+
+  - name: base-instructions
+    index: 1
+    type: int
+    required: true
+    meaning: 'base 的 instructionCount（base 指令条数）'
+    value_of: 'Program.instructionCount'
+    check: '>= 0；必须与装载侧 base 的 Program.instructionCount 逐字相等，否则拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7-B.md:86
+    program_source: core-vm/src/main/kotlin/com/eratw/port/core/code/Program.kt:734
+
+  - name: base-functions
+    index: 2
+    type: int
+    required: true
+    meaning: 'base 的函数条数（契约字段表称 functionCount）'
+    value_of: 'Program.functions.size（Program 无 functionCount 访问器，取列表长度）'
+    check: '>= 0；必须与装载侧 base 的函数表长度逐字相等，否则拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7-B.md:87
+    program_source: core-vm/src/main/kotlin/com/eratw/port/core/code/Program.kt:567
+
+  - name: base-statements
+    index: 3
+    type: int
+    required: true
+    meaning: 'base 的 statementCount（base 语句池条数）'
+    value_of: 'Program.statementCount'
+    check: '>= 0；必须与装载侧 base 的 Program.statementCount 逐字相等，否则拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7-B.md:88
+    program_source: core-vm/src/main/kotlin/com/eratw/port/core/code/Program.kt:538
+
+  - name: base-strings
+    index: 4
+    type: int
+    required: true
+    meaning: 'base 的 stringCount（base 驻留字符串池条数）'
+    value_of: 'Program.stringCount'
+    check: '>= 0；必须与装载侧 base 的 Program.stringCount 逐字相等，否则拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7-B.md:89
+    program_source: core-vm/src/main/kotlin/com/eratw/port/core/code/Program.kt:534
+
+  - name: base-longs
+    index: 5
+    type: int
+    required: true
+    meaning: 'base 的 longCount（base i64 常量池条数）'
+    value_of: 'Program.longCount'
+    check: '>= 0；必须与装载侧 base 的 Program.longCount 逐字相等，否则拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7-B.md:90
+    program_source: core-vm/src/main/kotlin/com/eratw/port/core/code/Program.kt:533
+
+  - name: base-exprs
+    index: 6
+    type: int
+    required: true
+    meaning: 'base 的 exprCount（base 表达式池根条数）'
+    value_of: 'Program.exprCount'
+    check: '>= 0；必须与装载侧 base 的 Program.exprCount 逐字相等，否则拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7-B.md:91
+    program_source: core-vm/src/main/kotlin/com/eratw/port/core/code/Program.kt:535
+
+  - name: base-sha256
+    index: 7
+    type: quoted
+    required: true
+    meaning: 'base program.erbc 的 SHA-256 摘要'
+    check: '去引号后必须是 64 个字符的小写十六进制（[0-9a-f]）；大写、长度不符、含非十六进制字符一律拒绝（不做大小写归一）'
+    check_extra: '必须与装载侧实际 base 产物的 SHA-256 逐字相等，否则拒绝装载（I3）'
+    source: <internal-workdir>/CONTRACT-R7-B.md:92
+
+  - name: compiler
+    index: 8
+    type: quoted
+    required: true
+    meaning: '写侧编译器摘要；写侧口径 = Version.NAME + 单个空格 + Version.VERSION'
+    check: '去引号后必须非空；与装载侧编译器摘要不等时拒绝装载（不做前缀/包含匹配）'
+    source: <internal-workdir>/CONTRACT-R7-B.md:93
+    program_source: core-vm/src/main/kotlin/com/eratw/port/core/Version.kt:5-6
+
+  - name: patch-functions
+    index: 9
+    type: int
+    required: true
+    meaning: '本补丁新增的函数条数'
+    check: '>= 0；必须等于补丁体 .erbc 的 functions.size，否则拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7-B.md:94
+
+  - name: patch-statements
+    index: 10
+    type: int
+    required: true
+    meaning: '本补丁新增的语句条数'
+    check: '>= 0；必须等于补丁体 .erbc 的 statementCount，否则拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7-B.md:95
+
+  - name: patch-strings
+    index: 11
+    type: int
+    required: true
+    meaning: '本补丁新增的字符串条数'
+    check: '>= 0；必须等于补丁体 .erbc 的 stringCount，否则拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7-B.md:96
+
+  - name: patch-longs
+    index: 12
+    type: int
+    required: true
+    meaning: '本补丁新增的常量条数'
+    check: '>= 0；必须等于补丁体 .erbc 的 longCount，否则拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7-B.md:97
+
+  - name: patch-exprs
+    index: 13
+    type: int
+    required: true
+    meaning: '本补丁新增的表达式节点条数'
+    check: '>= 0；必须等于补丁体 .erbc 的 exprCount，否则拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7-B.md:98
+
+  - name: entry-function
+    index: 14
+    type: quoted
+    required: true
+    meaning: '补丁入口函数名；写侧大写归一后落盘'
+    check: '去引号后必须非空；必须是大写归一形态（与 CodeBuilder.declareFunction 的 uppercase 同口径）；必须能在补丁体函数表里命中，否则拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7-B.md:99
+    normalize_evidence: eratw-android/specs/erbc-format.md:280
+
+  - name: '---'
+    index: 15
+    type: terminator
+    required: true
+    meaning: '头结束标记；其后是 .erbc 原始字节'
+    check: '必须出现在 entry-function 之后、且必须存在；缺失即拒绝；其后必须至少有一个字节'
+    source: <internal-workdir>/CONTRACT-R7-B.md:100
+
+# ---------------------------------------------------------------------------
+# 三、校验口径（读侧）
+# ---------------------------------------------------------------------------
+validation:
+  header_shape:
+    - '按 fields 的 index 升序逐行消费：第 i 行必须是 fields[i].name（顺序错乱即拒绝，不重排、不补齐）'
+    - '每个字段必须恰好出现一次（重复即拒绝；缺一即拒绝）'
+    - '除 fields 列出的 16 项外出现任何键即拒绝（未知字段不做忽略）'
+    - '`---` 必须独占一行；其后的全部字节（含 0 字节）原样作为补丁体'
+  integer:
+    - '十进制字面量，无符号位、无前导 +、无前导 0（`0` 本身除外）、无 0x 前缀'
+    - '必须 >= 0（负计数一律拒绝）'
+    - '超出 Int 范围即拒绝（不截断、不转 Long）'
+  quoted_string:
+    - '必须是双引号串；引号未闭合即拒绝'
+    - '引号内不做转义解释（v1 的五个 quoted 字段取值域都不含引号与换行）'
+  identity:
+    - '七项 base-* 计数 + base-sha256 + compiler + erbc-patch 逐项比对；任一项不符即拒绝装载'
+    - '错误消息必须点名不符的是哪一项，并给出期望 vs 实际（I3）'
+  body:
+    - '补丁体必须能被 .erbc reader 完整装载（magic / version / sectionCount / flags / 段自洽 / 逐条判界全过）'
+    - '补丁体的容器 version 必须是 1 或 2；更高版本按 erbc-format.md:527-528 直接拒绝'
+  all_or_nothing:
+    - '头解析失败 / 补丁体缺失 / 版本过高 / 身份不符 / 补丁体装载失败 ⇒ 抛错，**不返回半成品对象**（I5）'
+    - '装载链任一步失败 ⇒ 整体回退到无补丁模式，禁止半装载（ADR-011 决策 2）'
+  determinism:
+    - '同一份模型两次 write 逐字节相同'
+    - 'write 之后必须立刻 read 回来校验一次（I8）'
+
+# ---------------------------------------------------------------------------
+# 四、负向形态（一律拒绝；每条都要有对应用例，错误消息必须可定位）
+# ---------------------------------------------------------------------------
+negative_forms:
+  - id: N1
+    form: '字段缺失（16 项里少任意一项）'
+    expected: '拒绝；消息点名缺失的字段名'
+    source: <internal-workdir>/CONTRACT-R7-B.md:107
+  - id: N2
+    form: '字段重复（同一 name 出现两次）'
+    expected: '拒绝；消息点名重复的字段名'
+    source: <internal-workdir>/CONTRACT-R7-B.md:107
+  - id: N3
+    form: '顺序错乱（任意两项互换）'
+    expected: '拒绝；消息给出期望字段名 vs 实际字段名'
+    source: <internal-workdir>/CONTRACT-R7-B.md:107
+  - id: N4
+    form: '未知字段（fields 之外的任何键）'
+    expected: '拒绝；消息点名该未知键'
+    source: <internal-workdir>/CONTRACT-R7-B.md:107
+  - id: N5
+    form: '版本高于 2（erbc-patch 3 及以上）'
+    expected: '拒绝；不猜、不按 v2 解释'
+    source: <internal-workdir>/CONTRACT-R7-B.md:85、:107
+  - id: N5b
+    form: '版本 1 的旧产物（`mods/` 里的 .patch 跨 app 版本存活）'
+    expected: '照常装载；private-dims 记录按 v1 形（无 isFloat / 无浮点初值）解析，其余字段照旧'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/patch/PatchHeader.kt（PrivateDimsCodec.decode 的版本门控）
+  - id: N6
+    form: '`---` 缺失（头部直接接到补丁体字节，或头在文件尾结束）'
+    expected: '拒绝；消息说明缺少终止行'
+    source: <internal-workdir>/CONTRACT-R7-B.md:107
+  - id: N7
+    form: '负计数（任意 int 字段为负数）'
+    expected: '拒绝；消息点名该字段与值'
+    source: <internal-workdir>/CONTRACT-R7-B.md:107
+  - id: N8
+    form: 'base-sha256 形态不合法（大写、长度非 64、含非十六进制字符）'
+    expected: '拒绝；不做大小写归一'
+    source: <internal-workdir>/CONTRACT-R7-B.md:92
+  - id: N9
+    form: '身份不符（任一 base-* / sha / compiler / 版本项与装载侧 base 不一致）'
+    expected: '拒绝装载并提示重编；消息点名不符项 + 期望 vs 实际'
+    source: <internal-workdir>/CONTRACT-R7-B.md:105
+  - id: N10
+    form: '补丁体字节缺失或截断（`---` 后无字节 / .erbc 装载抛错）'
+    expected: '拒绝；不返回半成品对象'
+    source: <internal-workdir>/CONTRACT-R7-B.md:106
+  - id: N11
+    form: '计数与补丁体不符（patch-* 与补丁体 .erbc 的实际读数不等）'
+    expected: '拒绝；消息点名不符的 patch-* 字段'
+    source: <internal-workdir>/CONTRACT-R7-B.md:105
+
+# ---------------------------------------------------------------------------
+# 五、与 CONTRACT-R7 §1.6 不变量的对应
+# ---------------------------------------------------------------------------
+invariants:
+  - id: I3
+    name: 补丁身份绑定
+    how: '本规约的七项 base-* + base-sha256 + compiler + erbc-patch 即 I3 的「补丁头字段」全集；任一不符即拒绝装载'
+    source: <internal-workdir>/CONTRACT-R7.md:119
+    local: <internal-workdir>/CONTRACT-R7-B.md:105
+  - id: I5
+    name: 全或无
+    how: '头部解析与补丁体装载都不得返回半成品对象；失败整体回退到无补丁模式，禁止半装载'
+    source: <internal-workdir>/CONTRACT-R7.md:121
+    local: <internal-workdir>/CONTRACT-R7-B.md:106
+  - id: I8
+    name: 写读往返
+    how: 'write 之后立刻 read 再 write，两次字节完全相同（不是「字段相等」）；同一模型两次 write 亦逐字节相同'
+    source: <internal-workdir>/CONTRACT-R7.md:124
+    local: <internal-workdir>/CONTRACT-R7-B.md:104、:108
+  - id: I1
+    name: 零补丁路径逐位等价
+    how: '无 mods/ 时不构造任何 PatchHeader；本规约只描述「有补丁」的形态，零补丁路径不经过它'
+    source: <internal-workdir>/CONTRACT-R7.md:117
+  - id: I4
+    name: base 读数零漂移
+    how: '七项 base-* 是**只读快照**：本规约禁止读侧回写 base 的任何计数（拼接前后逐项不变）'
+    source: <internal-workdir>/CONTRACT-R7.md:120
+
+# ---------------------------------------------------------------------------
+# 六、与容器规约的边界（不越界）
+# ---------------------------------------------------------------------------
+container_boundary:
+  must_not_touch:
+    - core-vm/src/main/kotlin/com/eratw/port/core/code/ErbcFormat.kt
+    - core-vm/src/main/kotlin/com/eratw/port/core/code/ErbcReader.kt
+    - core-vm/src/main/kotlin/com/eratw/port/core/code/ErbcWriter.kt
+    - core-vm/src/main/kotlin/com/eratw/port/core/loader/BootMetadata.kt
+  reason: '补丁体 = 内嵌完整合法 .erbc，不是新容器；容器侧一个字节都不改'
+  source: <internal-workdir>/CONTRACT-R7-B.md:111
+
+# ---------------------------------------------------------------------------
+# 七、未定项（如实登记，不假装已定）
+# ---------------------------------------------------------------------------
+todo_verify:
+  - id: T1
+    item: 'quoted 字段的转义规则'
+    detail: 'v1 的三个 quoted 字段（base-sha256 / compiler / entry-function）取值域都不含引号、反斜杠与换行，因此 v1 未定义转义序列。若将来要放自由文本（如 compiler 带引号），必须先定义转义并升 erbc-patch 版本，不得就地放宽。'
+  - id: T2
+    item: 'base-functions 的取值口径'
+    detail: '契约字段表写「base 的 functionCount」，但 Program 无同名访问器（core/code/Program.kt:567 是构造期 List<FunctionInfo>）。本规约按 functions.size 定口径；若 L1 后续新增 functionCount 访问器，须同步本文件与契约，不许两边各取一个数。'
+  - id: T3
+    item: 'entry-function 与补丁入口的语义'
+    detail: '本规约只定「必须是补丁体函数表里存在的大写归一函数名」；「装载后谁来调它、何时调」不在格式面（归 ADR-011 的装载链与后续波次）。'
+
+
+# ---------------------------------------------------------------------------
+# 八、勘误追加（2026-11-04，wave/981b 4.981 审查波）：尾部可选段的已实现形态
+# ---------------------------------------------------------------------------
+optional_segments_erratum:
+  erratum_context: >-
+    validation.header_shape 第 3 条「除 fields 列出的 16 项外出现任何键即拒绝（未知字段不做忽略）」
+    已被 R7-E1 裁定放宽为「可识别的未知键跳过、值跟字段名走」；实现
+    （core-vm/src/main/kotlin/com/eratw/port/core/patch/PatchHeader.kt 的 PatchHeaderCodec.parse）
+    按放宽口径运行，重复字段仍拒绝、必需字段缺一仍拒绝。本节为勘误追加，不改上方原文。
+  segments:
+    - name: private-dims
+      since: v1（R7-E1）；记录形自 v2 带浮点原子（见 erbc-patch 的 version_history）
+      carrier: '单行 "private-dims <引号串>"；载荷 = 每条声明一行（LF 分隔,整体 JSON 风格转义进引号串）'
+      omit_when_empty: '空表整段省略 —— 头文本与 15 字段形逐字节相同'
+      codec: PatchHeader.kt 的 PrivateDimsCodec
+    - name: function-metas
+      since: 'v2 载体上追加的尾部可选段（尾部可选段的追加不需要升版本号，与 private-dims 同一条裁定）'
+      purpose: >-
+        补丁函数 per-function 元数据：#FUNCTION / #FUNCTIONS / #FUNCTIONF 的方法与返回通道位、
+        #LOCALSIZE / #LOCALSSIZE / #LOCALFSIZE 的声明值。这些声明只活在编译期 FuncMeta 上
+        （.erbc 容器函数记录不承载，补丁没有 .meta 侧车），不落盘时装载侧按缺省重建 ——
+        #FUNCTIONF 返回恒 0、#FUNCTIONS 恒空串、#LOCALFSIZE 退默认 10（静默错值家族）。
+      carrier: '单行 "function-metas <引号串>"；载荷 = 每条记录一行（LF 分隔）：
+        <offset> "<name>" <isMethod> <returnsStr> <returnsFloat> <floatLocalSize> <localSize> <localsSize>'
+      sparse: '只记六项任一非缺省的函数；offset = 补丁窗口内函数序（0 基，绝对下标 = base-functions + offset），name = 补丁 Program 函数名（事件成员 = 事件名#绝对下标形）'
+      gates:
+        - 'offset 必须落在 [0, patch-functions) 且不重复（构造期拒）'
+        - '三个尺寸域 0..65535（FuncMeta 16 位域同源）'
+        - 'returnsFloat 只允许与 isMethod 同真（与侧车 function 行同一道闸）'
+      loader_crosscheck: >-
+        装载侧（ModPatchLoader.harvestFunctionMetas）按 offset 与 name 两把钥匙和补丁体逐条互证，
+        对不上 = 产物损坏，整体回退并点名（I6 禁静默错值）。
+      omit_when_empty: '空表整段省略 —— 全部函数六项缺省（纯 @label 包的常态）时头文本与无段形逐字节相同'
+      consumer: >-
+        GameSession.buildPatchFunctionMetas（core/proc）按本表覆盖缺省元数据 —— 该消费接线
+        2026-11-04 时尚未落（core/proc 不属 patch/loader 文件面，见 wave/981b 交付报告「需组长接线」）；
+        接线前本段数据随包存活、装载面可读（ModPatchLoader.Result.functionMetas）。
+      codec: PatchHeader.kt 的 FunctionMetasCodec

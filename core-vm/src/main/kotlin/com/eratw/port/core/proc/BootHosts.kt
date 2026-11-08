@@ -51,7 +51,7 @@ import java.nio.file.StandardOpenOption
  * TODO(verify)：原版 `Directory.EnumerateFiles` 的返回序依赖文件系统；这里 `sorted()`
  * 以保证可复现。若资源加载序影响结果，需要以 PC 实机顺序为准。
  */
-class RootedFileOps(root: Path) : DirectoryProbeFileOps, BinaryFileOps {
+class RootedFileOps(root: Path) : DirectoryProbeFileOps, BinaryFileOps, FileRootReadout {
 
     private val base: Path = root.toAbsolutePath().normalize()
 
@@ -138,6 +138,35 @@ class RootedFileOps(root: Path) : DirectoryProbeFileOps, BinaryFileOps {
     }.getOrDefault(false)
 
     /**
+     * 只读读数出口（2026-11-05 report-sqlroot）：解释「这一根会怎么解析 [path]」。
+     *
+     * **不加行为、不改判停**：解析判定整体复用同一个私有 [resolvePath]（本方法只是再跑一遍
+     * 纯函数 + 存在性 stat），读/写/存在性各路径的返回值与接线前逐字相同。它存在的唯一理由：
+     * `resolvePath` 出根即 null，调用方（如 `SqlMethods.kt:181` 的「找不到文件」抛点）
+     * 事后无法区分「根内没有这个文件」与「路径被越界闸拦掉」，也无法看出**试的是哪个根**
+     * （2026-11-04 装置红「SQL_IMPORT_MAP_XML：找不到文件 plugins/tw_csv_chs.xml」的判读代价）。
+     */
+    override fun describeReadAttempt(path: String): FileReadAttempt = runCatching {
+        val abs = resolvePath(base, path)
+        // resolvePath 给 null 的三个来源里，「出根被拒」的判据 = 路径本身合法且非空。
+        // 与 resolvePath 的前两行同式（那里空串与 Path.of 失败先返回 null）；这里只为
+        // **归因**重算一次谓词，不改写任何解析结果。
+        val rel = path.replace('\\', '/')
+        val parsable = rel.isNotEmpty() && runCatching { Path.of(rel) }.isSuccess
+        FileReadAttempt(
+            request = path,
+            root = base.toString(),
+            resolved = abs?.toString(),
+            rejectedOutOfRoot = abs == null && parsable,
+            regularFile = abs != null && runCatching { Files.isRegularFile(abs) }.getOrDefault(false),
+            isDirectory = abs != null && runCatching { Files.isDirectory(abs) }.getOrDefault(false),
+        )
+    }.getOrElse {
+        // 读数出口自我要求同 SaveDiagnostics：永远不抛，做不到就给「无从判读」的形状。
+        FileReadAttempt(path, base.toString(), null, rejectedOutOfRoot = false, regularFile = false, isDirectory = false)
+    }
+
+    /**
      * Windows 通配 → 正则：`*` = 任意串、`?` = 单个字符（其余字符字面量）。
      *
      * 对应原版 `Directory.EnumerateFiles(validPath, searchPattern, searchOption)`
@@ -159,6 +188,35 @@ class RootedFileOps(root: Path) : DirectoryProbeFileOps, BinaryFileOps {
         sb.append('$')
         return Regex(sb.toString())
     }
+}
+
+/**
+ * 一次路径解析的**判读快照**（只描述，不参与任何读写判定）。
+ *
+ * 消费方：`core/diag/FileReadTrail`（「找不到文件 X」族的报告读数）。字段口径：
+ * - [root] null = 该 FileOps 不是按根解析的实现（自定义宿主，如单测桩）；
+ * - [resolved] null 且 [rejectedOutOfRoot] true = 出根被拒（越界闸生效）；
+ * - [resolved] null 且 [rejectedOutOfRoot] false = 空串/非法路径，resolvePath 的前两行出口。
+ */
+data class FileReadAttempt(
+    val request: String,
+    val root: String?,
+    val resolved: String?,
+    val rejectedOutOfRoot: Boolean,
+    val regularFile: Boolean,
+    val isDirectory: Boolean,
+)
+
+/**
+ * 文件宿主的**只读读数能力位**（2026-11-05 report-sqlroot）：给出「若按本实现解析 [path]，
+ * 会试哪个根、解析到哪、是否被出根闸拒绝、落点现场是什么」。
+ *
+ * 与 [DirectoryProbeFileOps] / [BinaryFileOps] 同一个接线形状：函数层用
+ * `ops as? FileRootReadout` 选通道，未实现的实现（自定义宿主桩）拿不到读数，
+ * 读数记「无根」而**绝不抛**——它只做判读，读/写/存在性的任何判定都不经过它。
+ */
+interface FileRootReadout {
+    fun describeReadAttempt(path: String): FileReadAttempt
 }
 
 /**

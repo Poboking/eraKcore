@@ -1,5 +1,6 @@
 package com.eratw.port.core.save
 
+import com.eratw.port.boot.CorpusProfile
 import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.EvalContext
 import com.eratw.port.core.expr.Value
@@ -30,6 +31,13 @@ import kotlin.test.assertTrue
  * - 名字表：`VarExt*.csv` 的六条指令（ConstantData.cs:1346-1386）；
  * - `LOADCHARA` 的 `RESULT = 0/1`（VariableEvaluator.cs:2288 / :2316）；
  * - 读档后的 `ClearFunctionList + LoadData_DataLoaded`（Process.cs:1860-1861）。
+ *
+ * ## 真语料读数按根取列（savecorpus 波，2026-11-06）
+ *
+ * 只有 [真语料的 VarExt SAVE_DTS 按根取列] 一条碰真语料：`CSV/VarExtGameData.csv` 的生效行数
+ * 随语料版本变（4.980 = 2 条 `SAVE_DTS`、4.981 = 3 条，多一条 `QOL_FISH_INSTANCE`），
+ * 故期望值一律 `when (CorpusProfile)` 两列；判根失败 / 语料根不在位 ⇒ **AssertionError 判红**
+ * （旧版 `assumeTrue` 跳过：变量一缺整条用例静默通过）。注释行的布局两根一致（见该用例 KDoc）。
  */
 class SaveEmPoolTest {
 
@@ -247,7 +255,8 @@ class SaveEmPoolTest {
 
     /**
      * `VarExt*.csv` 的六条指令（大小写敏感精确匹配、后段 Trim、`;` 注释跳过、
-     * `TEST.ERB` 这类非 `VarExt` 前缀的文件不读）。语料真实文件只有两条 `SAVE_DTS`。
+     * `TEST.ERB` 这类非 `VarExt` 前缀的文件不读）。语料真实文件的生效行按根取列
+     * （4.980 两条 / 4.981 三条 `SAVE_DTS`，见 [真语料的 VarExt SAVE_DTS 按根取列]）。
      */
     @Test
     fun `VarExt 六条指令解析`(@org.junit.jupiter.api.io.TempDir root: Path) {
@@ -296,20 +305,52 @@ class SaveEmPoolTest {
     }
 
     /**
-     * 真语料读数：`ERATW_GAMEDIR/CSV/VarExtGameData.csv`（带 BOM）只有两条 `SAVE_DTS`，
-     * 与 `spec/save-format.md` 记录的实机存档 EM 段（`DT_UFUFU_LOG`、`DT_UFUFU_M_LOG`）一致。
-     * 语料不在位时按[假设失败]跳过（不伪造读数）。
+     * 真语料读数：`ERATW_GAMEDIR/CSV/VarExtGameData.csv`（带 BOM、末尾无换行）的生效行按根取列：
+     * - **4.980**：2 条 `SAVE_DTS`（`:37 DT_UFUFU_LOG`、`:38 DT_UFUFU_M_LOG`），38 段 / 34 非空 / 32 注释；
+     * - **4.981**：3 条（多 `:39 SAVE_DTS, QOL_FISH_INSTANCE`，生活系统大修 DLC 的钓鱼实例表，
+     *   `ERB/DLC/生活系统大修/0_生活系统_变量.ERH:139` 注明「随存档，见 VarExtGameData.csv」），
+     *   39 段 / 35 非空 / 32 注释。
+     *
+     * 两根的注释行布局逐字相同（`SAVE_MAPS`/`SAVE_XMLS`/`GLOBAL_*`/`STATIC_*` 全是 `;` 注释）
+     * ⇒ 后三条断言（maps/xmls 空、global 空）两根同值，实读。
+     *
+     * 语料根不在位 / 判不出 ⇒ **AssertionError 判红**（旧版两枚 `assumeTrue` 静默跳过，是假闸）。
      */
     @Test
-    fun `真语料的 VarExt 只有两个 SAVE_DTS`() {
-        val gamedir = System.getenv("ERATW_GAMEDIR")
-        org.junit.jupiter.api.Assumptions.assumeTrue(!gamedir.isNullOrBlank(), "缺少 ERATW_GAMEDIR")
-        val csv = Path.of(gamedir, "CSV")
-        org.junit.jupiter.api.Assumptions.assumeTrue(Files.isDirectory(csv), "缺少 $csv")
+    fun `真语料的 VarExt SAVE_DTS 按根取列`() {
+        val env = System.getenv("ERATW_GAMEDIR")
+            ?: run {
+                // 公开仓无外部语料/样本：按公开适配口径跳过（上游为硬判红）。
+                org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_GAMEDIR：跳过真语料 VarExt 判据")
+                throw AssertionError("unreachable")
+            }
+        val gamedir = Path.of(env)
+        val csv = gamedir.resolve("CSV")
+        if (!Files.isDirectory(csv)) throw AssertionError("ERATW_GAMEDIR=$env 下没有 CSV 目录：它不是语料游戏根")
+        val file = csv.resolve("VarExtGameData.csv")
+        if (!Files.isRegularFile(file)) throw AssertionError("语料缺 $file：VarExt 判据无根可对")
+        val profile = CorpusProfile.detect(gamedir)
+        val (segments, nonEmpty, dts) = when (profile) {
+            // 4.980 列：本路 2026-11-06 逐行实读（37 个 LF、末尾无换行 ⇒ 38 段；生效行 :37/:38）
+            CorpusProfile.V4_980 -> Triple(38, 34, listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG"))
+            // 4.981 列：39 段 / 35 非空，生效行 :37/:38/:39
+            CorpusProfile.V4_981 -> Triple(39, 35, listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG", "QOL_FISH_INSTANCE"))
+        }
+
+        val lines = String(Files.readAllBytes(file), Charsets.UTF_8)
+            .trimStart(Char(0xFEFF)).split('\n').map { it.trimEnd('\r') }
+        assertEquals(segments, lines.size, "按 LF 切分的段数（语料 ${profile.nowVersion}，末尾无换行）")
+        val trimmed = lines.map { it.trim() }
+        assertEquals(nonEmpty, trimmed.count { it.isNotEmpty() }, "非空行")
+        assertEquals(segments - nonEmpty, trimmed.count { it.isEmpty() }, "空行（两根同值，实读：差恒为 4）")
+        assertEquals(32, trimmed.count { it.startsWith(";") }, "分号注释行（两根同值，实读）")
+
         val p = EmSaveSets.parse(csv)
-        assertEquals(listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG"), p.save.dts)
-        assertTrue(p.save.maps.isEmpty(), "语料没有 SAVE_MAPS")
-        assertTrue(p.global.isEmpty, "语料没有 GLOBAL_* 指令")
+        assertEquals(dts, p.save.dts, "SAVE_DTS 生效条数按根取列（语料 ${profile.nowVersion}）")
+        assertTrue(p.save.maps.isEmpty(), "语料没有生效的 SAVE_MAPS（两根同值，实读）")
+        assertTrue(p.save.xmls.isEmpty(), "语料没有生效的 SAVE_XMLS（两根同值，实读）")
+        assertTrue(p.global.isEmpty, "语料没有 GLOBAL_* 指令（两根同值，实读）")
+        assertTrue(p.staticSets.isEmpty, "语料没有 STATIC_* 指令（两根同值，实读）")
     }
 
     // ------------------------------------------------------------------

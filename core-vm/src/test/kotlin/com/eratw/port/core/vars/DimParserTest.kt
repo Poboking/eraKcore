@@ -201,6 +201,28 @@ class DimParserTest {
     }
 
     @Test
+    fun `2^63 字面量按 C# x64 越界口径落最高位而不是饱和成一堆低位`() {
+        // 语料实况：`ResourceManager.ERH:4-13` 的 `BIT:64 = 1p63` 与 `DIM.ERH:662` 的
+        // `#DIM CONST 場所_入口 = 1p63` 都取这一个值。C# x64 的 `(long)(double)2^63` 是
+        // 「整数不定值」= long.MinValue（**只有** bit63）；JVM 的 `Double.toLong()` 按 JLS 5.1.3
+        // 饱和给 MAX_VALUE（bit0..62 全 1）。两侧都过不了范围闸以外的值，唯独 2^63 这一支分叉，
+        // 而它正是位掩码的最高位：饱和口径下「测最高位」变成「测低 63 位任意一位」，
+        // 图像池那张 6400 位的位图（`ResourceManager.ERH:23`）与场所位掩码成片错。
+        val bit64 = p("CONST A = 1p63").defaultsInt!![0]
+        assertEquals(Long.MIN_VALUE, bit64)
+        assertEquals(1L shl 62, p("CONST B = 1p62").defaultsInt!![0], "相邻的合法值不许被带歪")
+        assertFailsWith<CodeEE> { p("CONST C = 1p64") }
+
+        // 真正要锁的是**用法**：置位后只有最高位被置，低 63 位一尘不染。
+        val lower63 = -1L ushr 1
+        var v = 0L
+        v = v or bit64
+        assertEquals(bit64, v and bit64, "置上去的最高位要读得回来")
+        assertEquals(0L, v and lower63, "低 63 位一个都不许被带脏（旧饱和口径在这里当场红）")
+        assertEquals(0L, (v and bit64.inv()), "清掉最高位后应当归零")
+    }
+
+    @Test
     fun `宏体面值同样走 ReadInt64`() {
         // spec: ConstantData.cs:1523-1565 tryToInt64 → LexicalAnalyzer.ReadInt64（:1557-1558）
         val cfg = DimParseConfig(

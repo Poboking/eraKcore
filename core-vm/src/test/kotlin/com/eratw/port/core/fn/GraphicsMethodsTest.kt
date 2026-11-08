@@ -140,8 +140,9 @@ class GraphicsMethodsTest {
         assertEquals(1L, gvI(ctx, "GDISPOSE", 10))
 
         // 649 行同时验证存档路径语义：{Config.SavDir}img{index:0000}.png（:9471-9474）
+        // 本夹具未装 SaveWiring、条目表出厂 UseSaveFolder=false（ConfigData.cs:97）⇒ SavDir = 根目录
         val ops = ctx.host.fileOps as GvFileOps
-        assertTrue(ops.files.containsKey("sav/img0000.png"), "GSAVE 路径应为 sav/img0000.png，实际 ${ops.files.keys}")
+        assertTrue(ops.files.containsKey("img0000.png"), "GSAVE 路径应为根目录 img0000.png，实际 ${ops.files.keys}")
     }
 
     /**

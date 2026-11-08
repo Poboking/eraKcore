@@ -2,6 +2,7 @@ package com.eratw.port.render.adapter
 
 import com.eratw.port.core.fn.ColorNames
 import com.eratw.port.core.host.Alignment
+import com.eratw.port.core.host.CellWidth
 import com.eratw.port.render.Grid
 import com.eratw.port.render.RenderLine
 import com.eratw.port.render.RunKind
@@ -51,7 +52,8 @@ import com.eratw.port.render.glyph.CellMetrics
  * - `<font bcolor=...>` 改的是**焦点态字色**（[TextRun.focusFore]，原文 `ButtonColor`）：
  *   `HtmlManager.cs:131-149` 的 `GetSS` 把帧里的 `BColor` 交给 `StringStyle.ButtonColor`，
  *   `ConsoleStyledString.cs:105-111` 在 `isFocus` 时用它画字；它**不是**背景色，
- *   所以不写进 [TextRun.back]（`back` 是控制台背景色的行快照）；
+ *   所以不写进 [TextRun.back]（div 的块底色走 `RenderLine.divBlocks` 覆盖块，
+ *   CONTRACT-HTMLDIV-B1 D4）；
  * - `</font>` 整帧出栈还原 fore/focusFore/fontName（原版帧是
  *   `HtmlAnalzeStateFontTag { Color, BColor, FontName }` 的整体出栈
  *   （`HtmlManager.cs:1655-1670` 缺属性继承外层、`:998-1004` 的 `RemoveAt(Count - 1)`）；
@@ -110,7 +112,7 @@ class HtmlRunFlatten(
     private var graphicEmitted = false
 
     private var fore = DEFAULT_FORE
-    private var back = DEFAULT_BACK
+    private var back: Int? = null
     private var focusFore = TextRun.DEFAULT_FOCUS_COLOR
     private var styleMask = 0
     private var fontName = DEFAULT_FONT
@@ -158,6 +160,52 @@ class HtmlRunFlatten(
      */
     private var tagTitle: String? = null
 
+    /**
+     * 当前按钮组标签的 `pos` 值（`<button pos='N'>` / `<nonbutton pos='N'>` 的 N，
+     * 原版 `HtmlAnalzeStateButtonTag.PointX` + `PointXisLocked`，HM :1533-1534）。
+     *
+     * 原版语义（POS-WIRE 落地的三条，全部在 cssToButton / 布局面收口）：
+     * - `cssToButton` 对带锁标签整组 `LockPointX(state.LastButtonTag.PointX)`
+     *   （HM :848-851）；`LockPointX` 落 `PointX = rel_px * Config.FontSize / 100`
+     *   （ConsoleButtonString.cs:157-163）—— **行左缘起算的绝对像素**，与 Alignment 无关
+     *   （`SetAlignment` 的 `ShiftPositionX` 对锁定按钮照移不误，ConsoleDisplayLine.cs:62-90、
+     *   ConsoleButtonString.cs:307-315），且原版要求 nobr + 左对齐否则串尾抛 CodeEE
+     *   （HM :683-697；严格路 `HtmlStrictParser` 已复刻该校验，到本层的一律已合法）。
+     * - 游标接力：`setWidthToButtonList` 逐组 `CalcPointX(pointx); pointx = PointX + Width`
+     *   （PrintStringBuffer.cs:393-411）—— 锁定组**之后**的内容从「锁定落点 + 组宽」继续，
+     *   组前的内容照常从 0 推进；锁定点在游标之前（重叠）也**不夹取**，后者原样画上去。
+     * - 折行判 `PointX + Width <= DrawableWidth`（PrintStringBuffer.cs:217）里的 PointX
+     *   就是这个锁定值。
+     *
+     * 本层把锁定值落成**组首段之前的带号间隔段**（[padForPos]）：目标列 =
+     * `graphicSize(N, isPx=false).second`（与 img 尺寸同一把「字号百分比 → 半角格」的尺），
+     * 正 gap 交空白推进、负 gap 走 `InlineGraphic.Space` 的负宽回退（XRAY 同款机制，
+     * `DisplayList.prepare` 对负 space 只回退列游标不产命令）—— 原版允许锁定点落在当前
+     * 游标之后或之前（语料 `カラム機能.ERB:169` 一行的三个列块 pos 就是 2050/2050/0 非单调），
+     * 网格模型靠负 space 才能两向都表达。
+     */
+    private var tagPos: Int? = null
+
+    /**
+     * pos 组还没落过**任何内容段**（[padForPos] 只在组首段前插一次间隔段）。
+     *
+     * 置位时机 = 开标签处（此刻 [rectBands] 必为空：`openTag` 的 `button` / `nonbutton`
+     * 分支都先 `flushCurrentText` 把条带清空）⇒ padForPos 时缓冲里的条带只可能是本组自己的
+     * 首段内容，间隔段必须落在它们之前，所以 padForPos **不** flush 条带。
+     */
+    private var posPending = false
+
+    /**
+     * 行级列游标种子：本串 HTML 之前、**同一显示行**上其他 run 已占的格数。
+     *
+     * 直印 HTML 行（`htmlOption == false`）的段恒是行首段，种子恒 0；toPrintBuffer 形态
+     * （`htmlOption == true`）的 HTML 段可以排在 PRINT 缓冲行的中段，原版那里 pos 锁定的是
+     * **整条缓冲行**的绝对点位（锁定值随 `ConsoleButtonString` 进打印缓冲、随普通 Flush
+     * 一起排游标，PrintStringBuffer.cs:393-411 不区分段来源），所以 gap 要从行首算起。
+     * 种子由 [flattenAll] 按行内前序 run 累加（与 `DisplayList.prepare` 同一宽度式）。
+     */
+    private var cursorSeed = 0
+
     /** 4 参 `<shape type='rect'>` 的像素级条带缓冲（见 [appendRectBand] / [flushRectBands]）。 */
     private val rectBands = ArrayList<RectBand>()
 
@@ -172,7 +220,7 @@ class HtmlRunFlatten(
      * （`:998-1004`）。**styleMask 不入栈**：原版 FontStyle 是独立异或字段、font 标签
      * 从不动它（HtmlManager.cs:964-980），`<font>` 里开的 `<b>` 要活到自己的 `</b>`。
      */
-    private class FontFrame(val fore: Int, val back: Int, val focusFore: Int, val fontName: String)
+    private class FontFrame(val fore: Int, val back: Int?, val focusFore: Int, val fontName: String)
 
     private val fontStack = ArrayList<FontFrame>()
 
@@ -196,7 +244,13 @@ class HtmlRunFlatten(
     private var directNobr = false
 
     /** 展平一条 run；非 HTML 段原样返回（一条都不动）。 */
-    fun flatten(run: TextRun): List<TextRun> {
+    fun flatten(run: TextRun): List<TextRun> = flatten(run, 0)
+
+    /**
+     * 展平一条 run，行级列游标从 [lineCursorCells] 起算（[flattenAll] 对混排行传前序占宽，
+     * 直印行恒 0；语义见 [cursorSeed]）。
+     */
+    private fun flatten(run: TextRun, lineCursorCells: Int): List<TextRun> {
         if (run.kind != RunKind.HTML || run.text.indexOf('<') < 0 && run.text.indexOf('&') < 0) {
             return listOf(run)
         }
@@ -220,6 +274,9 @@ class HtmlRunFlatten(
         buttonValue = null
         buttonId = -1
         tagTitle = null
+        tagPos = null
+        posPending = false
+        cursorSeed = lineCursorCells
         clearButton = false
         Scanner(run.text).scan()
         flush(run)
@@ -272,7 +329,9 @@ class HtmlRunFlatten(
         val result = ArrayList<TextRun>(runs.size)
         for (r in runs) {
             if (r.kind == RunKind.HTML && (r.text.indexOf('<') >= 0 || r.text.indexOf('&') >= 0)) {
-                result.addAll(flatten(r))
+                // 行级游标种子 = 前序 run（含已展平段，pos 间隔段也在内）的占宽和
+                // —— 与 DisplayList.prepare 的逐段累加同式，pos 的绝对点位要从行首算起。
+                result.addAll(flatten(r, cursorCellsOf(result)))
                 if (!r.htmlOption) {
                     // 直印段：把本轮解析出的行级状态收集上去（多段时后段覆盖前段，
                     // 与原版「一串 HTML 一份状态」的逐串产出同序）。
@@ -284,6 +343,19 @@ class HtmlRunFlatten(
             }
         }
         return result
+    }
+
+    /**
+     * 一批 run 的占宽和（格）—— 与 `displaylist/DisplayList.prepare` 的列游标累加
+     * 同一宽度式：图形段取 `InlineGraphic.widthCells`（负 space 照回退），
+     * 文本段取 `Grid.cells`（TAB 展开后逐码元累加）。
+     */
+    private fun cursorCellsOf(runs: List<TextRun>): Int {
+        var col = 0
+        for (r in runs) {
+            col += r.graphic?.widthCells ?: Grid.cells(r.text)
+        }
+        return col
     }
 
     // ------------------------------------------------------------------
@@ -468,10 +540,11 @@ class HtmlRunFlatten(
                 // `bcolor` 是焦点态字色（`StringStyle.ButtonColor`），不是背景色：
                 // `HtmlManager.cs:131-149` 的 `GetSS` 直接把帧里的 `BColor` 交给 buttonColor。
                 attrs["bcolor"]?.let { colorOf(it)?.let { c -> focusFore = c } }
-                // `bgcolor` 是**背景色**（Emuera 的 `<font bgcolor=...>`）：原实现完全没解析，
-                // 于是该段的 `back` 落在出厂 0x000000 或上一段的残留值上 —— 玩家侧看到的就是
-                // 「某些字带了不该有的底色」（2026-10-24 负责人反馈的黄色底）。
-                attrs["bgcolor"]?.let { colorOf(it)?.let { c -> back = c } }
+                // 原版 font 标签的属性白名单只有 color/bcolor/face 三件，其余属性一律抛
+                // CodeEE（HtmlManager.cs:1623-1639 的 default 分支）。曾自造过 `<font bgcolor>`
+                // 往 back 槽塞底色——全语料与子模组 0 处使用、原版查无此属性（2026-11 审查
+                // 时序停背景修复拆除；div 块底色现走 `RenderLine.divBlocks` 覆盖块，
+                // CONTRACT-HTMLDIV-B1 D4）。
                 attrs["face"]?.takeIf { it.isNotEmpty() }?.let { fontName = it }
             }
             "img" -> emitImage(attrs)
@@ -487,6 +560,11 @@ class HtmlRunFlatten(
                 // （`HtmlManager.cs:1547` 只把 `value` 的有无写进 `IsButton`），
                 // 所以没 `value` 的 `<button title>` 在 PC 上照样弹提示。
                 tagTitle = attrs["title"]?.trim()?.takeIf { it.isNotEmpty() }
+                // `pos` 是同一份标签状态上的绝对定位锁（HM :1523-1535 与 title 同处解析，
+                // :848-851 在 cssToButton 随整组落 LockPointX）：value 有无 / clearbutton
+                // 区间都不影响它（原版 `IsButton` 与 pos 互不相干，HM :1547 与 :1533-1534）。
+                tagPos = parsePos(attrs)
+                posPending = tagPos != null
                 val v = attrs["value"]
                 if (v != null && !clearButton) {
                     // 纯数字值落成长整型：与 `PRINTBUTTON` 数值按钮同型（`ButtonLayer`
@@ -499,11 +577,13 @@ class HtmlRunFlatten(
             // `<clearbutton>` 打开：区间内的 `<button>` 降级成不可点文本
             // （HtmlManager.cs:1549-1551 的 `IsButton = false`），标题照旧保留。
             "clearbutton" -> clearButton = true
-            // 不可点的高亮块：只吃 `title`（原版 `IsButton = false` 的同一份状态，
-            // 提示照样落到 `ConsoleButtonString.Title`，HtmlManager.cs:841-847）。
+            // 不可点的高亮块：吃 `title` 与 `pos`（原版 `IsButton = false` 的同一份状态，
+            // 提示与定位锁照样落到 `ConsoleButtonString`，HtmlManager.cs:841-851）。
             "nonbutton" -> {
                 flushCurrentText()
                 tagTitle = attrs["title"]?.trim()?.takeIf { it.isNotEmpty() }
+                tagPos = parsePos(attrs)
+                posPending = tagPos != null
             }
             // p / br / div / button / nonbutton / clearbutton 与任何未知标签：
             // 标记本身丢掉，其间文本保留（见类文档「与 MiniHtml 的分工」）。
@@ -550,17 +630,22 @@ class HtmlRunFlatten(
                     fontName = frame.fontName
                 }
             }
-            // 按钮结束：先把按钮内最后一截文本按 BUTTON 落段，再退回普通文本态。
+            // 按钮结束：先把按钮内最后一截文本按 BUTTON 落段（pos 组的间隔段要在
+            // 这次落段前插，见 [padForPos]），再退回普通文本态。
             "button" -> {
                 flushCurrentText()
                 buttonValue = null
                 buttonId = -1
                 tagTitle = null
+                tagPos = null
+                posPending = false
             }
             // 不可点块结束：先落最后一截文本，再退回普通文本态。
             "nonbutton" -> {
                 flushCurrentText()
                 tagTitle = null
+                tagPos = null
+                posPending = false
             }
             // 作废区间结束：后续 `<button>` 恢复可点（HtmlManager.cs:1021-1027 只清标志）。
             "clearbutton" -> clearButton = false
@@ -586,29 +671,79 @@ class HtmlRunFlatten(
      * `width` 被静默改写。2026-10-26 按 ADR-005 去掉：超宽就按原版溢出裁切，需要「整块
      * 缩进屏」的场景由 `ImageBandMerge`（竖带合并，另有 `bandAvailWidthPx` 参数）负责，
      * 那是显式的合成动作，不再改写单张图的尺寸。
+     *
+     * `srcm` 属性 = 取色遮罩图（原版 `cImageM`，`ConsoleImagePart.cs:44,98-101`），与
+     * `PRINT_IMG` 的第 3 实参同义。空串按「没有遮罩」置 null（`:51-54` 的重建守卫
+     * `!string.IsNullOrEmpty(MappingGraphName)` 与 `:98` 的 `GetSprite` 同口径：空名查不到
+     * 精灵）；非空时原样落到 [InlineGraphic.Image.mappingResource]，本层只填字段，
+     * 命中取色的消费侧在 render-canvas 的 `CanvasConsoleView.mappingColor`。
      */
+    /**
+     * 显式尺寸（img 的 `width`、shape 的单参 param）→ `(物理像素, 占格)`。
+     *
+     * 脚本字号 > 0：script px 由 [CellWidth.graphicScriptPx] 定值（与折行同尺，
+     * 2026-11-05 遗留①），物理宽 = `scriptPx(script px)`、占格 = [CellWidth.graphicCells]；
+     * 百分比形态的基尺从设备字号换到脚本字号再折设备，物理差 ≤1 设备像素。
+     * 脚本字号缺省（0，headless/既有测试）：逐值走改造前的设备尺 ——
+     * px 形态 `scriptPx(num)`、% 形态 `fontPixelSize × num / 100`，
+     * 占格 = `cellsFor(物理宽, 半角格宽)`。
+     */
+    private fun graphicSize(num: Int, isPx: Boolean): Pair<Int, Int> {
+        if (scriptFontPixelSize > 0) {
+            val spx = CellWidth.graphicScriptPx(num.toLong(), isPx, scriptFontPixelSize.toLong())
+            val px = scriptPx(spx.toInt())
+            return px to CellWidth.graphicCells(spx, scriptFontPixelSize.toLong())
+        }
+        val px = if (isPx) scriptPx(num) else metrics.fontPixelSize * num / 100
+        return px to InlineGraphic.cellsFor(px, metrics.cellPixelWidth)
+    }
+
     private fun emitImage(attrs: Map<String, String>) {
         val src = attrs["src"] ?: ""
         val height = mixedNum(attrs["height"])
         val width = mixedNum(attrs["width"])
         val ypos = mixedNum(attrs["ypos"])
         val lineHeight = metrics.fontPixelSize
+        val base = if (src.isEmpty()) null else sizeSource?.destSize(src)
+        val baseHeight = base?.and(0xFFFF) ?: 0
+        // 原版单出口（`ConsoleImagePart.cs:60-65`）：图元取不到 ⇒ `Text = AltText`，整段
+        // 尺寸计算被 `return` 跳过（**显式 width/height 都不生效**），节点按文本画、按文本
+        // 量宽（`:104-115`）。移植侧的「取不到」= 宿主已接线且查表未命中 / 基图高 ≤ 0
+        // （后者原版是 `:69` 整数除零，端口按 ADR-005 登记为 miss，见 HtmlStrict 同一条）。
+        // 宿主未接线时判不了 miss，保持旧口径（见下方 `else` 的见方占位）。
+        if (sizeSource != null && (base == null || baseHeight <= 0)) {
+            emitImageAltText(attrs)
+            return
+        }
         val heightPx = when {
             height == null || height.num == 0 -> lineHeight
             height.isPx -> scriptPx(height.num)
             else -> lineHeight * height.num / 100
         }
-        val base = if (src.isEmpty()) null else sizeSource?.destSize(src)
+        // 显式 width 走 [graphicSize]（脚本尺主路）；缺 width 的纵横比回落没有脚本 px
+        // 可言，照旧设备尺。
+        val explicit = width?.takeIf { it.num != 0 }?.let { graphicSize(it.num, it.isPx) }
         val widthPx = when {
-            width != null && width.num != 0 ->
-                if (width.isPx) scriptPx(width.num) else lineHeight * width.num / 100
+            explicit != null -> explicit.first
             base != null -> {
                 val bw = base ushr 16
-                val bh = base and 0xFFFF
-                if (bh > 0) bw * heightPx / bh else heightPx
+                bw * heightPx / baseHeight
             }
+            // 未接线（sizeSource == null）：判不了「图元在不在」，保留「见方」占位 ——
+            // 这是登记过的偏差（本类调用方的生产 HTML 路恒带尺寸源，见 ConsoleFeed）。
             else -> heightPx
         }
+        // 负尺寸 = 原版的「翻转」形态：`ConsoleImagePart.cs:83-92` 先把 destRect 挪到
+        // `-Width` 再令 `Width = -destRect.Width`（**布局占宽恒为正**）。布局侧取绝对值
+        // 保持原样（与「宽度量」同原版），**镜像信息另落 flipX/flipY**（B2）。
+        // 判据逐符号照 `:83` / `:88`：看的是**折算后**的宽/高是否 < 0 —— 所以
+        // 「width 没给、由负高按纵横比派生」（`:69`）的那一支派生出负宽时同样算水平翻转，
+        // 与「脚本只写了负 height」就两个轴都镜像的原版行为一致。
+        // `ypos` 负值与 height 负值是两件事：前者只是往上摆（`:81`），不翻转。
+        val flipX = widthPx < 0
+        val flipY = heightPx < 0
+        val layoutW = kotlin.math.abs(widthPx)
+        val layoutH = kotlin.math.abs(heightPx)
         val yOffsetPx = when {
             ypos == null -> 0
             ypos.isPx -> scriptPx(ypos.num)
@@ -617,13 +752,51 @@ class HtmlRunFlatten(
         emitGraphic(
             InlineGraphic.Image(
                 resource = src,
-                widthPx = widthPx,
-                heightPx = heightPx,
+                widthPx = layoutW,
+                heightPx = layoutH,
                 yOffsetPx = yOffsetPx,
-                widthCells = InlineGraphic.cellsFor(widthPx, metrics.cellPixelWidth),
+                widthCells = kotlin.math.abs(
+                    explicit?.second ?: InlineGraphic.cellsFor(widthPx, metrics.cellPixelWidth),
+                ),
                 buttonResource = attrs["srcb"]?.takeIf { it.isNotEmpty() },
+                // 取色遮罩图（原版 `cImageM`）：`<img srcm='…'>` 与 `PRINT_IMG` 的第 3 实参同义。
+                // 判据照 `ConsoleImagePart.cs:51-54`（重建 AltText 时 `!string.IsNullOrEmpty` 才写
+                // `srcm=`）与 `:98-101`（`cImageM = AppContents.GetSprite(MappingGraphName)`）：
+                // 空串按「没有遮罩」= null，否则命中路径会去查一个名叫空串的 sprite。
+                mappingResource = attrs["srcm"]?.takeIf { it.isNotEmpty() },
+                flipX = flipX,
+                flipY = flipY,
             ),
         )
+    }
+
+    /**
+     * img 图元 **miss** 的 AltText 回落：把重建的标签文案接回行内当普通文本
+     * （原版 `ConsoleImagePart.cs:60-65` 的 `Text = AltText`；宽度由 `SetWidth` 的文本
+     * 度量给出，`:104-115`）。
+     *
+     * 重建口径与 core 折行侧 [com.eratw.port.core.host.CellWidth.imgAltText] 同一条：
+     * `<img src='…'>` + `srcb`（非 null）/ `srcm`（非空）/ `height`·`width`·`ypos`
+     * （原始 num != 0 才写，`ConsoleImagePart.cs:44-59` + `Utils.cs:364-371`），
+     * 百分比按脚本字号归一（`Config.FontSize`）。属性值用展平层解析出的原文
+     * （[parseAttrs] 不解实体，core 的 `tagAttr` 同样取原文，两边同一串）。
+     */
+    private fun emitImageAltText(attrs: Map<String, String>) {
+        // miss 的 img 也是 pos 组的首段内容（与 [emitShapeAltText] 同判：标签本身入 list 即建按钮）。
+        padForPos()
+        flushCurrentText()
+        fun pair(raw: String?): Pair<Long, Boolean>? =
+            mixedNum(raw)?.let { it.num.toLong() to it.isPx }
+        val alt = InlineGraphic.imgAltText(
+            resource = attrs["src"] ?: "",
+            buttonResource = attrs["srcb"]?.takeIf { it.isNotEmpty() },
+            mappingResource = attrs["srcm"]?.takeIf { it.isNotEmpty() },
+            height = pair(attrs["height"]),
+            width = pair(attrs["width"]),
+            ypos = pair(attrs["ypos"]),
+            fontSizePx = if (scriptFontPixelSize > 0) scriptFontPixelSize else metrics.fontPixelSize,
+        )
+        out.add(TextRun(alt, fore, back, styleMask, fontName, RunKind.TEXT))
     }
 
     /**
@@ -645,18 +818,16 @@ class HtmlRunFlatten(
         when (type) {
             "space" -> if (params.size == 1 && params[0] != null) {
                 val p = params[0]!!
-                val px = pixel(p, lineHeight)
-                emitGraphic(InlineGraphic.Space(InlineGraphic.cellsFor(px, metrics.cellPixelWidth)))
+                emitGraphic(InlineGraphic.Space(graphicSize(p.num, p.isPx).second))
                 return
             }
             "rect" -> when {
                 params.size == 1 && params[0] != null && params[0]!!.num > 0 -> {
-                    val p = params[0]!!
-                    val px = pixel(p, lineHeight)
+                    val (px, cells) = graphicSize(params[0]!!.num, params[0]!!.isPx)
                     emitGraphic(
                         InlineGraphic.Rect(
                             xOffsetPx = 0, yOffsetPx = 0, widthPx = px, heightPx = lineHeight,
-                            colorArgb = color, widthCells = InlineGraphic.cellsFor(px, metrics.cellPixelWidth),
+                            colorArgb = color, widthCells = cells,
                         ),
                     )
                     return
@@ -690,6 +861,9 @@ class HtmlRunFlatten(
      * （ConsoleShapePart.cs:33-44）。
      */
     private fun emitShapeAltText(attrs: Map<String, String>) {
+        // 不可渲染 shape 也是 pos 组的首段内容：间隔段先落（[padForPos] 空组不插的守卫
+        // 不适用 —— shape 标签本身就是内容，与原版「节点入 list 即建按钮」同判，HM :601-604）。
+        padForPos()
         flushCurrentText()
         val sb = StringBuilder("<shape type='").append((attrs["type"] ?: "").lowercase())
         sb.append("' param='")
@@ -780,6 +954,8 @@ class HtmlRunFlatten(
 
     /** 直接落一段图形（不碰条带缓冲，避免 [flushRectBands] 递归回 [emitGraphic]）。 */
     private fun emitGraphicRun(graphic: InlineGraphic) {
+        // pos 组首段是图形（含条带缓冲 flush 出来的 4 参 rect）时，间隔段先落（见 [padForPos]）。
+        padForPos()
         // 负 space：原版 ConsoleSpacePart 的 Width 为负，是真实回退（ConsoleSpacePart.cs:23-33），
         // XRAY 叠图靠它把后续 <img> 拉回立绘起点。文本负载为空串，只占布局游标。
         if (graphic is InlineGraphic.Space && graphic.widthCells < 0) {
@@ -894,7 +1070,66 @@ class HtmlRunFlatten(
         return rectBands[rectBands.size - 1].colorArgb
     }
 
+    // ------------------------------------------------------------------
+    // pos 绝对定位（POS-WIRE P1）
+    // ------------------------------------------------------------------
+
+    /**
+     * `pos='N'` 的取值：原版 `int.TryParse`（HM :1529-1531），解析不出整串报 CodeEE；
+     * 本宽容层不抛，解析不出（空串 / 带 `px` 后缀 / 非数字）就**不锁**、标签其余照旧
+     * （屏上少一次定位好过整行消失；严格路 HtmlStrictParser 已按原版口径拦住畸形值）。
+     */
+    private fun parsePos(attrs: Map<String, String>): Int? = attrs["pos"]?.trim()?.toIntOrNull()
+
+    /**
+     * pos 组首段前的**带号间隔段**（LockPointX 的网格落点）。
+     *
+     * 目标列 = `graphicSize(N, isPx = false).second` —— 与 img/shape 尺寸同一把
+     * 「字号百分比 → 半角格」的尺（`LockPointX` 的 `rel_px * Config.FontSize / 100`，
+     * ConsoleButtonString.cs:159，本层用脚本字号折算，见 [graphicSize] 的双轨 KDoc）。
+     * gap = 目标列 −（行级种子 + 本段已落内容的游标），**不夹取**：
+     *
+     * - gap > 0：插一条正宽 [InlineGraphic.Space]（文本负载铺等量空格，与 [emitGraphicRun]
+     *   的图形段同约定），后续内容从目标列起 —— `setWidthToButtonList` 的接力式
+     *   `pointx = PointX + Width`（PrintStringBuffer.cs:404-405）在网格上的同构。
+     * - gap < 0：插一条**负宽** Space（XRAY 同款列游标回退，`DisplayList.prepare` 对负 space
+     *   只退游标不产命令）—— 原版锁定点可以落在当前游标之前（语料 `カラム機能.ERB:169`
+     *   一行内 pos=2050/2050/0 非单调，后组画在前组之上），网格靠负 space 两向都表达。
+     * - gap = 0：不插段。
+     *
+     * 间隔段不带按钮身份 / tooltip / 底色：原版的 gap 不是节点，只是按钮的 `PointX`
+     * （命中区从 PointX 起、不含 gap；背景也不随 gap 铺）。
+     *
+     * 调用时机由四个发射入口保证：组首段（文本 [flushCurrentText] / 图形 [emitGraphicRun] /
+     * 不可渲染 shape 文案 [emitShapeAltText] / 行尾 [flush]）落段之前。空组不插
+     * （原版空 `list` 不建按钮、锁根本不落地，HM :659/:675 的 `list.Count > 0` 守卫）。
+     */
+    private fun padForPos() {
+        if (!posPending) return
+        posPending = false
+        val rel = tagPos ?: return
+        val gap = posTargetCells(rel) - (cursorSeed + cursorCellsOf(out))
+        if (gap == 0) return
+        out.add(
+            TextRun(
+                text = if (gap > 0) " ".repeat(gap) else "",
+                fore = fore,
+                back = null,
+                styleMask = 0,
+                fontName = fontName,
+                kind = RunKind.SHAPE,
+                graphic = InlineGraphic.Space(gap),
+            ),
+        )
+    }
+
+    /** 锁定值 → 目标列（格）。正 `N` 向右、负 `N` 落到行左缘之外（原版由 GDI 裁，移植由左界裁）。 */
+    private fun posTargetCells(rel: Int): Int = graphicSize(rel, false).second
+
     private fun flushCurrentText() {
+        // pos 组的间隔段必须落在组首段（含条带缓冲里的 4 参 rect —— 它是本组自己的
+        // 首段内容，见 [posPending] 的空缓冲不变式）之前；空组不插。
+        if (text.isNotEmpty() || rectBands.isNotEmpty()) padForPos()
         flushRectBands()
         if (text.isEmpty()) return
         val bv = buttonValue
@@ -926,7 +1161,9 @@ class HtmlRunFlatten(
      * 降级成 TEXT；全标签行还要靠这条保留下来的 kind 走 [flatten] 末尾的空段分支。
      */
     private fun flush(source: TextRun) {
-        // 行尾：先把攒着的矩形条带落成图形段（它们在本行文字之前），再落余下的文字
+        // 行尾：pos 组的间隔段先落（守卫同 [flushCurrentText]，空组不插），再把攒着的
+        // 矩形条带落成图形段（它们在本行文字之前），最后落余下的文字
+        if (text.isNotEmpty() || rectBands.isNotEmpty()) padForPos()
         flushRectBands()
         if (text.isEmpty()) return
         // 按钮内的文字：kind 一律 BUTTON（与图形段规则互斥 —— 按钮文本不参与「本行切出
@@ -956,7 +1193,6 @@ class HtmlRunFlatten(
 
     private companion object {
         const val DEFAULT_FORE = 0xC0C0C0
-        const val DEFAULT_BACK = 0x000000
 
         const val DEFAULT_FONT = "ＭＳ ゴシック"
 

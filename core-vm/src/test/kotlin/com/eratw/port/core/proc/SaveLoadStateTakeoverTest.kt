@@ -114,7 +114,7 @@ class SaveLoadStateTakeoverTest {
         override fun afterInputComReset() {}
         override fun afterSourceCheckReset() {}
         override fun trainName(code: Int): String? = null
-        override fun trainNameCount(): Int? = null
+        override fun trainNameCount(): Int = 0
         override fun pendingBegin(): BeginType? = pending
         override fun takePendingBegin(): BeginType? = pending.also { pending = null }
         override fun clearPendingBegin() {

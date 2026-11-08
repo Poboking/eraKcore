@@ -244,27 +244,39 @@ class UserKeywordTablesTest {
      * 全语料读数（只读诊断；`ERATW_GAMEDIR` 缺失时跳过）：给「CMP-59 数据面」一组实测数字。
      *
      * 系统变量名从 [GameDataLoader] 的 registry 取（与生产 `CorpusCompile` / `GameSession`
-     * 同源）。语料实测 6 张（2026-10-24）：`COLUMNDIV@2` / `EI_BASE` / `EI_FLAG` /
-     * `M_CFLAG` / `M_FLAG` / `M_TFLAG`（`_Rename` 一类引擎内部 csv 按 [foldSnapshot] 的
-     * KDoc 不计）。语料的 ERD 表变了要同步改这里。
+     * 同源）。表名单按当前根档案（[com.eratw.port.boot.CorpusProfile]）取列：
+     * - 4.981 实测 14 张（2026-11-01）：`BUFF` / `DISH` / `DLC_TOGGLE@1` / `EI_BASE` /
+     *   `EI_FLAG` / `M_CFLAG` / `M_FLAG` / `M_SPELL@1` / `M_SPELL@2` / `M_TALENT` /
+     *   `M_TFLAG` / `SEMEN_MATRIX@2` / `SETTING_CFLAG` / `SETTING_FLAG`；
+     * - 4.980 实测 6 张（2026-11-05 本路实跑）：`COLUMNDIV@2` / `EI_BASE` / `EI_FLAG` /
+     *   `M_CFLAG` / `M_FLAG` / `M_TFLAG`。
+     * 相对 4.980（6 张）的出处：
+     * - 新增 CSV 顶层表：`CSV/BUFF.csv`、`CSV/DISH.csv`、`CSV/SETTING_FLAG.csv`、
+     *   `CSV/SETTING_CFLAG.csv`、`CSV/M_TALENT.csv`（4.980 均无此文件）；
+     * - 新增 `@n` 形态 CSV 表：`CSV/DLC_Toggle@1.csv`、`CSV/M_SPELL@1.csv`、`CSV/M_SPELL@2.csv`；
+     * - 新增 ERD：`ERB/魔改内容/SEMEN_MATRIX@2.ERD`；
+     * - `COLUMNDIV@2` 从快照消失：4.981 把 `ERB/カラム機能/COLUMNDIV@2.ERD` 的 11 行数据
+     *   全部注释掉了（每行行首 `;`）⇒ 空表不进快照（空表登记语义只属 [UserKeywordTables.install]）。
+     * 语料的 ERD 表变了要同步改 CorpusProfile 对应列；未登记的根直接判红。
      */
     @Test
     fun `全语料 ERD 表快照读数`() {
         val game = System.getenv("ERATW_GAMEDIR")?.takeIf { it.isNotBlank() }
         Assumptions.assumeTrue(game != null, "未提供 ERATW_GAMEDIR，跳过全量读数")
         val root = Path.of(game!!)
+        val profile = com.eratw.port.boot.CorpusProfile.detect(root.resolve("CSV"))
         val registry = GameDataLoader.load(root.resolve("CSV"))?.registry
         val systemNames = registry?.all()?.mapTo(HashSet()) { it.name.uppercase() } ?: emptySet()
         val snap = UserKeywordTables.foldSnapshot(root, systemNames)
         println(
-            "CMP-59 全语料 ERD 表快照：${snap.size} 张 → ${snap.keys.sorted()}；" +
+            "CMP-59 全语料 ERD 表快照（${profile.name} 列）：${snap.size} 张 → ${snap.keys.sorted()}；" +
                 "系统名排除 ${systemNames.size} 个",
         )
         assertEquals(
-            listOf("COLUMNDIV@2", "EI_BASE", "EI_FLAG", "M_CFLAG", "M_FLAG", "M_TFLAG"),
+            profile.erdSnapshotKeys,
             snap.keys.sorted(),
-            "语料实测 6 张；变多/变少都要写出处",
+            "${profile.name} 语料实测 ${profile.erdSnapshotKeys.size} 张；变多/变少都要写出处",
         )
-        assertEquals(0, snap["EI_FLAG"]?.get("栄養"), "EI_FLAG 的下标 0 = 栄養（CSV/EI_FLAG.csv:1）")
+        assertEquals(0, snap["EI_FLAG"]?.get("栄養"), "EI_FLAG 的下标 0 = 栄養（CSV/EI_FLAG.csv:1，两根未变）")
     }
 }

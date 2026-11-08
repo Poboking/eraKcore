@@ -74,6 +74,13 @@ class ScreenSurfacePlanner {
     /** 上一次判定是否有背景层（**撤背景**同样必须整幅：留在面上的背景像素没人清）。 */
     private var lastBackground = true
 
+    /**
+     * 上一次栅格化时的整屏底色（`ConsoleScreen.backgroundArgb`）；null = 未知
+     * （下一帧必然整幅，与指纹未置同）。换底色（SETBGCOLOR / RESETBGCOLOR）必须整幅：
+     * 留在面上的旧底色没人替它擦。
+     */
+    private var lastBgArgb: Int? = null
+
     /** [raster] 的复用缓冲；有效长度 = 最近一次 [plan] 的行数。 */
     private var raster = BooleanArray(0)
 
@@ -121,6 +128,7 @@ class ScreenSurfacePlanner {
         prevCount = 0
         lastGraphic = true
         lastBackground = true
+        lastBgArgb = null
     }
 
     /** 全部状态作废（例如装配了新的 ConsoleScreen）。 */
@@ -136,6 +144,8 @@ class ScreenSurfacePlanner {
      * @param fingerprint 整帧版面指纹（行顶/行高/内容区/按下态）
      * @param graphicPresent 本帧命令表里是否有内联图形段
      * @param backgroundPresent 是否有背景图层
+     * @param backgroundArgb 本帧的整屏底色（`ConsoleScreen.backgroundArgb`，SETBGCOLOR 活值）；
+     *   与上一帧不等 ⇒ 整幅（`graph.Clear(bgColor)` 的清屏色换了，留在面上的旧底色没人替它擦）
      * @param forced 显式置脏（`requestRedraw` / `notifyGraphicsChanged`）
      * @return 复用缓冲：`result[i] = true` ⇒ 第 i 个可见行需要重新栅格化进 surface
      */
@@ -146,6 +156,7 @@ class ScreenSurfacePlanner {
         fingerprint: Int,
         graphicPresent: Boolean,
         backgroundPresent: Boolean,
+        backgroundArgb: Int,
         forced: Boolean,
     ): BooleanArray {
         if (raster.size < rowCount) raster = BooleanArray(rowCount.coerceAtLeast(16))
@@ -159,6 +170,7 @@ class ScreenSurfacePlanner {
             graphicPresent ||
             graphicPresent != lastGraphic ||
             backgroundPresent != lastBackground ||
+            backgroundArgb != lastBgArgb ||
             fingerprint != lastFingerprint ||
             lastFingerprint == Fingerprint_unset ||
             windowChanged
@@ -169,6 +181,7 @@ class ScreenSurfacePlanner {
             lastFingerprint = fingerprint
             lastGraphic = graphicPresent
             lastBackground = backgroundPresent
+            lastBgArgb = backgroundArgb
             for (i in 0 until rowCount) {
                 raster[i] = true
                 prevSigs[i] = sigs[i]

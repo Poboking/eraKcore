@@ -22,6 +22,14 @@ import java.io.File
  * ## 安全边界（与 [com.eratw.port.platform.audio.FileSoundSourceResolver] 同源）
  * `.` / `..` 先按 `Path.GetFullPath` 折叠；折叠后仍落在 [soundDir] 之内才解析，
  * 逃出根目录（`../secret.mp3`、根相对路径、盘符路径、NTFS 数据流的 `:`）一律判为不存在。
+ *
+ * ## 尾随点 / 空格（Win32 归一）
+ * Win32 在**每个路径分量末尾**剥掉空格与点：`File.Exists(".\sound\x.mp3 ")` 命中的是磁盘上的
+ * `x.mp3`（同理 `x.mp3.`）。Android/Linux 的文件系统按字面名匹配，直接照抄名字会漏掉这类调用。
+ * 因此原名（精确 + 大小写回落）都落空后，再按 Win32 归一后的名字走一遍同样的两级查找 ——
+ * **纯追加**：原名能命中的调用结果一字不变（语料实测零例尾随点/空格，见 `ERB` 目录里
+ * PLAYSOUND 实参），只有原本漏判的那些变成命中。归一回空的分量（如 `...`）判为不存在：
+ * 那在 Win32 上也不是一个正常文件名。
  */
 object SoundResourcePaths {
 
@@ -31,12 +39,34 @@ object SoundResourcePaths {
     /**
      * 名字 → 存在的普通文件；不存在 / 越界 / 非法路径返回 null。
      *
-     * 先按原名精确命中（一次 `isFile`，热路径不列目录），落空才逐段做大小写不敏感回落。
+     * 先按原名精确命中（一次 `isFile`，热路径不列目录），落空才逐段做大小写不敏感回落；
+     * 再落空才用 Win32 归一后的名字（尾随点/空格已剥）重走一遍这两级。
      */
     fun resolve(soundDir: File, name: String): File? {
         val segments = normalize(name) ?: return null
         exactFile(soundDir, segments)?.let { return it }
-        return caseInsensitiveFile(soundDir, segments)
+        caseInsensitiveFile(soundDir, segments)?.let { return it }
+        val win32 = win32Trimmed(segments) ?: return null
+        exactFile(soundDir, win32)?.let { return it }
+        return caseInsensitiveFile(soundDir, win32)
+    }
+
+    /**
+     * Win32 的分量归一：逐段剥掉**末尾**的空格与点（`"x.mp3 "` / `"x.mp3."` → `"x.mp3"`）。
+     *
+     * @return 与入参相同（没有可剥的字符）时返回 null —— 调用方据此不再重复查一遍；
+     *   任一分量归一后为空（`"..."`、`" "`）同样返回 null（见类 KDoc）。
+     */
+    private fun win32Trimmed(segments: List<String>): List<String>? {
+        var changed = false
+        val out = ArrayList<String>(segments.size)
+        for (segment in segments) {
+            val trimmed = segment.trimEnd('.', ' ')
+            if (trimmed.isEmpty()) return null
+            if (trimmed != segment) changed = true
+            out += trimmed
+        }
+        return if (changed) out else null
     }
 
     /** 原名逐段拼接后的文件；目录或不存在 = null（与 Windows `File.Exists` 同判）。 */

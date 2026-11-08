@@ -597,7 +597,7 @@ class SaveHostTest {
     // ------------------------------------------------------------------
 
     /**
-     * 6 个 PC 原版样本（`<worktree>/.workbuddy/sav-backup/sav-20261018-110513/`，只读）经
+     * 6 个 PC 原版样本（`ERATW_SAVE_SAMPLES` 指向的只读样本目录）经
      * [FileSystemOps.loadData] 整帧还原：角色数 168、UniqueCode 7153、描述尾巴
      * `CH20260326 `（spec/save-format.md §6.2 实测表）。
      *
@@ -605,11 +605,8 @@ class SaveHostTest {
      */
     @Test
     fun `真实 PC 存档经 FileSystemOps 装载`() {
-        val dir = sequenceOf(
-            java.io.File("../../.workbuddy/sav-backup/sav-20261018-110513"),
-            java.io.File("../.workbuddy/sav-backup/sav-20261018-110513"),
-            java.io.File(".workbuddy/sav-backup/sav-20261018-110513"),
-        ).firstOrNull { it.isDirectory }
+        val dir = System.getenv("ERATW_SAVE_SAMPLES")?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { java.io.File(it) }?.takeIf { it.isDirectory }
         org.junit.jupiter.api.Assumptions.assumeTrue(dir != null, "缺少 PC 存档样本目录")
 
         val bytes = java.io.File(dir, "save00.sav").readBytes()

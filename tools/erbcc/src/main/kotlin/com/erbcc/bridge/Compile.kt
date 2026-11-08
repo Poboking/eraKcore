@@ -6,7 +6,7 @@ import com.eratw.port.core.vars.DimFunctionFolder
 import com.eratw.port.erbcc.DimKeyword
 import com.eratw.port.erbcc.DimSpec
 import com.eratw.port.erbcc.LabelDef
-import com.eratw.port.erbcc.SymbolTable
+import com.eratw.port.erbcc.LabelTable
 import java.util.Locale
 
 /**
@@ -136,7 +136,7 @@ private fun checkDims(
  * `<KEY>#<defIndex>` 为键进入局部表（与 core-vm 编译器的事件成员命名约定一致）。
  *
  * @param consts 尺寸求值常量表：用 [sizeConsts] 从 erbcc 收集物（`SymbolConfig.macros`
- *   宏名→展开体原文 + `SymbolTable.erhDimConsts` ERH `#DIM CONST` 原文）构造。
+ *   宏名→展开体原文 + `LabelTable.erhDimConsts` ERH `#DIM CONST` 原文）构造。
  *   **能求值就注册、不能求值的声明按 D.8 不收集**（toLocalDim 返回 null，
  *   引用走全局占位槽，编译不受阻、不报错）。
  * @param folder 装载期可折叠函数回调（与侧车/运行期同源；`VARSIZE` 尺寸靠它折出）。
@@ -187,7 +187,7 @@ fun DimSpec.droppedByUnresolvableDim(
 ): Boolean = keywords.none { it in GLOBAL_SIDE } && toLocalDim(consts, folder) == null
 
 /** erbcc 全语料收集物 → 尺寸求值常量表（配合 [buildFuncDims]）。 */
-fun sizeConsts(table: SymbolTable): Map<String, Long> =
+fun sizeConsts(table: LabelTable): Map<String, Long> =
     sizeConsts(table.config.macros, table.erhDimConsts)
 
 /**
@@ -224,7 +224,7 @@ fun sizeConsts(macros: Map<String, String>, dimConsts: List<DimSpec>): Map<Strin
     for (spec in dimConsts) {
         if (spec.isStr || DimKeyword.CONST !in spec.keywords) continue
         val init = spec.initializer ?: continue
-        val first = SymbolTable.splitTopLevel(init, ',').firstOrNull()?.trim() ?: continue
+        val first = LabelTable.splitTopLevel(init, ',').firstOrNull()?.trim() ?: continue
         if (first.isEmpty()) continue
         pending.putIfAbsent(spec.name.uppercase(Locale.ROOT), first)
     }

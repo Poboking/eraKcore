@@ -56,6 +56,11 @@ private data class BucketKey(val fontName: String, val styleMask: Int, val sizeP
  * 淘汰只在 [get] 里显式做（弹出链表头并记入 [evictedKeys]），因此同一调用序列必然得到
  * 同一淘汰序列；本类不读时间、不用随机、不做并行。
  *
+ * 淘汰历史 [evictedKeys] 只是诊断读数，生产路径只消费 [evictionCount]：历史队列封顶
+ * [EVICTED_HISTORY_LIMIT] 条（保留最近发生的那几条），否则一场长会话里每次淘汰
+ * 都往列表追加一个 [GlyphKey]（含字体名字符串）且永不清理，等于把 LRU 的上限从
+ * 常驻条目搬到了历史记录上。封顶只影响 [evictedKeys] 的返回条数，[evictionCount] 仍逐次精确。
+ *
  * ## 缺字回退链（不得抛）
  *
  * 请求字体 → 默认字体 → 方框。三跳都不许抛：光栅化器异常按「这一跳没拿到字形」处理，
@@ -94,7 +99,7 @@ class GlyphCache(
     val maxEntries: Int = if (requestedMaxEntries < 0) 0 else requestedMaxEntries
 
     private val cached = LinkedHashMap<BucketKey, GlyphEntry>(16, 0.75f, true)
-    private val evictedEntries: MutableList<GlyphKey> = ArrayList()
+    private val evictedEntries: ArrayDeque<GlyphKey> = ArrayDeque()
     private val converters = HashMap<Int, CellMetrics>()
 
     init {
@@ -186,6 +191,9 @@ class GlyphCache(
                 val evicted = cached.remove(eldestBucket)
                 if (evicted != null) {
                     evictedEntries += evicted.key
+                    while (evictedEntries.size > EVICTED_HISTORY_LIMIT) {
+                        evictedEntries.removeFirst()
+                    }
                 }
                 evictionCount++
             }
@@ -259,7 +267,7 @@ class GlyphCache(
     /** 当前常驻条目，**最久未用在前**（迭代序 = 淘汰序）。 */
     fun keysOldestFirst(): List<GlyphKey> = cached.values.map { it.key }
 
-    /** 历史淘汰序列（按发生先后）。 */
+    /** 历史淘汰序列（按发生先后），只保留最近 [EVICTED_HISTORY_LIMIT] 条；总数看 [evictionCount]。 */
     fun evictedKeys(): List<GlyphKey> = evictedEntries.toList()
 
     /** 清空条目（不动统计，也不动 [evictedKeys] 的历史）。 */
@@ -349,6 +357,12 @@ class GlyphCache(
     }
 
     companion object {
+        /**
+         * 淘汰历史保留条数上限：诊断读数够用即可，不能随会话无限增长。
+         * 只约束 [evictedKeys]，[evictionCount] 不受影响。
+         */
+        private const val EVICTED_HISTORY_LIMIT = 256
+
         /**
          * 方框占位的边框色，ARGB `0xAARRGGBB` 的 `0xFF808080`（alpha 满、RGB 中灰）。
          * 写成补码字面量是因为 `0xFF808080` 在 Kotlin 里是 Long，`const val` 不接受转换调用；

@@ -144,9 +144,9 @@ class ExprEvalTest {
         assertEquals(1L, evalInt(parseOrThrow(listOf(s("abc"), op("<"), s("abd")))))
         assertEquals(1L, evalInt(parseOrThrow(listOf(s("a"), op("=="), s("a")))))
         assertEquals(0L, evalInt(parseOrThrow(listOf(s("a"), op("!="), s("a")))))
-        // 原版 bug 复刻：字符串 >= 实现为 `< 0`。spec: OperatorMethodManager.cs:331
-        assertEquals(1L, evalInt(parseOrThrow(listOf(s("a"), op(">="), s("b")))))
-        assertEquals(0L, evalInt(parseOrThrow(listOf(s("b"), op(">="), s("a")))))
+        // 4.981 判据：字符串 >= 为 c >= 0。spec: OperatorMethod.cs:547
+        assertEquals(0L, evalInt(parseOrThrow(listOf(s("a"), op(">="), s("b")))))
+        assertEquals(1L, evalInt(parseOrThrow(listOf(s("b"), op(">="), s("a")))))
     }
 
     @Test

@@ -529,14 +529,20 @@ internal object ExploreTestCorpus {
 
     class Built(val gameRoot: Path, val erbcDir: Path)
 
-    /** 在 [tmp] 下建 `game/`（空 emuera.config + ERB/explore.erb）并编译出 erbc.v1。 */
-    fun build(tmp: Path, withSystemTitle: Boolean): Built {
+    /**
+     * 在 [tmp] 下建 `game/`（空 emuera.config + ERB/explore.erb）并编译出 erbc.v1。
+     *
+     * [systemTitleErb]：换掉缺省 `@SYSTEM_TITLE` 体的正文（obs-bootrecipe 的引导口径用例要造
+     * 「PRINTW 任意键面在前、取值面在后」这类等待点序列）；给 null 用 [ERB_TITLE]，
+     * 既有调用点逐字不变。
+     */
+    fun build(tmp: Path, withSystemTitle: Boolean, systemTitleErb: String? = null): Built {
         val game = tmp.resolve("game")
         val erbDir = game.resolve("ERB")
         Files.createDirectories(erbDir)
         // 空配置：三层配置链读不到键时全部走注册缺省（RootedBuiltinHost.applyChainTo 容缺）。
         Files.writeString(game.resolve("emuera.config"), "")
-        val erb = if (withSystemTitle) ERB_TITLE + "\n" + ERB_COMMON else ERB_COMMON
+        val erb = if (withSystemTitle) (systemTitleErb ?: ERB_TITLE) + "\n" + ERB_COMMON else ERB_COMMON
         Files.writeString(erbDir.resolve("explore.erb"), erb)
         val result = CorpusCompile.compile(erbDir)
         check(result.ok) { "explore 合成语料编译失败: ${result.failures.joinToString("; ")}" }

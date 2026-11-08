@@ -31,6 +31,8 @@ class DrawCmdShapeTest {
         // 除它以外任何新类型都要先改 ADR 再来动这张表。
         val allowed = setOf<Class<*>>(
             primitiveInt!!,
+            // `back: Int?`（null = 无自有底色）在 JVM 字段上是装箱的 java.lang.Integer。
+            java.lang.Integer::class.java,
             RunKind::class.java,
             List::class.java,
             InlineGraphic::class.java,

@@ -90,6 +90,16 @@ enum class ArgType {
     PRINT,
     /** 语句层伪类型：GetNormalArgumentBuilder("I", 0) */
     EXPRESSIONS,
+    /** 语句层伪类型：CALLSTR 族（1 个字符串表达式 = 运行期函数名，见 [ArgBuilders]） */
+    SP_CALLSTR,
+    /**
+     * 语句层伪类型：SETIMAGELAYERL（上游 4.981 行锚定版图层指令，见 [ArgBuilders.setImageLayerL]）。
+     *
+     * 形参口径逐槽对齐 fork 的 `SP_SETIMAGELAYERL_ArgumentBuilder`
+     * （spec: ArgumentBuilder.cs:2679-2728）：String, Integer x6, 第 8 槽 Void（不限类型），minArg = 2。
+     * **追加在末尾**：`PrintStmt` 把 `argType.ordinal` 编进 `.erbc`，插在中间会让旧产物错位。
+     */
+    SP_SETIMAGELAYERL,
 }
 
 /**
@@ -461,6 +471,30 @@ enum class FunctionCode(val argType: ArgType, val flag: Int, val kind: StmtKind)
     WAITANYKEY(ArgType.VOID, 8192, StmtKind.INPUT),
     WEND(ArgType.VOID, 23, StmtKind.FLOW),
     WHILE(ArgType.INT_EXPRESSION, 23, StmtKind.FLOW),
+    // ---- 4.981 上游新增语句（`reference/emuera-cs` 全文零命中，无 1.824 反编译权威）----
+    // 刻意**追加在末尾**：`StatementExecutor.execute` 用 `FunctionCode.entries[op]` 按 ordinal
+    // 还原语句身份，插在中间会让旧 .erbc 的全部 op 错位。
+    // flag 只登记语义位，不碰四枚被单测钉死的位：
+    //   IS_PRINT(8192)：`StmtFlagAudit2Test` 的覆盖集合逐名等于原版 106 名，故新增名不进该集合；
+    //   IS_PRINTDATA(65536)、IS_TRYC(32768) 同理；也都不为 0（`flag 为 0 的只有 6 名`）。
+    // 语句名与操作码的对应见 `code/OpcodeTable.kt` 的 `StatementAliases`（逐个复用已有 opcode）。
+    TINPUTNF(ArgType.SP_TINPUT, 2, StmtKind.INPUT),
+    TINPUTSNF(ArgType.SP_TINPUTS, 2, StmtKind.INPUT),
+    TEXT_BGC_ON(ArgType.SP_SWAP, 6, StmtKind.DISPLAY),
+    TEXT_BGC_OFF(ArgType.VOID, 6, StmtKind.DISPLAY),
+    DISABLE_INPUT_MACRO(ArgType.VOID, 6, StmtKind.OTHER),
+    ENABLE_INPUT_MACRO(ArgType.VOID, 6, StmtKind.OTHER),
+    HTML_PRINTC(ArgType.SP_HTML_PRINT, 6, StmtKind.DISPLAY),
+    HTML_PRINTLC(ArgType.SP_HTML_PRINT, 6, StmtKind.DISPLAY),
+    TRYCALLSTR(ArgType.SP_CALLSTR, 163, StmtKind.FLOW),
+    TRYCCALLSTR(ArgType.SP_CALLSTR, 163, StmtKind.FLOW),
+    // flag = 6 = METHOD_SAFE | EXTENDED：
+    //   SEQUENCEINPUT 在 fork 是 method（spec: Creator.Method.cs:9690-9705，注册于 Creator.cs:447），
+    //   作为 methodInstruction 的合成 flag 恰为 6（spec: FunctionIdentifier.cs:4200-4204）；
+    //   SETIMAGELAYERL 的 instruction 自带 flag = METHOD_SAFE | EXTENDED（spec: Instraction.Child.cs:4166）。
+    // kind：SEQUENCEINPUT 是「预置下一次输入」故记 INPUT；SETIMAGELAYERL 是显示指令故记 DISPLAY。
+    SEQUENCEINPUT(ArgType.STR_EXPRESSION, 6, StmtKind.INPUT),
+    SETIMAGELAYERL(ArgType.SP_SETIMAGELAYERL, 6, StmtKind.DISPLAY),
     ;
 
     /** 流程控制语句（flag & 1 = FLOW_CONTROL，spec: FunctionIdentifier.cs:3721 常量、:4230-4233 IsFlowContorol） */
@@ -509,6 +543,7 @@ object BlockTable {
         FunctionCode.TRYCGOTO to FunctionCode.CATCH,
         FunctionCode.TRYCJUMP to FunctionCode.CATCH,
         FunctionCode.TRYCCALL to FunctionCode.CATCH,
+        FunctionCode.TRYCCALLSTR to FunctionCode.CATCH,
         FunctionCode.TRYCGOTOFORM to FunctionCode.CATCH,
         FunctionCode.TRYCJUMPFORM to FunctionCode.CATCH,
         FunctionCode.TRYCCALLFORM to FunctionCode.CATCH,

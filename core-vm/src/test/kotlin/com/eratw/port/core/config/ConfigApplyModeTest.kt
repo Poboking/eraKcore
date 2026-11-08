@@ -51,6 +51,8 @@ class ConfigApplyModeTest {
             ConfigKey.TimesNotRigorousCalculation to "烘进语句层语义快照（GameSession.kt:422）",
             // 有现读点、但同样有烘死点 ⇒ 按「不假称热更」判重启。
             ConfigKey.FontName to "控制台 defaultFontName 是构造参数（GameSession.kt:281）",
+            ConfigKey.FontSize to "装配层 applyBootFontMetrics 烘进 CanvasConsoleView/ConsoleFeed",
+            ConfigKey.LineHeight to "同 FontSize：行高是版面解算输入，会话期冻结",
             ConfigKey.SystemAllowFullSpace to "ProcessRuntime.runtimeLexerConfig 是 by lazy 快照（:375）",
             ConfigKey.SystemIgnoreTripleSymbol to "ProcessRuntime.runtimeLexerConfig 是 by lazy 快照（:375）",
             ConfigKey.MoneyLabel to "%MONEYLABEL% 读变量池快照（GameSession.kt:300）",
@@ -62,18 +64,26 @@ class ConfigApplyModeTest {
     }
 
     @Test
-    fun `热更表覆盖字号列宽与跳过类`() {
-        // 组长判据：字号 / 列宽 / 跳过类至少要能热更。
-        for (key in listOf(ConfigKey.FontSize, ConfigKey.LineHeight, ConfigKey.WindowX, ConfigKey.WindowY)) {
-            assertEquals(ConfigApplyMode.HOT, ConfigApplyMode.of(key), "$key 应可热更（HTML 折行宽度现读）")
+    fun `字号行高与窗口宽高都是重启键`() {
+        // 字号/行高由装配层在会话构造前烘死（单源版面重构），运行期没有现读点 ⇒ 必须重启；
+        // 否则「保存并重启」会被 hotOnly 短路，玩家看到「设置了也无效」。
+        assertEquals(ConfigApplyMode.RESTART, ConfigApplyMode.of(ConfigKey.FontSize), "字号必须重开会话")
+        assertEquals(ConfigApplyMode.RESTART, ConfigApplyMode.of(ConfigKey.LineHeight), "行高必须重开会话")
+        // 窗口宽/高的生效面是**核心折行宽 / 可见行数**（条目表在会话装配期烘死）⇒ 必须重启。
+        // 注意 Android 上 WindowX 不是版面输入：2026-11-08 根修后 GameHost.applyBootFontMetrics
+        // 有意不把配置宽灌进 CanvasConsoleView（0.2.43 曾这么做，旧盘缺省 760 把列数压到 80，
+        // DEBUG.ERB:582 的 MAXWIDTH()/90 除零）。所以「改窗口宽要重启」与「改窗口宽会改屏上版面」
+        // 是两件事，别再拿后者当重启理由（详见 SettingsModel 的 KDoc）。
+        for (key in listOf(ConfigKey.WindowX, ConfigKey.WindowY)) {
+            assertEquals(ConfigApplyMode.RESTART, ConfigApplyMode.of(key), "$key 必须重开会话（核心折行宽/可见行数）")
         }
         assertEquals(ConfigApplyMode.HOT, ConfigApplyMode.of(ConfigKey.SkipFrame), "跳过类应可热更")
     }
 
     @Test
     fun `split 分桶保持注册顺序`() {
-        val impact = ConfigApplyMode.split(listOf(ConfigKey.MaxLog, ConfigKey.SkipFrame, ConfigKey.FontSize))
-        assertEquals(listOf(ConfigKey.SkipFrame, ConfigKey.FontSize), impact.hot)
+        val impact = ConfigApplyMode.split(listOf(ConfigKey.MaxLog, ConfigKey.SkipFrame, ConfigKey.CBMaxCB))
+        assertEquals(listOf(ConfigKey.SkipFrame, ConfigKey.CBMaxCB), impact.hot)
         assertEquals(listOf(ConfigKey.MaxLog), impact.restart)
         assertTrue(impact.requiresRestart)
         assertFalse(impact.hotOnly)
@@ -98,19 +108,23 @@ class ConfigApplyModeTest {
     }
 
     @Test
-    fun `字号热更会重算夹取链与可绘制宽`() {
+    fun `字号切回重启键：热更被拒，夹取链在新视图里生效`() {
         val store = ConfigStore()
         val eff = EffectiveConfig.of(store)
         val windowX = eff.windowX
         assertEquals(windowX - 3, eff.drawableWidth, "缺省 18/6 = 3（Config.cs:461-466）")
 
-        // 4 低于下限 8 ⇒ 落地值被夹到 8，提示同时出现（Config.cs:431-435）。
+        // 字号由装配层在会话构造前烘死（GameHost.applyBootFontMetrics），运行期不再现读。
         val result = eff.reloadHot(ConfigKey.FontSize, ConfigValue.IntValue(4))
+        assertEquals(ConfigReloadResult.NeedsRestart(ConfigKey.FontSize), result)
+        assertEquals(18, eff.fontSize, "热更被拒，视图读数仍是旧值")
 
-        assertTrue(result is ConfigReloadResult.Applied, "FontSize 在热更表内：$result")
-        assertEquals(8, eff.fontSize, "夹到下限 8")
-        assertEquals(1, eff.notices.count { it.kind == ConfigClampNotice.Kind.TOO_SMALL_FONT_SIZE })
-        assertEquals(windowX - 2, eff.drawableWidth, "max(2, 8/6) = 2，可绘制宽原地重算")
+        // 重开会话 = 新起一份视图：夹取链照常生效，提示同时出现（Config.cs:431-435）。
+        store.itemOf(ConfigKey.FontSize).assign(ConfigValue.IntValue(4))
+        val rebooted = EffectiveConfig.of(store)
+        assertEquals(8, rebooted.fontSize, "夹到下限 8")
+        assertEquals(1, rebooted.notices.count { it.kind == ConfigClampNotice.Kind.TOO_SMALL_FONT_SIZE })
+        assertEquals(windowX - 2, rebooted.drawableWidth, "max(2, 8/6) = 2，可绘制宽原地重算")
     }
 
     @Test

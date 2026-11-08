@@ -107,8 +107,19 @@ class ErbcV2RefBindingTest {
         val store = store()
         val rt = runtime(pb, loaded, store)
         val e = assertFailsWith<CodeEE> { rt.execute() }
-        assertTrue(e.message!!.contains("EmptyRefVar"), "v1 退化路径必须显式失败而不是绑错：${e.message}")
-        assertTrue(e.message!!.contains("REF_TGT"), "错误必须指名未绑定的形参：${e.message}")
+        // 官方 `Error.EmptyRefVar` 逐字，与本条同源的另一处已按同口径重钉
+        // （`core/compile/RefArgBindingTest.kt:765`）。出处：
+        // - 日文原文 `Lang.cs:1642`「参照型変数"{0}"は何も参照していません」；
+        // - 中文译文两份 zhs 表**同文**：语料根 `lang/emuera.zhs.xml:272` /
+        //   `reference/…lang.emuera-zhs.xml:365` ⇒ 实参 = 未绑定的形参名。
+        // 断言的**两件事一件没少**，只是不再靠自造串里的键名标记来断：
+        // - 「退化必须显式失败而不是绑错」= 上面的 `assertFailsWith<CodeEE>`
+        //   （原版同一位置也是 `throw new CodeEE(...)`，spec: ReferenceToken.cs:36/49/62、
+        //   VariableData.cs:2329/2338）；
+        // - 「错误必须指名未绑定的形参」= 逐字相等里的 `REF_TGT`（占位符 `{0}` 就是变量名）。
+        // 旧断言断的是移植侧自造句「引用变量 … 未绑定目标（EmptyRefVar）」尾部的括注键名；
+        // 文案换成官方逐字后该标记自然消失，故重钉（不是放宽 —— 逐字相等比 `contains` 更严）。
+        assertEquals("引用类型变量\"REF_TGT\"缺少引用对象", e.message, "v1 退化路径必须显式失败而不是绑错，且指名未绑定的形参")
     }
 
     // ------------------------------------------------------------------

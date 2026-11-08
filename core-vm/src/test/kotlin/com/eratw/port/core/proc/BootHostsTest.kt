@@ -125,16 +125,18 @@ class BootHostsTest {
     @Test
     fun `真实游戏根下 resources 图片读得到且包装层不丢二进制读`() {
         val gameRoot = realGameRoot() ?: return
-        val rel = "resources/title.webp"
+        // 4.981 已无 resources/title.webp（4.980 的取证图，真机 1041x557 标题图），
+        // 换在位的 resources/CharaTH98/152.webp（540x360，WebpDecoderTest 同一取证文件）
+        val rel = "resources/CharaTH98/152.webp"
         val abs = gameRoot.resolve(rel)
-        assertTrue(Files.isRegularFile(abs), "语料缺 $abs（本用例按真机那张 1041x557 标题图取证）")
+        assertTrue(Files.isRegularFile(abs), "语料缺 $abs（本用例按在位资源图取证）")
         val size = Files.size(abs).toInt()
 
         val rooted = RootedBuiltinHost(gameRoot)
         val bytes = assertNotNull(rooted.readFileBytes(rel), "$rel 读不到字节 ⇒ 宿主根或 resolvePath 有问题")
         assertEquals(size, bytes.size, "$rel 字节数")
         // 裸名按原版口径就是读不到（PC 上同样落在 ExeDir 找不到 ⇒ 函数返回 0），钉住前缀确实生效
-        assertNull(rooted.readFileBytes("title.webp"), "裸名不该在游戏根命中")
+        assertNull(rooted.readFileBytes("152.webp"), "裸名不该在游戏根命中")
 
         val console = ConsoleBuiltinHost(gameRoot)
         val wrapped = assertNotNull(

@@ -43,6 +43,8 @@ class ParallelTask<T : Any>(
                 result = body()
             } catch (t: Throwable) {
                 // 装载层的异常口径原样保留（宿主 await 处再决定是失败屏还是回落同步读）。
+                // W8 刀五复核：这不是「吞没」—— await 是该读数的唯一出口，[failure] 会
+                // 原样重抛；cancel 之后不 await = 装载已被宿主判死，读数按设计丢弃。
                 failure = t
             }
         }
@@ -67,9 +69,14 @@ class ParallelTask<T : Any>(
     /**
      * 等任务结束并取结果；body 抛出的异常原样抛出（与同步读的报错口径一致）。
      *
-     * 返回 null 只会发生在「body 正常返回 null」——本类泛型限定 `T : Any`，所以正常路径恒非 null。
+     * [started] 之前调用直接 `IllegalStateException`（W8 刀五）：`Thread.join()` 对
+     * **从未 start** 的线程是立即返回的 no-op（JDK 语义），旧写法于是把「忘了 start」
+     * 伪装成「body 正常返回了 null」—— 装载层拿到 null 会走回落同步读，把装配漏调用
+     * 静默降级成一条多余的同步解析。返回 null 只会发生在「body 正常返回 null」——
+     * 本类泛型限定 `T : Any`，所以正常路径恒非 null。
      */
     fun await(): T? {
+        check(started) { "$threadName: await 先于 start —— join 未启动线程是立即返回的 no-op，结果恒为假的 null" }
         worker.join()
         failure?.let { throw it }
         return result

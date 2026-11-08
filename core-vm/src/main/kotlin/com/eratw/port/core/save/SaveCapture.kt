@@ -123,9 +123,13 @@ object SaveCapture {
 
     /** 单个系统变量 → 条目；不可存档的存储形态返回 null（PSEUDO / LOCAL / CSV 常量）。 */
     private fun entryForDef(store: VariableStore, def: VarDef): SaveEntry? = when (def.storage) {
+        // 整列一次取走（captureSystemIntColumn 证明与逐元素读等值时才走），取不走才逐元素兜底：
+        // TA/TB 出厂 100×100×100 ⇒ 逐元素形态是每次存档 200 万轮「按名解析 + 新建下标数组」，
+        // 与 2026-11-01 玩家「玩久了存档失败」的堆贴顶尖峰同形。
         Storage.G_INT1 -> SaveEntry.IntArray1(
             def.name,
-            LongArray(def.dims[0]) { store.readInt(def.name, longArrayOf(it.toLong())) },
+            store.captureSystemIntColumn(def)
+                ?: LongArray(def.dims[0]) { store.readInt(def.name, longArrayOf(it.toLong())) },
         )
 
         Storage.G_INT2 -> {
@@ -133,7 +137,7 @@ object SaveCapture {
             val d1 = def.dims[1]
             SaveEntry.IntArray2(
                 def.name, d0, d1,
-                LongArray(d0 * d1) { k ->
+                store.captureSystemIntColumn(def) ?: LongArray(d0 * d1) { k ->
                     store.readInt(def.name, longArrayOf((k / d1).toLong(), (k % d1).toLong()))
                 },
             )
@@ -145,7 +149,7 @@ object SaveCapture {
             val d2 = def.dims[2]
             SaveEntry.IntArray3(
                 def.name, d0, d1, d2,
-                LongArray(d0 * d1 * d2) { k ->
+                store.captureSystemIntColumn(def) ?: LongArray(d0 * d1 * d2) { k ->
                     store.readInt(
                         def.name,
                         longArrayOf((k / (d1 * d2)).toLong(), ((k / d2) % d1).toLong(), (k % d2).toLong()),
@@ -158,7 +162,8 @@ object SaveCapture {
 
         Storage.G_STR1 -> SaveEntry.StrArray1(
             def.name,
-            Array(def.dims[0]) { store.readStr(def.name, longArrayOf(it.toLong())) },
+            store.captureSystemStrColumn(def)
+                ?: Array(def.dims[0]) { store.readStr(def.name, longArrayOf(it.toLong())) },
         )
 
         else -> null
@@ -189,6 +194,14 @@ object SaveCapture {
         val d0 = dims.getOrNull(0) ?: 1
         val d1 = dims.getOrNull(1) ?: 1
         val d2 = dims.getOrNull(2) ?: 1
+        if (def.type == VarType.FLOAT) {
+            // `#DIMF` 在存储层被钉成 **1 维**（VariableStore.checkFloatDimShape，
+            // spec variables.yaml 的 float_vars.dimf），故只有 1 维形态可达；
+            // 0/2/3 维的 DimSpec 在 declareUserVar 就被拒，这里不写不可达分支。
+            if (dims.size != 1) return null
+            val fuv = uv as? VariableStore.FloatUserVar ?: return null
+            return SaveEntry.FloatArray1(def.name, DoubleArray(d0) { fuv.readElem(it) })
+        }
         return if (def.type == VarType.INT) {
             when (dims.size) {
                 0 -> SaveEntry.IntValue(def.name, uv.readInt(0, 0))

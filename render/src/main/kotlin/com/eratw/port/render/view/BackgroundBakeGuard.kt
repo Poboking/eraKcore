@@ -146,4 +146,24 @@ class BackgroundBakeGuard {
             )
         }
     }
+
+    /**
+     * 立刻作废烘焙快照：下一次 [needsRebake] 必然返回 true。
+     *
+     * 必须与「绘制侧丢掉 `backing` 位图」**成对**调用（`CanvasConsoleView` 的
+     * `onDetachedFromWindow` 与 `releaseSession`）。只丢位图不动作废的话，[needsRebake]
+     * 会按「宽高、层列表、帧句柄都没变」继续判 false，而绘制侧取不到位图就直接跳过贴图 ——
+     * 背景从此**永久**消失，直到下次尺寸变化。这与原版 ValidateBackground 的
+     * `bakedBackground == null ⇒ 重建重烘`（spec: `EmueraConsole.cs:924-927`）相反，
+     * 所以作废动作有出处、不是新造的宽容。
+     *
+     * 顺带清掉 [bakedFrames] 里各层的 `handle` 强引用：背景位图不该跟着已经释放的会话活着。
+     * 只是「下次重烘」，重烘输入未变 ⇒ 烘出的像素与作废前逐像素相同，不是语义变更。
+     */
+    fun invalidate() {
+        bakedWidth = 0
+        bakedHeight = 0
+        bakedLayers = null
+        bakedFrames.clear()
+    }
 }

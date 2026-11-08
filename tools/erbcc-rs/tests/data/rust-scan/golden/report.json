@@ -1,0 +1,23 @@
+{
+  "errorGroups": [
+  ],
+  "warningGroups": [
+  ],
+  "topErrorFiles": [
+  ],
+  "files": [
+    {"file": "GOLDEN_00_ROOT.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 147, "logicalLines": 43, "tokens": 2, "stmtLines": 34, "errors": 0, "warnings": 0},
+    {"file": "GOLDEN_01_BASIC.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 157, "logicalLines": 125, "tokens": 18, "stmtLines": 99, "errors": 0, "warnings": 0},
+    {"file": "GOLDEN_02_PRINT.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 273, "logicalLines": 250, "tokens": 3, "stmtLines": 240, "errors": 0, "warnings": 0},
+    {"file": "GOLDEN_03_FLOW.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 311, "logicalLines": 287, "tokens": 12, "stmtLines": 248, "errors": 0, "warnings": 0},
+    {"file": "GOLDEN_04_CHARA.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 92, "logicalLines": 63, "tokens": 40, "stmtLines": 54, "errors": 0, "warnings": 0},
+    {"file": "GOLDEN_05_DATA.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 85, "logicalLines": 72, "tokens": 2, "stmtLines": 65, "errors": 0, "warnings": 0},
+    {"file": "GOLDEN_06_INPUT_AUTO.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 71, "logicalLines": 34, "tokens": 0, "stmtLines": 33, "errors": 0, "warnings": 0},
+    {"file": "GOLDEN_07_INPUT_MANUAL.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 65, "logicalLines": 55, "tokens": 0, "stmtLines": 54, "errors": 0, "warnings": 0},
+    {"file": "GOLDEN_08_IO.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 70, "logicalLines": 49, "tokens": 23, "stmtLines": 36, "errors": 0, "warnings": 0},
+    {"file": "GOLDEN_09_MISC.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 81, "logicalLines": 65, "tokens": 4, "stmtLines": 62, "errors": 0, "warnings": 0},
+    {"file": "GOLDEN_10_XMLMAP.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 213, "logicalLines": 135, "tokens": 11, "stmtLines": 112, "errors": 0, "warnings": 0},
+    {"file": "GOLDEN_11_GVIEW.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 79, "logicalLines": 60, "tokens": 0, "stmtLines": 59, "errors": 0, "warnings": 0},
+    {"file": "GOLDEN_12_SYMBOLS.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 73, "logicalLines": 37, "tokens": 21, "stmtLines": 17, "errors": 0, "warnings": 0}
+  ]
+}

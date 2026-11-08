@@ -39,16 +39,15 @@ import kotlin.test.assertTrue
  * 成立才判 `string.Compare(Is, RightTerm, Ordinal) <= 0`，下界不成立直接 `return false`），
  * 整数版同构（同文件 :45-60，编译器侧走整型 `_GE`/`_LE` 指令、本来就对，本路不动）。
  * 移植侧旧实现把它写成 `target GREATER_EQUAL lo && target LESS_EQUAL hi`
- * （ErbProgramCompiler.compileCaseTo 的字符串分支 + Expr.kt strCompare），而字符串 `>=`/`<=`
- * 是**两处官方 bug**（`>=` 完全反向、`<=` 相等泄漏；specs/verify-notes.md §1 与文末官方 bug
- * 清单第 1/2 条，ADR-005 要求原样复刻）。把 bug 接进区间判定 ⇒ 命中集合整体取反：
- * `CASE "a" TO "c"` 配 "b"/"a"/"c" **永不命中**，`CASE "m" TO "z"` 配 "a" **反而命中**。
+ * （ErbProgramCompiler.compileCaseTo 的字符串分支 + Expr.kt strCompare），而移植早期把字符串
+ * `>=`/`<=` 按 1.824 误复刻成 `c < 0`（`>=` 反向、`<=` 相等泄漏）。把错判据接进区间判定
+ * ⇒ 命中集合整体取反：`CASE "a" TO "c"` 配 "b"/"a"/"c" **永不命中**，`CASE "m" TO "z"` 配 "a"
+ * **反而命中**。
  *
- * 修复方向：bug 本体保留（源码真写 `>=`/`<=` 的表达式位读数不许变，见
- * [运算符版字符串大于等于官方bug原样保留]），区间判定改走 `Expr.kt` 的 `strCaseRange`
- * ——用不带 bug 的 `>` 表达 `<=`（`compare(a,b) <= 0` ⇔ `!(a > b)`），并保住原版的
- * 求值顺序与短路（下界失配则上界表达式**连求值都不求**，见
- * [字符串CASE下界失配时不走上界表达式]）。
+ * 修复方向：区间判定改走 `Expr.kt` 的 `strCaseRange` ——用 `>` 表达 `<=`
+ * （`compare(a,b) <= 0` ⇔ `!(a > b)`），并保住原版的求值顺序与短路（下界失配则上界表达式
+ * **连求值都不求**，见 [字符串CASE下界失配时不走上界表达式]）。运算符判据本身已于 MODERN-T5
+ * 校准回 4.981（OperatorMethod.cs:547/:578）。
  *
  * **语料 0 处命中**（字符串 TO 形态在画蛇添足版里不存在）⇒ 本路的编译产物变化只可能
  * 出现在"含字符串 CASE TO"的函数上，既有基准读数（E2E 610 行 / corpusSmoke 指令数 /
@@ -143,7 +142,7 @@ class CaseRangeAndStepTest {
 
     /**
      * 下界相等必须命中：原版 `compare("a","a") = 0 <= 0`（spec: CaseExpression.cs:66）。
-     * **改前实际**：`target >= lo` 的官方 bug 是 `c < 0` ⇒ 相等判 0 ⇒ 不命中。
+     * **改前实际**：旧 1.824 误复刻的 `>=` 是 `c < 0` ⇒ 相等判 0 ⇒ 不命中。
      */
     @Test
     fun `字符串CASE下界本身命中`() {
@@ -161,7 +160,7 @@ class CaseRangeAndStepTest {
 
     /**
      * 上界相等必须命中：原版 `compare("c","c") = 0 <= 0`（spec: CaseExpression.cs:68）。
-     * **改前实际**：`target <= hi` 的官方 bug 也是 `c < 0`（相等泄漏）⇒ 上界端点判不命中。
+     * **改前实际**：旧 1.824 误复刻的 `<=` 也是 `c < 0`（相等泄漏）⇒ 上界端点判不命中。
      */
     @Test
     fun `字符串CASE上界本身命中`() {
@@ -298,14 +297,13 @@ class CaseRangeAndStepTest {
     }
 
     /**
-     * 运算符本体不动（ADR-005）：源码里真写 `>=` 的表达式位仍按官方 bug 读数 ——
-     * `"b" >= "a"` 得 0、`"a" >= "b"` 得 1（spec: CaseExpression 之外的
-     * OperatorMethodManager.cs:331 GreaterEqualStrStr 实为 `c < 0`；
-     * specs/verify-notes.md §1 + 文末官方 bug 清单第 1 条）。
-     * 这条是「没顺手把原版也修好」的证据。
+     * 运算符本体对齐 4.981：源码里真写字符串 `>=` 的表达式位按序数比较 ——
+     * `"b" >= "a"` 得 1、`"a" >= "b"` 得 0（spec: OperatorMethod.cs:547 GreaterEqualStrStr 为 `c >= 0`）。
+     * 与区间判定（[strCaseRange]）分属两条通道、互不依赖：区间判定行为不变，运算符按 4.981 校准
+     * （MODERN-T5；旧 1.824 锚已作废，见 specs/verify-notes.md §1）。
      */
     @Test
-    fun `运算符版字符串大于等于官方bug原样保留`() {
+    fun `运算符版字符串大于等于按4_981序数`() {
         val store = run(
             compile(
                 "@T",
@@ -313,8 +311,8 @@ class CaseRangeAndStepTest {
                 "K = \"a\" >= \"b\"",
             ),
         )
-        assertEquals(0L, intOf(store, "J"), "字符串 `>=` 反向：\"b\" >= \"a\" 官方给 0（不许顺手修）")
-        assertEquals(1L, intOf(store, "K"), "字符串 `>=` 反向：\"a\" >= \"b\" 官方给 1")
+        assertEquals(1L, intOf(store, "J"), "字符串 `>=` 序数：\"b\" >= \"a\" 得 1（4.981）")
+        assertEquals(0L, intOf(store, "K"), "字符串 `>=` 序数：\"a\" >= \"b\" 得 0（4.981）")
     }
 
     /**

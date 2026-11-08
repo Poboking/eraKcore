@@ -4,6 +4,8 @@ import com.eratw.port.core.expr.EvalContext
 import com.eratw.port.core.host.ConsoleSink
 import com.eratw.port.core.host.DebugSink
 import com.eratw.port.core.host.GraphicsSink
+import com.eratw.port.core.host.GRAPHICS_SINK_SLOT
+import com.eratw.port.core.host.GraphicsSinkRef
 import com.eratw.port.core.host.InputSink
 import com.eratw.port.core.host.NoopConsoleSink
 import com.eratw.port.core.host.NoopDebugSink
@@ -33,6 +35,16 @@ data class SemConfig(
     val moneyLabel: String = "$",
     /** 金额前缀格式（PRINT_SHOPITEM）。spec: ConfigData.cs:160 MoneyFirst 缺省 true */
     val moneyFirst: Boolean = true,
+    /**
+     * BAR 语句的实部/空部字符（「BAR文字1 / BAR文字2」）。出厂 `'*'` / `'.'`
+     * （spec: `ConfigData.cs:164-165`），`_Replace.csv` 条目在 `Config.SetReplace`
+     * 读入（spec: `Config.cs:730-731`）；消费点 `ExpressionMediator.CreateBar`
+     * （spec: `ExpressionMediator.cs:155-156`：实部填 BarChar1、空部填 BarChar2）。
+     * 接线点 proc/GameSession.kt（生效配置注入）；BARSTR 函数侧已有独立活读
+     * （fn/HostMethods barChars），两处同一条目。
+     */
+    val barChar1: Char = '*',
+    val barChar2: Char = '.',
     /** 污渍初值（RESET_STAIN）。spec: ConfigData.cs:169 */
     val stainDefault: LongArray = longArrayOf(0L, 0L, 2L, 1L, 8L),
     /** UseNewRandom（RANDOMIZE/INITRAND/DUMPRAND 的告警开关）。spec: ConfigData.cs UseNewRandom */
@@ -189,14 +201,14 @@ class ExecContext(
      * 图形宿主 sink 注入点（M10-GFX）。缺省 [NoopGraphicsSink] = 图形语句静默空操作，
      * 既有纯 JVM 装置（语料闸 / E2E / bootSmoke）的读数因此不受影响。
      *
-     * 声明成 `var` 而不是构造参数唯一通道，是因为真机装配链上
+     * 声明成「构造参数 + 同名可变属性」而不是单一 val，是因为真机装配链上
      * `GameHost → GameSession → ProcessRuntime` 的构造点在别的 lane 手里，
      * 而 Android 侧的 sink 要等 `Context` / 解包根 / 屏幕尺寸都齐了才建得出来；
      * 语句层每次都是现读 `ctx.graphics`（`StatementExecutor.kt:385-422` 六条图形语句），
      * 所以「装载完成后换上真 sink」与「构造时就传进来」逐次执行等价。
      * 写入方必须是 VM 线程（或在 `drive()` 之前完成），本字段不带锁。
      */
-    var graphics: GraphicsSink = NoopGraphicsSink,
+    graphics: GraphicsSink = NoopGraphicsSink,
     /**
      * 当前脚本行标识（原版 `Process.getCurrentLine` 的身份位）。
      *
@@ -251,6 +263,47 @@ class ExecContext(
      */
     var isFunctionMethodFrame: () -> Boolean = { false },
 ) {
+    /**
+     * 图形宿主 sink 的**当前值**（构造参数 [graphics] 的活视图）。
+     *
+     * ## 为什么是「构造参数 + 同名属性」而不是单一 `var` 构造参数
+     *
+     * 写入要带副作用：`CBGSETG` / `CBGSETSPRITE` / `CBGSETBUTTONSPRITE` / `CBGCLEAR*` 是
+     * **内建函数**（`fn/GraphicsMethods.kt`），执行语境是 `BuiltinContext`，拿不到本类；
+     * 它们经 `RuntimeAux` 的 [GRAPHICS_SINK_SLOT] 现读同一个 sink 才能把 CBG 快照推出去
+     * （`CbgPool.snapshot` → `GraphicsSink.setCbgLayers`）。Kotlin 不允许给主构造参数属性
+     * 写 setter，所以把参数留作构造入参、属性在类体里带自定义 setter —— 两边的名字必须
+     * 相同（`ProcessRuntime` 用命名实参 `graphics = ...` 传入）。构造那条路不走 setter
+     * （属性初始化器直写 backing field），故 init 里补发一次；赋值那条路（真机在屏幕布局
+     * 完成后换上 `AndroidGraphicsSink`）由 setter 发。读侧只认槽里的最新引用。
+     */
+    var graphics: GraphicsSink = graphics
+        set(value) {
+            field = value
+            publishGraphicsSink(value)
+        }
+
+    init {
+        publishGraphicsSink(graphics)
+    }
+
+    /**
+     * 把 sink 引用发到 [GRAPHICS_SINK_SLOT]（原地换 [GraphicsSinkRef.sink]，不新建槽）。
+     *
+     * **`NoopGraphicsSink` 不建槽**：`RuntimeAux.slotNames()` 参与 L3 状态哈希
+     * （`core-vm/src/test/.../l3/StateHash.kt` 的 `aux:<slot>` 分簇），纯 JVM 装置
+     * （语料闸 / golden / L3）不该因为多了个空槽而哈希漂移。真机换上真 sink 时才动 aux
+     * ——那句赋值本来就发生在屏幕布局完成之后。已有槽则原地改成 Noop（拆卸路径），
+     * 保证「换回缺省」之后不会再往旧 sink 推快照。
+     */
+    private fun publishGraphicsSink(value: GraphicsSink) {
+        if (value === NoopGraphicsSink) {
+            variables.aux.peek<GraphicsSinkRef>(GRAPHICS_SINK_SLOT)?.sink = value
+            return
+        }
+        variables.aux.slot(GRAPHICS_SINK_SLOT) { GraphicsSinkRef() }.sink = value
+    }
+
     // ---- 进程级显示状态（对应 Process.skipPrint / Console.MesSkip）----
     //
     // 两个标志的真身都在**每 VM 的 aux 跳过状态槽**（core/fn/InputMethods.kt 的
@@ -297,6 +350,21 @@ class ExecContext(
      * 有 proc 接线时该缺省值会在第一条语句派发前被覆盖。
      */
     var canSave: Boolean = true
+
+    /**
+     * 输入框的宏展开开关（4.981 上游 `DISABLE_INPUT_MACRO` / `ENABLE_INPUT_MACRO`）。
+     *
+     * 语料用法：`DLC/实用设置补丁/实用设置.ERB:571-573` 用两条语句夹住一次 `INPUTS`，
+     * 让玩家把含花括号的预设宏（`{...}` 形态）**原样**录进来 —— 关掉宏展开后，
+     * 输入文本不被当成宏替换。出厂 true（原版输入框默认展开宏）。
+     * reference/emuera-cs 全文零命中，无 1.824 权威，语义按语料用法推定。
+     *
+     * 下发方式：语句层 → [InputRequest.macroEnabled] → 输入宿主（见 `sem` 的 `waitInput`）。
+     * 状态挂每 VM 的 [ExecContext] 实例（与 [canSave] / [saveSkip] 同类，不是静态全局）。
+     * TODO(verify)：宏语法（原版 `{VAR}` 之类）在输入侧如何展开、以及「关闭」是否只作用于
+     * 本次输入而非整段会话，语料没有可判读的样例，待输入宿主实现时复核。
+     */
+    var inputMacroEnabled: Boolean = true
 
     /** NOSKIP 进入前的 skipPrint 快照。spec: Process.cs:1593-1613 */
     var saveSkip: Boolean = false

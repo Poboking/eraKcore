@@ -305,4 +305,24 @@ class HotkeyErbProgramTest {
         assertEquals(3, view.size, "先前取到的快照不被后续追加改写")
         assertEquals(6, program.bytecodeSnapshot().size)
     }
+
+    @Test
+    fun `状态数组的 Long 入参不许折回 Int（官方在 init 当场 OverflowException）`() {
+        // `1L shl 32`.toInt() == 0 ⇒ 旧写法造出一把 0 长数组且不抛，之后每次 HOTKEY_STATE
+        // 都撞越界（症状从「init 失败」错位成「运行中偶发越界」）。
+        val wrapped = HotkeyStates()
+        assertFailsWith<IllegalStateException>("回绕成 0 长数组") { wrapped.init(1L shl 32) }
+        assertFalse(wrapped.initialized, "init 失败后不留半份数组")
+        assertFailsWith<IllegalStateException> { wrapped.init(-1L) }
+        assertFailsWith<IllegalStateException> { wrapped.init(Long.MAX_VALUE) }
+        // 合法档逐值不变。
+        val ok = HotkeyStates().apply { init(4L) }
+        ok.set(3L, 7L)
+        assertEquals(7L, ok[3])
+        assertEquals(4, ok.size)
+        // 下标回绕同样不许静默落到 0 号格（官方是裸抛越界）。
+        assertFailsWith<IndexOutOfBoundsException> { ok.set(1L shl 32, 9L) }
+        assertEquals(0L, ok[0], "回绕的写不许落进 0 号格")
+        assertFailsWith<IndexOutOfBoundsException> { ok.set(-1L, 9L) }
+    }
 }

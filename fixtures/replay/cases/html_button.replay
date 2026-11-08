@@ -1,0 +1,24 @@
+# 画面按钮点击的命中路径：PRINTBUTTON 打出按钮（文本 OK、value 7），
+# 随后 INPUT -1, 1（带鼠标等待）。点击交付按 MainWindow.cs:824-849：
+#   1. InputString(1L, selectedString) ⇒ RESULTS:1 = "7"（:834）
+#   2. InputInteger(1L, 1L) 左键位       ⇒ RESULT:1 = 1（:847）
+#   3. PressEnterKey(selectedString)     ⇒ 文本通道再走一遍 INPUT 的整数解析 ⇒ RESULT:0 = 7
+# 语料里的用法就是「按钮 value 即提交文本」（QOL_USERCOM.ERB @COM_OPTION 读 RESULT:1）。
+case: html_button
+target: REPLAY_HTML_BUTTON
+anchor: reference/emuera-cs/MinorShift.Emuera.Forms/MainWindow.cs:824-849
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1371-1373
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc/Process.cs:404-412
+--- inputs
+click 7 1
+--- expect-console
+START-HTML-BUTTON
+OK
+BTN_RESULT=7
+BTN_RESULT1=1
+BTN_RESULTS1=7
+END-HTML-BUTTON
+--- expect-vars
+RESULT:0 = 7
+RESULT:1 = 1
+RESULTS:1 = "7"

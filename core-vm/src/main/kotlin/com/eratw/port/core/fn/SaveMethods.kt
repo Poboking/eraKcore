@@ -44,20 +44,52 @@ internal fun registerSaveMethods(r: BuiltinRegistry) {
     // spec: FunctionMethodCreator.cs:3512-3539 CheckdataMethod
     if (claimable(r, "CHKDATA")) {
         r.register(BuiltinMethod("CHKDATA", I, 1, 1) { c, a ->
-            val no = iv(a[0]!!)
+            val no = requiredIntArg(a, 0, "CHKDATA")
             // :3527-3534 —— 文案取 Lang.Error.ArgIsNegative / ArgIsTooLarge
             // （lang/emuera.zhs.xml:913 / :915），{0} = 函数名、{1} = 参数号、{2} = 实参。
             if (no < 0) throw CodeEE("CHKDATA函数: 第1个参数被是负值($no)")
             if (no > Int.MAX_VALUE) throw CodeEE("CHKDATA函数: 第1个参数($no)过大")
-            // 宿主自带探测优先（可返回完整 SaveDataCheck）；宿主只判定存在性（found 回 null）时
-            // 带着 gameBase 与 UseSaveFolder 补全头探测。探测回 null 只剩「fileOps 未接线」一种
-            // —— 槽位在而读盘失败已由 SaveDataProbe.check 折成 ETC_ERROR(4) + LoadError 文案
-            // （VariableEvaluator.cs:2220-2228，Lang.Error.LoadError =「加载时发生错误」），
-            // 不再冒充「未接线」。两路皆无能力才抛错 —— 不静默答「不存在」。
-            val useSaveFolder = SaveWiring.of(c.store)?.config?.useSaveFolder
-            val res = c.host.checkSaveData(no, SaveFileKind.NORMAL)
-                ?: SaveDataProbe.check(c.host, SaveFileKind.NORMAL, no, c.store.registry.gameBase, useSaveFolder)
-                ?: throw CodeEE("函数 CHKDATA 需要宿主接线存档探测（checkSaveData == null）")
+            // **目录口径必须与 SAVEDATA / DELDATA 同源**（2026-11-01 玩家反馈收口）。
+            //
+            // `SAVEDATA` / `LOADDATA` / `DELDATA` 的落盘路径由 `FileSystemOps` 的
+            // `SaveConfig.useSaveFolder` 决定（`GameSession` 从**会话配置**读出并装进
+            // [SaveWiring]）；而 `RootedBuiltinHost.checkSaveData` 读的是**宿主自己那份
+            // 配置链**（`BootHosts.kt:395` = `ConfigMethods.useSaveFolder(configChain.store)`）。
+            // 两把尺来自两个对象，一旦不一致就出现「写进 A、查的是 B」：
+            // - 宿主尺 = false、会话尺 = true ⇒ 档写在 `sav/` 而列表永远报「空槽」
+            //   （玩家看到的就是「存档存不上 / 不能覆盖旧存档」）；
+            // - 反向 ⇒ `DELDATA` 删掉根目录那份，`CHKDATA` 仍在 `sav/` 里找到旧档，
+            //   删完的槽位又「冒出」一个存档（玩家报的「出现新的未知存档」）。
+            //
+            // 而且旧写法里这个不一致**必然**暴露：`checkSaveData` 在「没找到」时返回的是
+            // 非 null 的 `SaveDataCheck(FILENOTFOUND)`（`BootHosts.kt:452`），`?:` 因此
+            // 短路，带着权威 `useSaveFolder` 的 [SaveDataProbe.check] **永远轮不到** ——
+            // 只有「宿主找不到」这一种情况才最需要它。
+            //
+            // 故：会话已接线（[SaveWiring] 在）时直接走 [SaveDataProbe.check]，与写盘侧共用
+            // 同一份 `SaveConfig`；未接线（单测装置 / 裸宿主）才退回「宿主先判存在性」的旧序，
+            // 那里宿主的链就是唯一可用口径，两者不可能分叉。
+            val wiring = SaveWiring.of(c.store)
+            val useSaveFolder = wiring?.config?.useSaveFolder
+            val res = if (wiring != null) {
+                SaveDataProbe.check(
+                    c.host, SaveFileKind.NORMAL, no, c.store.registry.gameBase, useSaveFolder,
+                    // 存档列表每页 40 格、每次重绘都调 CHKDATA：只解头字段，
+                    // 不在这里为显示描述文本把整份存档解压一遍（2026-10-31 性能修）。
+                    headerOnly = true,
+                )
+            } else {
+                // 宿主自带探测优先（可返回完整 SaveDataCheck）；宿主只判定存在性（found 回 null）时
+                // 带着 gameBase 补全头探测。探测回 null 只剩「fileOps 未接线」一种
+                // —— 槽位在而读盘失败已由 SaveDataProbe.check 折成 ETC_ERROR(4) + LoadError 文案
+                // （VariableEvaluator.cs:2220-2228，Lang.Error.LoadError =「加载时发生错误」），
+                // 不再冒充「未接线」。两路皆无能力才抛错 —— 不静默答「不存在」。
+                c.host.checkSaveData(no, SaveFileKind.NORMAL)
+                    ?: SaveDataProbe.check(
+                        c.host, SaveFileKind.NORMAL, no, c.store.registry.gameBase, useSaveFolder,
+                        headerOnly = true,
+                    )
+            } ?: throw CodeEE("函数 CHKDATA 需要宿主接线存档探测（checkSaveData == null）")
             // :3536 —— 直接给 RESULTS:0 赋描述文本；RESULTS 长度不足时静默越界（同 ENUMFILES 口径）。
             if (c.store.getLength("RESULTS", -1) > 0) c.store.writeStr("RESULTS", longArrayOf(0), res.mes)
             Value.IntV(res.state.code) // :3537

@@ -32,7 +32,7 @@ import org.junit.jupiter.api.Assumptions
  * - 真档实测（`$ERATW_GAMEDIR/sav/save00.sav` 逐条目解析，168 个角色块）：每块分隔符之前
  *   恒 27 条系统条目（顺序见 [PC_BLOCK0_SYSTEM_KEYS]），其中**没有** `NICKNAME`；
  *   `MASTERNAME` 只在块 26 / 61 出现（八云紫 / 藤原妹红，值 = 昴），其余 166 块没有；
- *   `NAME`/`CALLNAME`/`ISASSI` 每块都有。仓内快照 `.workbuddy/sav-backup/sav-20261018-110513/save00.sav`
+ *   `NAME`/`CALLNAME`/`ISASSI` 每块都有。仓内快照 `<internal-workdir>/<sample-backup>/sav-20261018-110513/save00.sav`
  *   与这份真档字节相同（sha256 前缀 27883f1663969468），同一读数另钉在
  *   `core/save/SaveFormatAuditTest` 的角色块一节。
  *

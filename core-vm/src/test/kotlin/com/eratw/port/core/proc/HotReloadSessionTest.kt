@@ -84,16 +84,28 @@ class HotReloadSessionTest {
     }
 
     @Test
-    fun `窗口宽热更后 HTML 可绘制宽立刻变`() {
+    fun `窗口宽是重启键 热更被拒且条目表不动`() {
         val s = session(dir, ConfigStore())
         try {
             val before = EffectiveConfig.of(s.configStore).drawableWidth
             assertEquals(760 - 3, before, "缺省 760 宽、字号 18 ⇒ shift 3（Config.cs:461-466）")
 
-            EffectiveConfig.of(s.configStore).reloadHot(ConfigKey.WindowX, ConfigValue.IntValue(1200))
+            // 窗口宽的生效面是**版面宽 / 可见行数**：装配层在会话构造前把生效值烘进
+            // CanvasConsoleView（ScreenLayout.resolve 的输入，列数/行数是输出），会话期版面冻结。
+            // 热更只改核心 drawableWidth 的话屏上版面不会重建 ⇒「提示已热更、版面没变」的假生效，
+            // 所以它已移出 HOT_KEYS（R4.5/D5），这里判重启被拒且一个字节都不写。
+            val result = EffectiveConfig.of(s.configStore).reloadHot(ConfigKey.WindowX, ConfigValue.IntValue(1200))
+            assertEquals(ConfigReloadResult.NeedsRestart(ConfigKey.WindowX), result, "窗口宽必须重开会话")
 
-            // HtmlMethods.kt:563 每次 HTML_PRINT 都现算这条式子 ⇒ 下一帧就是新宽。
-            assertEquals(1200 - 3, EffectiveConfig.of(s.configStore).drawableWidth)
+            // HtmlMethods.kt:563 每次 HTML_PRINT 都现算这条式子 ⇒ 视图读数原样不动。
+            assertEquals(760 - 3, EffectiveConfig.of(s.configStore).drawableWidth, "热更被拒 ⇒ 视图仍是旧宽")
+            assertEquals(760, s.configStore.itemOf(ConfigKey.WindowX).int(), "重启键一个字节都不写")
+
+            // 重开会话 = 新起一份视图才吃到新宽（与 `字号切回重启键` 用例同一口径）。
+            // 真机上这条新宽还要经装配层 `applySourceWindowMetrics` 重解版面才上屏
+            // ⇒ 必须随会话重建，这也正是移出 HOT_KEYS 的理由（R4.5/D5）。
+            s.configStore.itemOf(ConfigKey.WindowX).assign(ConfigValue.IntValue(1200))
+            assertEquals(1200 - 3, EffectiveConfig.of(s.configStore).drawableWidth, "新视图才读到新宽")
         } finally {
             s.close()
         }

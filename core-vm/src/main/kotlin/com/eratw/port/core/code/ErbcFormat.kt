@@ -157,21 +157,30 @@ object ErbcFormat {
     const val MARKER_OPCODE_MAX = 197
 
     /**
-     * 容器里**合法的操作码上界**（= 栈码组末条 `_STK_POP_SLOT_S`）。
+     * 容器里**合法的操作码上界**（= [Opcode.MAX_OPCODE]，当前末条 `_EVAL_INT_JZ`(246)）。
      *
-     * 0..243 连续无空洞：VM 内部 0..28（[Opcode.INTERNAL_COUNT]）、isa 语句 29..197
+     * 0..246 连续无空洞：VM 内部 0..28（[Opcode.INTERNAL_COUNT]）、isa 语句 29..197
      * （[MARKER_OPCODE_MAX]）、编译器扩展 198..201（含 `_CALL_BY_NAME`/`_JUMP_BY_NAME`/
      * `_JUMP_DYN`/`_RETS`）、栈码组 202..243（T2-21 的 `_STK_*`，操作数直接是池下标，
-     * 装载期校验见 `ErbcReader.requireStackOpPool`）。区间外的操作码在 VM 分派里只会落进
-     * `else` 分支报「语句 <op:N> 尚未实现」—— 那是**运行期**才炸，且文案与真因（产物损坏）
-     * 无关；装载期必须在 [ErbcReader] 里当场拒绝（规约 §1.6「禁止静默降级」）。
+     * 装载期校验见 `ErbcReader.requireStackOpPool`）、浮点返回追加段 244（`_RETF`，
+     * 4.981 升版）、运行期字符串调用追加段 245（`_CALL_STR`）、条件位融合追加段
+     * 246（`_EVAL_INT_JZ`，MODERN-T1）。区间外的操作码在 VM 分派里只会落进 `else` 分支报
+     * 「语句 <op:N> 尚未实现」—— 那是**运行期**才炸，且文案与真因（产物损坏）无关；
+     * 装载期必须在 [ErbcReader] 里当场拒绝（规约 §1.6「禁止静默降级」）。
      *
-     * T2-21 曾漏扩本上界（停在 201）：栈码产物在两条装载路的共同咽喉 `needsStatementPool`
+     * 本上界随 `Opcode.MAX_OPCODE` 跟进（**不得**自己钉死某个具体操作码）：
+     * T2-21 曾漏扩本上界（停在 201），栈码产物在两条装载路的共同咽喉 `needsStatementPool`
      * 就被拒掉，`requireStackOpPool` 永远执行不到——`Assembler` 直连内存对象绕开容器，
      * 所以栈码单测全绿，缺陷只在真实容器路现形（2026-10-27 合流时由
-     * `ErbcCodeBcAuditTest.越界操作码在装载期当场拒载` 的 op=202 用例钉出）。
+     * `ErbcCodeBcAuditTest.越界操作码在装载期当场拒载` 的 op=202 用例钉出）；
+     * 4.981 追加 `_RETF` 时同款缺口再次由 `ReturnfFloatTest` 的装载闸用例钉出。
+     *
+     * **上界对了不等于操作数对了**：`_RETF` 那一次上界扩到 244 之后，它的 a（表达式池
+     * 下标）仍然四份手写 when 一起漏判 —— 范围闸放行、池判据没有它的分支。M2-1 起
+     * 「哪个槽是哪个池」收进 [OpcodeRelocation]（specs/erbc-format.md §5.6b），追加
+     * 操作码漏登记分类会在类初始化时就抛，不再靠人记得去改四份 when。
      */
-    const val OPCODE_MAX = Opcode._STK_POP_SLOT_S
+    const val OPCODE_MAX = Opcode.MAX_OPCODE
 
     /** [op] 是否是可编码/可解码的操作码（0..[OPCODE_MAX]）。区间外一律畸形字节。 */
     fun isValidOpcode(op: Int): Boolean = op in 0..OPCODE_MAX
@@ -193,6 +202,15 @@ object ErbcFormat {
         const val BINARY = 9
         const val TERNARY = 10
         const val FORM_STRING = 11
+
+        /**
+         * 浮点字面量（4.981 升版；8 字节 IEEE-754 raw bits，逐字节同 [ErbcSink.f64]）。
+         *
+         * **追加值属于兼容变更，不升容器 version**（spec: `specs/erbc-format.md` §8.4 的
+         * 「追加新标签 = 兼容」条款）：v1 产物里不会出现该标签，v1/v2 读取路径无需改动。
+         * TODO(wiring): `specs/erbc-format.md` 的表达式标签表需由 specs 独占路追加本条。
+         */
+        const val FLOAT_LITERAL = 12
     }
 
     /** `FormPart` 标签（u8）。 */
@@ -318,8 +336,15 @@ object ErbcFormat {
     }
 
     /** `OperandType` 线值（0 位，冻结）。 */
-    object WireEnum {        const val OPERAND_INT = 0
+    object WireEnum {
+        const val OPERAND_INT = 0
         const val OPERAND_STR = 1
+
+        /**
+         * 浮点操作数（4.981 升版）。追加值 = 兼容变更，不升容器 version
+         * （spec: `specs/erbc-format.md` §8.4；TODO(wiring): 该表同样需 specs 独占路追加）。
+         */
+        const val OPERAND_FLOAT = 2
 
         const val SORT_UNDEF = 0
         const val SORT_ASCENDING = 1

@@ -11,7 +11,7 @@ import com.eratw.port.core.stmt.Statement
  *
  * 整池压扁（`ensureFlatStmtSource` 的整池形态）实测常驻 ≈396 MiB：int 流 67 MB +
  * ops/heads/lines 各 6.9 MB + **807k 个表达式根结点（含子结点约 200 万节点）**。
- * 512 MiB 堆挡位装不下（`.workbuddy/CONTRACT-T2-64.md` §10.6）。而设备的惰性树基线
+ * 512 MiB 堆挡位装不下（`<internal-workdir>/CONTRACT-T2-64.md` §10.6）。而设备的惰性树基线
  * 只有 64 MiB 量级 —— 差距全在「把没跑到的语句也压了」。
  *
  * 分片把这件事变成按需：语句池按 [segmentSize] 条切段，首次访问某段时才
@@ -60,9 +60,6 @@ internal class SegmentedFlatStmtSource(
          * 而是执行路径上的固定开销（待堆 dump 归因，见 CONTRACT-T2-64 §10.9）。
          * 在归因清楚之前，Android 侧默认关（GameHost 传 false），桌面/测试保持开。         */
         const val DEFAULT_MAX_SEGMENTS = 64
-
-        /** 空参数流（还没建过任何片时的 `argStreamBase` 返回值）。 */
-        val NO_SLOTS = IntArray(0)
     }
 
     /** LRU：accessOrder=true，`blocks[seg]` 的读也算一次访问。 */
@@ -103,8 +100,12 @@ internal class SegmentedFlatStmtSource(
 
     /** 超出上限时淘汰最久未用的片（当前片刚被访问，必然最“新”）。 */
     private fun trim() {
-        if (maxSegments < 2) return
-        while (blocks.size > maxSegments) {
+        // 上限至少要卡到 1 片。旧写法 `if (maxSegments < 2) return` 把「1 片 / 0 片」当成
+        // 不淘汰：片表随跑到的段数**无界增长**（本类 KDoc 承诺的"上限由 maxSegments 卡住"
+        // 不成立，诊断口 buildSegmentedFlatSource(maxSegments = 1) 就是这条路的入口）。
+        // 刚插入的片在 accessOrder 表里最新，淘汰只会落在旧片上，当前片读数不受影响。
+        val limit = if (maxSegments > 1) maxSegments else 1
+        while (blocks.size > limit) {
             val eldest = blocks.keys.iterator()
             if (!eldest.hasNext()) return
             eldest.next()
@@ -118,16 +119,20 @@ internal class SegmentedFlatStmtSource(
 
     override fun endAt(index: Int): Int = blockFor(index).headAt(index - currentBase + 1)
 
-    override fun argStreamBase(): IntArray = currentBlock?.stream ?: NO_SLOTS
+    override fun argStreamBase(): IntArray =
+        currentBlock?.stream
+            ?: error("分段扁平池窗口未打开：argStreamBase 必须在 headAt/opAt 定位到片之后调用（类 KDoc 的窗口契约）——静默给空数组等于把违例读成「该语句没有实参」")
 
     override fun exprAt(poolIdx: Int): Expr? {
         if (poolIdx == ErbcFormat.NONE_REF) return null
-        val block = currentBlock ?: return null
+        val block = currentBlock
+            ?: error("分段扁平池窗口未打开：exprAt($poolIdx) 越窗调用（类 KDoc 的窗口契约）——静默给 null 会把违例读成「该槽不是表达式」")
         return block.exprAt(poolIdx)
     }
 
     override fun stringAt(poolIdx: Int): String {
-        val block = currentBlock ?: return ""
+        val block = currentBlock
+            ?: error("分段扁平池窗口未打开：stringAt($poolIdx) 越窗调用（类 KDoc 的窗口契约）——静默给空串会把违例读成「字面量本身是空串」")
         return block.strAt(poolIdx)
     }
 

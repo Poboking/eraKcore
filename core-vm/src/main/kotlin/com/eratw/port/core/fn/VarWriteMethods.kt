@@ -11,11 +11,13 @@ import com.eratw.port.core.expr.VarInfo
 import com.eratw.port.core.expr.VarRef
 import com.eratw.port.core.lexer.CharStream
 import com.eratw.port.core.lexer.ErbLexer
+import com.eratw.port.core.lexer.LangKey
 import com.eratw.port.core.lexer.LexAnalyzeFlag
 import com.eratw.port.core.lexer.LexError
 import com.eratw.port.core.lexer.LexEndWith
 import com.eratw.port.core.stmt.toExprToken
 import com.eratw.port.core.vars.RefUserVar
+import com.eratw.port.core.vars.emptyRefVar
 
 /**
  * 变量写入类函数（[registerVarWriteMethods]）。
@@ -39,8 +41,13 @@ import com.eratw.port.core.vars.RefUserVar
  *   （"不是整型"），整数变量收到非整数报 IsNotStr（"不是字符串型"，:766-777）。
  * - VARSETEX 三维变量的结束下标默认值是 0（:819 的第二个 `IsArray2D` 显然应为
  *   `IsArray3D`），而不是第三维长度；三维写入还交换了第 0/1 维（:854、:919）。
- * - ARRAYMSORTEX 的第三个参数为 0（显式传入）时直接返回 0（:571-574），
+ * - ARRAYMSORTEX 的第四个参数为 0（显式传入，`arguments[3]`）时直接返回 0（:571-574），
  *   而 ARRAYMSORT 没有这个参数。
+ * - VARSETEX 的第 1 / 第 2 / 第 3 槽被**显式写成空位**时，原版分别落在
+ *   `arguments[0].GetStrValue`（:811）、`arguments[1].GetOperandType`（:824/:861）、
+ *   `arguments[2].GetIntValue`（:820）上裸 NullReferenceException —— 崩溃折码政策
+ *   （specs/verify-notes §12）下三槽一律折成 CodeEE，**不**给缺省值：静默取 0 或空串
+ *   会把整段区间擦成同一个值，屏上看不出它被擦过。
  */
 internal fun registerVarWriteMethods(r: BuiltinRegistry) {
     val I = OperandType.INT
@@ -56,17 +63,21 @@ internal fun registerVarWriteMethods(r: BuiltinRegistry) {
     // spec: FunctionMethodCreator.cs:736-784（2 个参数，第二个为 Any）
     refInt("SETVAR", 2, 2) { c, a ->
         val text = stringArg(c, a, 0, "SETVAR")
-        val ref = requireWritableVarRef(c, "SETVAR", text)
+        // 原版第 1 参求值两次（spec: :757-758：`strValue` 一次、喂 Analyse 再一次），照抄。
+        // 可观测性见 [requireWritableVarRef] 的 KDoc。
+        val parseText = stringArg(c, a, 0, "SETVAR")
+        val ref = requireWritableVarRef(c, "SETVAR", text, parseText)
         val targetIsStr = ref.operandType == OperandType.STR
 
         val value = a.getOrNull(1)
             ?: throw CodeEE("函数 SETVAR：缺少第 2 个参数")
         // spec: :764-779 —— 文案是反的：字符串变量报 IsNotInt，整数变量报 IsNotStr
+        // （官方即这两枚键，逐字走 LangKey 通道；2026-11-05 lane negrange 收编）。
         if (targetIsStr) {
-            if (value.operandType != OperandType.STR) throw CodeEE("${text}不是整型")
+            if (value.operandType != OperandType.STR) throw CodeEE(LangKey.IsNotInt.renderZhs(text))
             c.store.writeStr(ref.name, elementIndices(c, ref), value.getStrValue(c))
         } else {
-            if (value.operandType != OperandType.INT) throw CodeEE("${text}不是字符串型")
+            if (value.operandType != OperandType.INT) throw CodeEE(LangKey.IsNotStr.renderZhs(text))
             c.store.writeInt(ref.name, elementIndices(c, ref), value.getIntValue(c))
         }
         1L
@@ -79,7 +90,9 @@ internal fun registerVarWriteMethods(r: BuiltinRegistry) {
     // spec: FunctionMethodCreator.cs:786-928（2..5 个参数；OmitStart=2）
     refInt("VARSETEX", 2, 5) { c, a ->
         val text = stringArg(c, a, 0, "VARSETEX")
-        val ref = requireWritableVarRef(c, "VARSETEX", text)
+        // 原版第 1 参求值两次（spec: :811-812），照抄。
+        val parseText = stringArg(c, a, 0, "VARSETEX")
+        val ref = requireWritableVarRef(c, "VARSETEX", text, parseText)
         val dim = targetDimension(c, ref)
         // C# 的 arguments.Count 含省略位；本实现的 Expr 列表长度与源码书写一致。
         val startL = if (a.size >= 4) intArg(c, a, 3, "VARSETEX") else 0L
@@ -116,24 +129,33 @@ internal fun registerVarWriteMethods(r: BuiltinRegistry) {
         }
         val start = startL.toInt()
         val end = endL.toInt()
-        val all = a.size < 3 || (a[2]?.getIntValue(c) ?: 0L) != 0L
+        // 第 3 位的空位不能当 0：C# 是 `arguments.Count < 3 || arguments[2].GetIntValue(...)`
+        // （spec: FunctionMethodCreator.cs:820）——写了 5 槽却把第 3 槽留空，原版在 arguments[2]
+        // 上裸 NullReferenceException。折成 CodeEE（同 §12 崩溃折码政策），静默取 0 会少写整段区间。
+        val all = a.size < 3 || intArg(c, a, 2, "VARSETEX") != 0L
 
         if (ref.operandType == OperandType.STR) {
+            // 第 2 槽（值位）的显式空位同样不能当空串：C# 在 `arguments.Count > 1` 之后第一句就是
+            // `arguments[1].GetOperandType()`（spec: FunctionMethodCreator.cs:824），写了槽位却留空
+            // ⇒ 在 null 上取类型 ⇒ 裸 NullReferenceException。折 CodeEE，口径同第 1 槽（stringArg）
+            // 与第 3 槽（intArg）：静默取 "" 会把整段区间擦成空串，比崩更难查（屏上看不出擦过）。
             val valueExpr = a.getOrNull(1)
-            // spec: :824-826 —— 字符串目标收到非字符串值时抛 SetStrToInt
-            if (valueExpr != null && valueExpr.operandType != OperandType.STR) {
-                throw CodeEE("尝试将字符串赋值给非字符串变量\"$text\"")
+                ?: throw CodeEE("函数 VARSETEX 的第 2 个参数（赋值来源）不能省略")
+            // spec: :824-826 —— 字符串目标收到非字符串值时抛 SetStrToInt（官方实参 = 变量名原文 strValue）
+            if (valueExpr.operandType != OperandType.STR) {
+                throw CodeEE(LangKey.SetStrToInt.renderZhs(text))
             }
-            val value = valueExpr?.getStrValue(c) ?: ""
-            writeRangeStr(c, text, ref, value, start, end, all)
+            writeRangeStr(c, text, ref, valueExpr.getStrValue(c), start, end, all)
         } else {
+            // 同上（spec: :861 的 `arguments[1].GetOperandType()`）：值位留空在原版是裸 NRE，
+            // 旧写法 `?: 0L` 会把整段区间静默清零。
             val valueExpr = a.getOrNull(1)
-            // spec: :861-863 —— 整数目标收到非整数时抛 SetIntToStr
-            if (valueExpr != null && valueExpr.operandType != OperandType.INT) {
-                throw CodeEE("尝试将整数赋值给非整数型变量\"$text\"")
+                ?: throw CodeEE("函数 VARSETEX 的第 2 个参数（赋值来源）不能省略")
+            // spec: :861-863 —— 整数目标收到非整数时抛 SetIntToStr（官方实参 = 变量名原文 strValue）
+            if (valueExpr.operandType != OperandType.INT) {
+                throw CodeEE(LangKey.SetIntToStr.renderZhs(text))
             }
-            val value = valueExpr?.getIntValue(c) ?: 0L
-            writeRangeInt(c, text, ref, value, start, end, all)
+            writeRangeInt(c, text, ref, valueExpr.getIntValue(c), start, end, all)
         }
         1L
     }
@@ -234,13 +256,37 @@ private fun parseExpression(c: BuiltinContext, fn: String, text: String): Expr {
  * spec: FunctionMethodCreator.cs:758-762 / :812-816 —— 非 VariableTerm、Identifier 为空
  * 或 IsConst 一律报 IsNotVar。Kotlin 侧以 [VarRef.isConst] 对应 IsConst。
  */
-private fun requireWritableVarRef(c: BuiltinContext, fn: String, text: String): VarRef {
-    val ast = parseExpression(c, fn, text)
-    val ref = ast as? VarRef ?: throw CodeEE("$text 不是变量")
-    if (ref.isConst) throw CodeEE("$text 不是变量")
+/**
+ * 第 1 参的「变量表达式字符串」→ 可写 [VarRef]。
+ *
+ * [text] 只进错误文案、[parseText] 才是词法/语法输入 —— 这条分离是照抄原版的**两次求值**：
+ * `FunctionMethodCreator.cs:757-758`（SETVAR）/ `:811-812`（VARSETEX）都是
+ * `string strValue = arguments[0].GetStrValue(exm);` 之后又把同一表达式
+ * `arguments[0].GetStrValue(exm)` 求一次喂 `LexicalAnalyzer.Analyse`。
+ * 对纯字符串实参（字面量 / 字符串变量 / 纯读插值）两次结果恒等、无副作用；
+ * 带副作用的实参（用户函数、`RAND` 等）在**触达次数**上与原版一致。
+ *
+ * 可观测性实测（2026-11-01，`eratw-画蛇添足版eratw4.980` 4,542 份 ERB/ERH）：
+ * SETVAR 1 处（`SETVAR(LOCALS, MOD_NUM)`）、GETVAR 15 处、GETVARS 7 处，首参形态全部是
+ * 字符串变量（`ARGS` / `LOCALS` / `TEMP_VAR`）或纯读插值字面量（`@"...{LIST:LOCAL}..."`），
+ * 无一处带副作用 ⇒ 本作读数零影响；照抄只为前向兼容 mod（ADR-005 理由 3）。
+ */
+private fun requireWritableVarRef(
+    c: BuiltinContext,
+    fn: String,
+    text: String,
+    parseText: String = text,
+): VarRef {
+    val ast = parseExpression(c, fn, parseText)
+    // 官方落不到 VariableTerm 时抛 IsNotVar（FunctionMethodCreator.cs:762/:782/:816/:926，
+    // 实参 = 第 1 参求值原文 strValue）；常量位同键（`:760-763` 把 IsConst 并进同一判定）。
+    // 2026-11-05 lane negrange 退役自造形「X 不是变量」（多一个半角空格、无引号通道）。
+    val ref = ast as? VarRef ?: throw CodeEE(LangKey.IsNotVar.renderZhs(text))
+    if (ref.isConst) throw CodeEE(LangKey.IsNotVar.renderZhs(text))
     if (ref.isNoArg && ref.indices.isEmpty() && targetDimension(c, ref) >= 2) {
-        // spec: VariableNoArgTerm.SetValue → MissingVarArg（VariableNoArgTerm.cs:21-36）
-        throw CodeEE("变量 $text 的下标被省略")
+        // spec: VariableNoArgTerm.SetValue → MissingVarArg（VariableNoArgTerm.cs:19-69，
+        // 实参 = Identifier.Name ⇒ 喂裸变量名而非引用写法原文）。旧自造串「变量 X 的下标被省略」退役。
+        throw CodeEE(LangKey.MissingVarArg.renderZhs(ref.name))
     }
     return ref
 }
@@ -270,6 +316,17 @@ private fun targetDimension(c: BuiltinContext, ref: VarRef): Int =
  * VARSETEX 区间端点先按 Long 判界再 toInt：裸 toInt 会把 2^32 回绕成 0，让越界端点
  * 伪装成合法区间。判界口径同 VariableStore.checkRangeEndpoints（端点可等于长度、
  * 负终点 = 空区间不报）。
+ *
+ * **fork 专有闸（2026-11-05 lane negrange 普查判定，文案允许自造）**：官方
+ * `VarSetExMethod`（FunctionMethodCreator.cs:786-928）**从不**对第 4/5 参做端点校验 ——
+ * 1 维直接进 `Identifier.SetValueAll(text, num, num2, 0)`（:834/:871），而
+ * `Int1DVariableToken.SetValueAll`（VariableData.cs:48-54）是裸 `for (i=start;i<end;i++) array[i]=…`，
+ * 越界端点在原版崩成裸 `IndexOutOfRangeException`（2D/3D 支 :841-844/:852-855 同理）。
+ * 官方唯一给区间端点发 CodeEE 的通道是 `IsArrayRangeValid` → `OoRInstructionArg`，
+ * 其调用点只有 VARSET 语句（VariableEvaluator.cs:275/:303）与 SUMARRAY/MATCH/MAXARRAY/
+ * FINDELEMENT/INRANGEARRAY/STRJOIN（FunctionMethodCreator.cs:4404/:4472/:4754/:4947/:5068/:6002），
+ * **不含 VARSETEX** ⇒ 本闸属崩溃折码（specs/verify-notes §12），屏上串无官方逐字形可换，
+ * 判界与文案本轮都不动。
  */
 private fun checkRangeEndpoint(text: String, v: Long, len: Long, isStart: Boolean) {
     if (isStart && (v < 0L || v > len)) {
@@ -285,6 +342,8 @@ private fun checkRangeEndpoint(text: String, v: Long, len: Long, isStart: Boolea
  * `(int)checked((nint)x)`：FunctionMethodCreator.cs:843/854/892/919），溢出抛异常而
  * 不是回绕；裸 toInt 会把 2^32 回绕成 0 静默写错行。这里只按 Int 域判界（越界 CodeEE），
  * 数组域越界仍由写入通道的 checkElement 报，与 C# 的 IndexOutOfRangeException 位对齐。
+ * **fork 专有文案（2026-11-05 lane negrange 普查判定）**：溢出位在原版抛裸
+ * `System.OverflowException`，Lang 表没有对应串 ⇒ 崩溃折码、自造允许。
  */
 private fun checkedSubscript(raw: Long, text: String, dim: Int): Int {
     if (raw < Int.MIN_VALUE || raw > Int.MAX_VALUE) {
@@ -295,7 +354,7 @@ private fun checkedSubscript(raw: Long, text: String, dim: Int): Int {
 
 /**
  * 一维：SetValueAll 直接覆盖区间；角色变量写 0 号角色（spec: :834/:871 传 charaPos=0）。
- * 二维/三维：原版走 `GetArray()`（角色数据会抛 CallCharaVarAsVar，VariableToken.cs:283-296）。
+ * 二维/三维：原版走 `GetArray()`（角色数据会抛 CallCharaVarAsVar，VariableToken.cs:212-216）。
  */
 private fun writeRangeStr(
     c: BuiltinContext,
@@ -407,11 +466,15 @@ private fun writeRangeInt(
     }
 }
 
-/** 二维/三维写入前确认不是角色变量：原版 `VariableToken.GetArray()` 对角色数据抛错。 */
+/**
+ * 二维/三维写入前确认不是角色变量：原版 `VariableToken.GetArray()` 对角色数据抛
+ * `Error.CallCharaVarAsVar`（VariableToken.cs:212-216，实参 = varName；
+ * 2026-11-05 lane negrange 起接官方逐字串，旧自造串「函数 X：变量 Y 是角色变量，不能整体操作」退役）。
+ */
 private fun requirePlainArray(c: BuiltinContext, ref: VarRef, fn: String) {
     val info = c.store.resolveVarInfo(ref.name)
     if (info?.isCharacterData == true) {
-        throw CodeEE("函数 $fn：变量 ${ref.name} 是角色变量，不能整体操作")
+        throw CodeEE(LangKey.CallCharaVarAsVar.renderZhs(ref.name))
     }
 }
 
@@ -460,7 +523,7 @@ private class ArrayView(
         if (uv is RefUserVar) {
             uv.targetInt?.let { return it.size }
             uv.targetStr?.let { return it.size }
-            throw CodeEE("引用变量 $name 未绑定目标（EmptyRefVar）")
+            throw emptyRefVar(name)
         }
         return c.store.getLength(name)
     }
@@ -517,6 +580,8 @@ private class ArrayView(
         when (value) {
             is Value.IntV -> writeInt(row, 0, value.v)
             is Value.StrV -> writeStr(row, 0, value.v)
+            // TODO(verify): 浮点值写入变量无 C# 证据（本轮无浮点变量族）；显式拒绝，不静默截断
+            is Value.FloatV -> throw CodeEE("变量写入不接受浮点值")
         }
     }
 
@@ -524,6 +589,7 @@ private class ArrayView(
         when (value) {
             is Value.IntV -> writeInt(row, col, value.v)
             is Value.StrV -> writeStr(row, col, value.v)
+            is Value.FloatV -> throw CodeEE("变量写入不接受浮点值")
         }
     }
 }

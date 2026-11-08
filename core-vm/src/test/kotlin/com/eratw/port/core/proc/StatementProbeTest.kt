@@ -310,7 +310,8 @@ class StatementProbeTest {
 
         assertEquals(StmtOutcome.Unwind(0L), probe.records.single().outcome)
         assertNull(probe.records.single().error)
-        // 旧树通道（不经扁平池）拿不到池下标：op 照给，index 用哨兵（StatementProbe.NO_STMT_INDEX）。
+        // 对象树通道（Android 生产默认，不经扁平池）拿不到池下标：op 照给，index 用哨兵
+        // （StatementProbe.NO_STMT_INDEX）。
         assertEquals(FunctionCode.SAVEGAME.ordinal, probe.records.single().op)
         assertEquals(StatementProbe.NO_STMT_INDEX, probe.records.single().index)
     }

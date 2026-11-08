@@ -174,7 +174,7 @@ class BootFailureTest {
         assertEquals(BootFailureKind.HEAP_TOO_SMALL, failure.kind)
         assertEquals(BootFailures.HEAP_SHORTAGE_TEXT, failure.detail)
         assertEquals(
-            "堆不足（全量装载的解码峰值约需 350–420 MiB；largeHeap 已开，仍不足请用 ≥6 GB RAM 机型）",
+            "堆不足（largeHeap 已开；挡位由系统决定，应用无法调高，仍不足请用 ≥6 GB RAM 机型）",
             failure.detail,
             "文案逐字锁定：宿主只加「启动失败：」标题",
         )

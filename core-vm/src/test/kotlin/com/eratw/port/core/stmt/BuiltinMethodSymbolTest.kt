@@ -64,7 +64,9 @@ class BuiltinMethodSymbolTest {
             BuiltinSymbols.functions.keys, BuiltinSymbols.methods,
             "原版 methodList 是单表双注册（FunctionIdentifier.cs:4140-4148 / IdentifierDictionary.cs:566-586），两表必须相等",
         )
-        assertEquals(271, BuiltinSymbols.functions.size, "原版 methodList 条目数")
+        // 271 条原版 + 8 条 4.981 上游自改新增（GETANIMETIMER/GETPLATFORM/UNCHECKED_* / MAP_*）
+        // + 1 条浮点扩展 TOFLOAT + 16 条 SQL 族，共 296（见交付报告 TODO）。
+        assertEquals(297, BuiltinSymbols.functions.size, "methodList 条目数（271 原版 + 8 上游 + 1 TOFLOAT + 16 SQL）")
         for ((name, type) in BuiltinSymbols.functions) {
             assertTrue(BuiltinSymbols.isBuiltinMethod(name), "$name 必须是 methodList 成员")
             assertTrue(BuiltinSymbols.isBuiltinFunction(name), "$name 必须有返回类型")
@@ -136,5 +138,21 @@ class BuiltinMethodSymbolTest {
         // funcDic 的 methodInstruction（FunctionIdentifier.cs:4140-4148）
         val st = assertIs<MethodStmt>(parse("GETCOLOR 1"))
         assertEquals("GETCOLOR", st.methodName.uppercase())
+    }
+
+    @Test
+    fun `POWER 任一实参浮点解析期返回浮点`() {
+        // 4.981 fork 的 CanReturnFloat（spec: FunctionMethodCreator.cs:5418-5436；
+        // 静态类型判据 spec: FunctionMethodTerm.cs:44-56）：任一实参 Float ⇒ 整体 Float。
+        // 少了这一步，`POWER(0.95, X) * Y` 会被钉成整型链，运行期在 iv() 上抛
+        // 「函数参数类型错误：需要数值」（2026-11-03 上报端点 SOURCE_DOWNBASE 行625）。
+        assertEquals(OperandType.FLOAT, exprOf("PRINTFORML X={POWER(0.95, 10)}").operandType)
+        assertEquals(OperandType.FLOAT, exprOf("PRINTFORML X={POWER(2, 0.5)}").operandType)
+        // 两参都整型仍是整型（α/β 非浮点时走 SingleLongTerm，spec: :5470-5477）。
+        assertEquals(OperandType.INT, exprOf("PRINTFORML X={POWER(2, 10)}").operandType)
+        // 晋升后整条算术链跟着浮点：`POWER(0.95,10) * 100` 是 Float 表达式。
+        assertEquals(OperandType.FLOAT, exprOf("PRINTFORML X={POWER(0.95, 10) * 100}").operandType)
+        // 名单外的整型方法不晋升：SQRT(4) 仍 INT（它没有 CanReturnFloat）。
+        assertEquals(OperandType.INT, exprOf("PRINTFORML X={SQRT(4)}").operandType)
     }
 }

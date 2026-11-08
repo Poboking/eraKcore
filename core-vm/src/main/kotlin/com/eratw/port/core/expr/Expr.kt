@@ -1,9 +1,22 @@
 package com.eratw.port.core.expr
 
-/** 操作数静态类型。对应原版 GetOperandType() 的 typeof(long)/typeof(string)。 */
+import com.eratw.port.core.err.DIVIDE_BY_ZERO_TEXT
+import com.eratw.port.core.err.MULTIPLY_10K_TO_STR_TEMPLATE
+import com.eratw.port.core.err.MULTIPLY_NEGATIVE_TO_STR_TEMPLATE
+import com.eratw.port.core.err.renderMultiplyToStrLimit
+import com.eratw.port.core.lexer.longFromScaledDouble
+
+/**
+ * 操作数静态类型。对应原版 GetOperandType() 的 typeof(long)/typeof(string)。
+ *
+ * [FLOAT] 是 4.981 升版新增（1.824 只有 long/string 两型，`GetOperandType` 从无 double 分支，
+ * spec: AExpression.cs:23-40；浮点字面量/`TOINT(… * 0.7)` 均为 4.981 语料的新写法）⇒
+ * `TODO(verify)`：类型提升与转换语义按本文件注释实现，无 C# 证据。
+ */
 enum class OperandType {
     INT,
     STR,
+    FLOAT,
 }
 
 /**
@@ -21,11 +34,24 @@ sealed interface Expr {
     fun getIntValue(ctx: EvalContext): Long
     fun getStrValue(ctx: EvalContext): String
 
+    /**
+     * 浮点求值通道（4.981 升版）。
+     *
+     * 默认实现 = 整型通道的宽化（`getIntValue(ctx).toDouble()`）：只有 `OperandType.FLOAT`
+     * 的结点会被调用方走到这里（[FloatLiteral] / 浮点算术 [Binary] / [Unary] 取负 /
+     * 浮点三目 [Ternary] / 返回 float 的 [FuncCall] 各自覆写），整型子式（含浮点比较的结果）
+     * 经默认实现即可。
+     */
+    fun getFloatValue(ctx: EvalContext): Double = getIntValue(ctx).toDouble()
+
     fun toValue(ctx: EvalContext): Value =
         // 小整数走缓存（见 [Value.intV] 的 KDoc）：本方法是「表达式结果 → Value」的唯一
         // 默认出口，JFR 实测在这里分配 26.99 MiB 的 `Value$IntV`。
-        if (operandType == OperandType.INT) Value.intV(getIntValue(ctx))
-        else Value.StrV(getStrValue(ctx))
+        when (operandType) {
+            OperandType.INT -> Value.intV(getIntValue(ctx))
+            OperandType.STR -> Value.StrV(getStrValue(ctx))
+            OperandType.FLOAT -> Value.FloatV(getFloatValue(ctx))
+        }
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +80,44 @@ data class StrLiteral(
     override val operandType get() = OperandType.STR
     override fun getIntValue(ctx: EvalContext) = 0L
     override fun getStrValue(ctx: EvalContext) = value
+}
+
+/**
+ * 浮点字面量（4.981 升版：`0.7` / `1.0` / `1.5e3`）。
+ *
+ * ## 整型通道 = 静默向零截断（路次 g5 按 fork 对齐）
+ *
+ * fork-src `Term.cs:108-146` 的 `SingleFloatTerm` 三条通道**全部覆写**，其中整型通道
+ * （:121-124）是 `public override long GetIntValue(ExpressionMediator exm) { return (long)fValue; }`
+ * —— C# unchecked 的 `(long)` 向零截断，**不报错**。本仓此前照 1.824 的口径抛错
+ * （1.824 无浮点型，`AExpression.cs:29-32` 的基类 `GetIntValue` 直接 `return 0`，
+ * 浮点整条通道不存在），⇒ `YOGORE:1.5 = 7` 这类形态本仓红、原版按 1 号格执行。
+ *
+ * 为什么差异面落在**下标位**：fork `VariableTerm.cs:49-99` 的三条读通道都用同一条
+ * `transporter[i] = arguments[i].GetIntValue(exm)`（:55 / :71 / :90，另见 :42
+ * `GetElementInt`）求下标 —— 下标表达式恒走整型通道，于是 `SingleFloatTerm` 的截断
+ * 在这里直接决定命中哪一格。语句位（`A = 1.5`）在本仓**先**被语句层的右值类型闸拦下
+ * （`stmt/ArgBuilders.kt:1799` 的 `if (!term.isInteger()) fail(...)`，实测上屏文案还写着
+ * 「不能把字符串赋给整数变量」），编译层 `compile/ErbProgramCompiler.kt:817-828` 的
+ * `OperandType.FLOAT` 守卫是第二道 ⇒ 落点面仍不截断。这两处文件都不在本路所有权内，
+ * 逐条见交付回执「需组长接线」。
+ *
+ * 越界口径复用 `core/lexer` 的 [longFromScaledDouble]（与 `TOINT` 的浮点支
+ * `fn/PureMethods.kt:1540` 同一个函数）：`d >= 2^63` 给 `Long.MIN_VALUE`，即 .NET x64
+ * `cvttsd2si` 的「整数不定值」，不是 JVM 的饱和。NaN 同落 `Long.MIN_VALUE` ——
+ * `longFromScaledDouble` 已按 .NET 口径（Term.cs:121-124）实现，f88d4801 起三处
+ * `(long)` 落点统一，旧 TODO「都按 JVM 的 0、本路不单独改」随之了结。
+ */
+data class FloatLiteral(
+    val value: Double,
+    override val line: Int = -1,
+    override val col: Int = -1,
+) : Expr {
+    override val operandType get() = OperandType.FLOAT
+    override fun getIntValue(ctx: EvalContext): Long = longFromScaledDouble(value)
+
+    override fun getFloatValue(ctx: EvalContext) = value
+    override fun getStrValue(ctx: EvalContext) = ""
 }
 
 /** #FUNCTION 声明参数的省略默认值占位。 spec: NullTerm.cs */
@@ -141,6 +205,72 @@ data class VarRef(
     // ------------------------------------------------------------------
     // 写（PERF 2026-10-27）：语句层写路径接站点句柄 + 下标借还池
     // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // 浮点读（4.981 fork 第三型变量）
+    // ------------------------------------------------------------------
+
+    /**
+     * 浮点变量读：走 [VariableReader.readFloat]，**不走**默认的「整型通道宽化」。
+     *
+     * 为什么必须覆写：接口缺省实现是 `getIntValue(ctx).toDouble()`（[Expr.getFloatValue]），
+     * 对本结点意味着把浮点变量当整数列读 —— `LOCALF = 1.25` 之后 `LOCALF * 2` 会算出 2.0
+     * 而不是 2.5，即「编译过、执行错」。覆写后非浮点结点仍按原宽化，行为逐字不变。
+     *
+     * 为什么**不做句柄缓存**（与 [getIntValue] 的 `bindHandle` 不同）：浮点变量在语料里只有
+     * 两条触发点（`DLC/魔法DLC/使用魔法.ERB:1248-1256`、`魔法相关函数.ERB:3190-3219`），
+     * 不在 `FOR LOCAL` 那种百万级环体上；而句柄空间（`VariableHandles`）按整数/字符串
+     * 两通道解析，给它加第三条通道要动的是**热路径**的缓存作废判据。冷路径按名读一次哈希，
+     * 换零改动面 —— 若日后浮点进入热路径，再按 `bindInt` 那套加 `bindFloat`。
+     *
+     * `isNoArg` 形态同样按名读，保证「缺下标」的报错口径与整数/字符串侧同出一条
+     * （见类 KDoc 的 VariableNoArgTerm 段）。
+     */
+    override fun getFloatValue(ctx: EvalContext): Double {
+        if (operandType != OperandType.FLOAT) return getIntValue(ctx).toDouble()
+        val n = indexArray.size
+        val reader = ctx.variables
+        if (n == 0) return reader.readFloat(name, NO_INDICES)
+        val idx = reader.borrowIndices(n)
+        try {
+            for (i in 0 until n) idx[i] = indexArray[i].getIntValue(ctx)
+            return reader.readFloat(name, idx)
+        } finally {
+            reader.returnIndices()
+        }
+    }
+
+    /** 同 [setIntValue] 的浮点侧；下标求值与借还口径逐字相同。 */
+    fun setFloatValue(ctx: EvalContext, value: Double) {
+        val n = indexArray.size
+        val reader = ctx.variables
+        val writer = writerOf(reader)
+        if (n == 0) {
+            writer.writeFloat(name, NO_INDICES, value)
+            return
+        }
+        val idx = reader.borrowIndices(n)
+        try {
+            for (i in 0 until n) idx[i] = indexArray[i].getIntValue(ctx)
+            writer.writeFloat(name, idx, value)
+        } finally {
+            reader.returnIndices()
+        }
+    }
+
+    /** 同 [addIntValue] 的浮点侧（`+= 常量` 的落点）；返回加完的新值。 */
+    fun addFloatValue(ctx: EvalContext, delta: Double): Double {
+        val n = indexArray.size
+        val reader = ctx.variables
+        if (n == 0) return reader.plusFloat(name, NO_INDICES, delta)
+        val idx = reader.borrowIndices(n)
+        try {
+            for (i in 0 until n) idx[i] = indexArray[i].getIntValue(ctx)
+            return reader.plusFloat(name, idx, delta)
+        } finally {
+            reader.returnIndices()
+        }
+    }
 
     /**
      * 把 [value] 写进本访问点（`SET X = …` 的落点）。
@@ -433,6 +563,27 @@ data class FuncCall(
         val r = ctx.callFunctionRef(name, args)
         return (r as? Value.StrV)?.v ?: throw ExprEvalException("函数 $name 返回了非字符串结果")
     }
+
+    /**
+     * 浮点求值通道。
+     *
+     * 只有**静态类型是 FLOAT** 的调用（`TOFLOAT(...)` 一类）走本覆写；整型返回值的调用
+     * （`ADD(...) * 0.5`、浮点左值 `LOCALF = 整型函数()`）必须按 [Expr.getFloatValue] 的
+     * 默认实现宽化（`getIntValue().toDouble()`）。二者同构于 [VarRef.getFloatValue] 与
+     * [Binary.getFloatValue] 的 `if (operandType != FLOAT)` 前置判据，也是执行层浮点赋值的
+     * 公开前提（`sem/StatementExecutor.kt:4588-4589` 明写「逐项 getFloatValue 对 INT 右值
+     * 自动宽化」）。
+     *
+     * 2026-11-02 审查修复：此前本覆写**无条件**要求 `Value.FloatV`，于是 `ADD() * 0.5`
+     * 一类形态抛「函数 ADD 返回了非浮点结果」，与 [Expr.getFloatValue] 的 KDoc
+     * （「返回 float 的 [FuncCall] 各自覆写」）自相矛盾，也与执行层注释对不上。
+     * fork 侧对应形态 = 整型子式进 double 通道（`LOCALF = 整型函数()`、`整型函数() * 0.5`）。
+     */
+    override fun getFloatValue(ctx: EvalContext): Double {
+        if (operandType != OperandType.FLOAT) return getIntValue(ctx).toDouble()
+        val r = ctx.callFunctionRef(name, args)
+        return (r as? Value.FloatV)?.v ?: throw ExprEvalException("函数 $name 返回了非浮点结果")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -451,9 +602,14 @@ data class Unary(
             op == OperatorCode.INCREMENT || op == OperatorCode.DECREMENT)
     }
 
-    override val operandType get() = OperandType.INT
+    override val operandType get() = operand.operandType
 
     override fun getIntValue(ctx: EvalContext): Long {
+        // 浮点操作数没有整型通道（见 [FloatLiteral] 的 KDoc）：解析期只放行 MINUS/PLUS 两种
+        // 一元运算作用于浮点（Parser.kt reduceUnaryTerm），走到这里说明被当整型使用。
+        if (operand.operandType == OperandType.FLOAT) {
+            throw ExprEvalException("浮点表达式不能直接用于整型上下文（需 TOINT 转换）")
+        }
         return when (op) {
             OperatorCode.MINUS -> {
                 // spec: OperatorMethodManager.cs:559-566 —— MinusInt 先取一次操作数判 Long.MIN_VALUE
@@ -485,6 +641,47 @@ data class Unary(
         } finally {
             reader.returnIndices()
         }
+    }
+
+    /**
+     * 浮点取负/取正（4.981 升版）。`!` / `~` 没有浮点定义（解析期已拒）。
+     *
+     * ## 表达式位 `++`/`--` 不作用于浮点：g4 取证结论 = **保持拒绝，不放行**
+     *
+     * 判据是 4.981 fork 源码（`qirchen421/emuera.sk` 的 commit `48494165`，即 specs 里
+     * `fork-src` 前缀指向的同一份）；1.824 参考实现的表达式层根本没有浮点
+     * （AExpression.cs:5-40 只有 long/string，整个 Expression 目录 grep `double` 零命中，
+     * OperatorMethodManager.cs:717-720 的一元登记只有整数四条，
+     * VariableTerm.cs:202-223 的 `ChangeValue` 只收 `long`），做不了这条的正反证。
+     *
+     * - 前置 `ReduceUnaryTerm`（OperatorMethod.cs:126-163）的浮点支 :143-149 **只**登记
+     *   Plus（原样返回操作数）与 Minus（MinusFloat），`Increment`/`Decrement` 不落 `method`
+     *   ⇒ 落到 :152-162 抛错，类型名取 `Error.FloatType`（zhs「浮点型」）、模板
+     *   `Error.CanNotAppliedUnaryOp`（「无法对{0}使用单相运算符」加运算符串）；
+     * - 后置 `ReduceUnaryAfterTerm`（:165-191）更窄，只有 Integer 支取 `unaryAfterDic`；
+     * - 登记面 :44-48 只有 IncrementInt / DecrementInt / IncrementAfterInt / DecrementAfterInt。
+     *
+     * 对照面：**语句位**浮点 `++`/`--` 在 fork 里确实开放 —— `VariableTerm.ChangeValue`
+     * 带 double 重载（VariableTerm.cs:225-240，转交 `Identifier.PlusValue`，返回加完的新值）。
+     * 所以本仓「语句位放行（[com.eratw.port.core.stmt.ArgBuilders] 的 set 浮点支折成
+     * `x = x ± 1.0`）+ 表达式位拒绝」与 fork **同构**，不是待补的缺口。4.981 语料侧同样
+     * 零命中：全库没有任何浮点变量的 `++`/`--` 形态（判据用例见
+     * `core/e2e/FloatCorpusE2ETest` 的「全语料无浮点变量的自增自减形态」）。
+     *
+     * 偏离的处置（路次 g5 更新）：
+     * 1. **已按 ADR-005 复刻官方文案缺陷**（g4 登记的第 4 条）：前置支按 fork 报
+     *    「无法对**浮点型**使用单相运算符"++"」，后置支按 fork 的类型名 else 链漏判报
+     *    「无法对**未知类型**使用单相运算符"++"」；两支都在 `Parser.kt` 的
+     *    `reduceUnaryTerm` / `reduceUnaryAfterTerm` 里，模板逐字取 zhs xml:310。
+     *    两支不一致是官方的，本仓照抄，不做「顺手统一」。
+     * 2. 仍未对齐：报错时机 —— fork 在装载期的 `Restructure` 抛 `CodeEE`，本仓在表达式
+     *    归约期抛 `ExprEvalException` ⇒ 同为硬错误，但异常族与定位行不同。
+     * 3. [getFloatValue] 的 else 支（「一元运算符 X 不能作用于浮点型」）在源码解析下**走不到**
+     *    —— 解析闸已把非 `+ -` 的浮点一元全拒；留着只防 AST 直构（夹具/旧 erbc）绕过闸。
+     */
+    override fun getFloatValue(ctx: EvalContext): Double = when (op) {
+        OperatorCode.MINUS -> -operand.getFloatValue(ctx)
+        else -> throw ExprEvalException("一元运算符 ${OperatorCode.toOperatorString(op)} 不能作用于浮点型")
     }
 
     override fun getStrValue(ctx: EvalContext) = ""
@@ -538,6 +735,11 @@ data class Binary(
         if (left.operandType == OperandType.STR && right.operandType == OperandType.STR) {
             return strCompare(op, ctx, left, right)
         }
+        // 浮点参与（4.981 升版）：解析期只在**比较**运算上给出 INT 结果
+        // （Parser.kt reduceBinaryTerm 的提升表），其余浮点算术一律拒绝整型通道。
+        if (left.operandType == OperandType.FLOAT || right.operandType == OperandType.FLOAT) {
+            return floatCompareToLong(ctx)
+        }
         return when (op) {
             // && 短路：原版 if (arg0 != 0 && arg1 != 0)，arg0==0 时 arg1 不求值。
             // spec: OperatorMethodManager.cs:383-391
@@ -549,7 +751,7 @@ data class Binary(
             // 除/余先求右操作数（原版先取除数判 0）。spec: OperatorMethodManager.cs:121-157
             OperatorCode.DIV, OperatorCode.MOD -> {
                 val r = right.getIntValue(ctx)
-                if (r == 0L) throw ExprEvalException("除数为 0")
+                if (r == 0L) throw ExprEvalException(DIVIDE_BY_ZERO_TEXT)
                 val l = left.getIntValue(ctx)
                 // C# 整除向零取整、% 符号随被除数，与 Kotlin Long./ 与 Long.% 语义一致
                 if (op == OperatorCode.DIV) {
@@ -601,6 +803,72 @@ data class Binary(
         }
     }
 
+    /**
+     * 浮点比较 → 0/1（4.981 升版）。
+     *
+     * 解析期只把比较运算装配成「浮点操作数 + INT 结果」（Parser.kt reduceBinaryTerm），
+     * 其余浮点运算（`+ - * / %`）的结点 operandType 是 FLOAT、走 [getFloatValue]，
+     * 到位就说明整型通道被误用 ⇒ 报错而不隐式截断。
+     */
+    private fun floatCompareToLong(ctx: EvalContext): Long {
+        val l = left.getFloatValue(ctx)
+        val r = right.getFloatValue(ctx)
+        return when (op) {
+            OperatorCode.EQUAL -> if (l == r) 1L else 0L
+            OperatorCode.NOT_EQUAL -> if (l != r) 1L else 0L
+            OperatorCode.GREATER -> if (l > r) 1L else 0L
+            OperatorCode.LESS -> if (l < r) 1L else 0L
+            OperatorCode.GREATER_EQUAL -> if (l >= r) 1L else 0L
+            OperatorCode.LESS_EQUAL -> if (l <= r) 1L else 0L
+            else -> throw ExprEvalException("浮点表达式不能直接用于整型上下文（需 TOINT 转换）")
+        }
+    }
+
+    /**
+     * 浮点算术（4.981 升版）。`+ - * /` 按 IEEE-754 双精度求值；比较结点
+     * （operandType=INT）走默认实现（[getIntValue] 的 0/1 宽化）。
+     *
+     * **没有 `%`**：fork-src 的两张浮点二元字典（float×float、int×float 混合）都没有
+     * `OperatorCode.Mod`，全文件的取余只有 `ModIntInt` 一条 ⇒ 浮点取余在解析期就被拒
+     * （`Parser.kt` 的 `reduceBinaryTerm` 浮点支，路次 g5 对齐）。此处不留 MOD 分支，免得
+     * AST 直构（测试夹具、旧 erbc）绕过解析闸算出 fork 上不存在的结果。
+     * 行号依据 `OperatorMethod.cs:80-89`（float×float 字典）、`:91-113`（int×float 混合字典）、
+     * `:54`（ModIntInt 登记）、`:378`（ModIntInt 实现）在本机不可取证
+     * （TODO(verify)：待 fork-src 就位后复核）。本机可达的替代依据：整型取余 `ModIntInt`
+     * 实现见 `OperatorMethodManager.cs:140-157`、登记见 `:725`；本机全文无浮点 `%`，与上述同型。
+     *
+     * 求值序：DIV 先右后左，与整型通道同一口径（spec: OperatorMethodManager.cs:121-157，
+     * 本机可达：`DivIntInt` 在 `:131` 先取 `arguments[1]`、`:136` 再取 `arguments[0]`）。
+     *
+     * 浮点除法判零硬错（2026-11-02 收口，原第 5 条偏离已对齐）：fork 的浮点除法
+     * `DivFloatFloat` 与 `DivMixedFloat` 都是先取除数、`if (divisor == 0.0) throw new
+     * CodeEE(trerror.DivideByZero.Text)`，不落到 IEEE 的 ±Infinity/NaN。
+     * 行号依据 `OperatorMethod.cs:983-989`（DivFloatFloat）与 `:1132-1138`（DivMixedFloat）
+     * 在本机不可取证（TODO(verify)：待 fork-src 就位后复核）；可达文案依据
+     * `emuera-zhs.xml:286`（`Error.DivideByZero` =「除数为0的除法运算」）。
+     */
+    override fun getFloatValue(ctx: EvalContext): Double =
+        if (operandType != OperandType.FLOAT) getIntValue(ctx).toDouble()
+        else when (op) {
+            OperatorCode.PLUS -> left.getFloatValue(ctx) + right.getFloatValue(ctx)
+            OperatorCode.MINUS -> left.getFloatValue(ctx) - right.getFloatValue(ctx)
+            OperatorCode.MULT -> left.getFloatValue(ctx) * right.getFloatValue(ctx)
+            OperatorCode.DIV -> {
+                // 除数判零硬错（第 5 条偏离收口，2026-11-02 组长接线）：
+                // fork 的 DivFloatFloat / DivMixedFloat 均
+                // `if (divisor == 0.0) throw new CodeEE(trerror.DivideByZero.Text)`，
+                // 不落 IEEE ±Infinity/NaN。
+                // 行号依据 OperatorMethod.cs:983-989 / :1132-1138 在本机不可取证
+                // （TODO(verify)：待 fork-src 就位后复核）；可达文案依据
+                // emuera-zhs.xml:286「除数为0的除法运算」。
+                // 与本文件整型支同一口径（:754）。
+                val r = right.getFloatValue(ctx)
+                if (r == 0.0) throw ExprEvalException(DIVIDE_BY_ZERO_TEXT)
+                left.getFloatValue(ctx) / r
+            }
+            else -> throw ExprEvalException("非法的浮点二元运算符 ${OperatorCode.toOperatorString(op)}")
+        }
+
     override fun getStrValue(ctx: EvalContext): String = when (op) {
         // 字符串语境的 `+` 重载：str+str 拼接。spec: OperatorMethodManager.cs:28-45
         OperatorCode.PLUS -> left.getStrValue(ctx) + right.getStrValue(ctx)
@@ -615,8 +883,16 @@ data class Binary(
                 strValue = left.getStrValue(ctx)
                 intValue = right.getIntValue(ctx)
             }
-            if (intValue < 0) throw ExprEvalException("负数($intValue)不能与字符串相乘")
-            if (intValue >= 10000) throw ExprEvalException("重复次数($intValue)不能大于等于 10000")
+            if (intValue < 0) {
+                throw ExprEvalException(
+                    renderMultiplyToStrLimit(MULTIPLY_NEGATIVE_TO_STR_TEMPLATE, intValue),
+                )
+            }
+            if (intValue >= 10000) {
+                throw ExprEvalException(
+                    renderMultiplyToStrLimit(MULTIPLY_10K_TO_STR_TEMPLATE, intValue),
+                )
+            }
             if (strValue.isEmpty() || intValue == 0L) ""
             else strValue.repeat(intValue.toInt())
         }
@@ -625,15 +901,19 @@ data class Binary(
 }
 
 /**
- * 字符串比较求值（>= 与 <= 的字符串版本在原版中都是 `c < 0`——两处官方 bug，详见 specs/verify-notes.md §1）。
- * spec: OperatorMethodManager.cs:331(GreaterEqualStrStr 应为 c>=0 实为 c<0)、
- *       同文件 LessEqualStrStr 应为 c<=0 实为 c<0（相等泄漏）。
- * 已由 m1-verify1824 对照官方源码 github.com/0x00000FF/Emuera@301ce4a 确认为官方 bug，按原样复刻。
+ * 字符串比较求值，判据与 **4.981 反编译树**逐字对齐（specs/verify-notes.md §1）。
+ * spec: OperatorMethod.cs:547 `GreaterEqualStrStr` 为 `c >= 0`、:578 `LessEqualStrStr` 为 `c <= 0`；
+ *       GreaterStrStr `c > 0`（:484）、LessStrStr `c < 0`（:514）、Equal/NotEqual 直接串比。
+ * 比较基准 = `Config.SCExpression`（Config.cs:523 为 `const StringComparison.Ordinal`）
+ *   ⇒ 恒为序数比较，Kotlin String.compareTo 同口径。
+ *
+ * 历史：移植早期按 **1.824** 的 `OperatorMethodManager.cs:331/:367`（两处均 `c < 0`）把 `>=`/`<=`
+ * 复刻成反的；那是官方 bug，但本项目目标是 4.981（已修）⇒ 2026-11-08 校准回正（MODERN-T5）。
+ * 语料对字符串 `>=`/`<=` 零命中，故校准不改变现存游戏产物。
  *
  * **不得**把这里的 GREATER_EQUAL / LESS_EQUAL 拿去装配 `SELECTCASE` 的 `CASE lo TO hi`
  * 区间判定（CORE-01，2026-10-23）：原版的 TO 形态根本不走运算符重载，是 CaseExpression 里
- * 一段独立的 `string.Compare(...) <= 0` 判定（spec: CaseExpression.cs:62-70），只有源码里
- * 真写了 `>=` / `<=` 的表达式位才受这两处 bug 影响。区间判定请用 [strCaseRange]。
+ * 一段独立的 `string.Compare(...) <= 0` 判定（spec: CaseExpression.cs:62-70）。区间判定请用 [strCaseRange]。
  */
 internal fun strCompare(op: OperatorCode, ctx: EvalContext, left: Expr, right: Expr): Long {
     val l = left.getStrValue(ctx)
@@ -644,8 +924,8 @@ internal fun strCompare(op: OperatorCode, ctx: EvalContext, left: Expr, right: E
         OperatorCode.NOT_EQUAL -> if (c != 0) 1L else 0L
         OperatorCode.GREATER -> if (c > 0) 1L else 0L
         OperatorCode.LESS -> if (c < 0) 1L else 0L
-        OperatorCode.GREATER_EQUAL -> if (c < 0) 1L else 0L  // spec: 官方 bug，原样复刻（verify-notes.md §1）
-        OperatorCode.LESS_EQUAL -> if (c < 0) 1L else 0L     // spec: 官方 bug，相等泄漏（verify-notes.md §1）
+        OperatorCode.GREATER_EQUAL -> if (c >= 0) 1L else 0L  // spec: OperatorMethod.cs:547（4.981 c>=0）
+        OperatorCode.LESS_EQUAL -> if (c <= 0) 1L else 0L     // spec: OperatorMethod.cs:578（4.981 c<=0）
         else -> throw ExprEvalException("非法字符串比较运算符")
     }
 }
@@ -659,17 +939,17 @@ internal fun strCompare(op: OperatorCode, ctx: EvalContext, left: Expr, right: E
  * `string.Compare(LeftTerm, Is, Ordinal) <= 0` 成立时再判 `string.Compare(Is, RightTerm, Ordinal) <= 0`，
  * 下界不成立直接 `return false`（RightTerm 连求值都不求）。
  *
- * 移植侧旧实现写成 `target GREATER_EQUAL lo && target LESS_EQUAL hi`，把 [strCompare] 的
- * 两个官方 bug（`>=` 完全反向、`<=` 相等泄漏）接进了区间判定，命中集合整体取反。
- * bug 本体不许修（ADR-005：源码里真写 `>=`/`<=` 的表达式位必须照旧），所以这里**绕开运算符**，
- * 用不带 bug 的 `>` 表达同一个「小于等于」：`compare(a, b) <= 0` ⇔ `!(a > b)`
- * （GreaterStrStr / LessStrStr 均正常，specs/verify-notes.md 附表的复刻纪律那条）。
+ * 原版 TO 形态不走运算符重载，本函数独立装配，故不依赖 [strCompare] 的 GREATER_EQUAL/LESS_EQUAL。
+ * 装配用 `>` 表达同一个「小于等于」：`compare(a, b) <= 0` ⇔ `!(a > b)`
+ * （GreaterStrStr / LessStrStr 判据 4.981 与 1.824 一致，spec: OperatorMethod.cs:484/:514）。
+ * 移植早期 [strCompare] 曾按 1.824 把 `>=`/`<=` 复刻反了，旧实现因此把运算符接进区间判定、
+ * 命中集合整体取反；改用本函数后区间判定与运算符判据解耦（MODERN-T5 已把运算符也校准回 4.981）。
  *
  * 装配成 `AND( NOT(lo > target), NOT(target > hi) )`，同时保住原版的**求值顺序与短路**：
  * [Binary] 的 `&&` 分支左假即跳过右侧（本文件 AND 分支的 OperatorMethodManager.cs:383-391
  * 口径）⇒ 上界表达式只在下界成立时求值，与 CaseExpression.cs:66-69 一致。
  *
- * 比较基准：原版此处显式用 `StringComparison.Ordinal`（不受 Config.SCExpression 影响），
+ * 比较基准：原版此处用 `Config.SCExpression`（Config.cs:523 为 `const StringComparison.Ordinal`），
  * [strCompare] 侧同为 Ordinal 口径 ⇒ 两者一致。
  *
  * 形态说明：两条边界各是一条 `Unary(NOT, Binary(GREATER, …))`，**不是**新的 Expr 节点 ——
@@ -710,4 +990,8 @@ data class Ternary(
 
     override fun getStrValue(ctx: EvalContext): String =
         if (cond.getIntValue(ctx) == 0L) ifFalse.getStrValue(ctx) else ifTrue.getStrValue(ctx)
+
+    /** 浮点三目（4.981 升版）：两分支可为 FLOAT 或 INT（整型侧经默认实现宽化）。 */
+    override fun getFloatValue(ctx: EvalContext): Double =
+        if (cond.getIntValue(ctx) == 0L) ifFalse.getFloatValue(ctx) else ifTrue.getFloatValue(ctx)
 }

@@ -15,13 +15,13 @@ import org.junit.jupiter.api.io.TempDir
  * 装载期告警 → `program.meta` 侧车 `load-warnings` 段（M11-E warnmeta）的写出端对拍。
  *
  * 判据链：`CorpusCompile.compile` 组装的 [CompileResult.warnings]（save-15a 通道：
- * `SymbolTable.duplicateFunctionWarnings` → `CorpusScan.warnings` → 语句层
+ * `LabelTable.duplicateFunctionWarnings` → `CorpusScan.warnings` → 语句层
  * `LineParser.warnings`，段序固定）⇒ 逐条直存进 [BootMetadata.loadWarnings] ⇒
  * [BootMetaWriter] 落盘 ⇒ [BootMetadata.read] 读回，三处必须逐条一致；
  * 另锁两条不回归：`program-sha256` 配对（判据⑤）与侧车字节确定性。
  *
  * 告警文案/行号口径与 `LoadWarningsGoldenTest`（基准
- * `.workbuddy/golden-pc-loadwarnings.txt`）同源：合成语料刻意复刻基准的两类触发点 ——
+ * `<internal-workdir>/golden-pc-loadwarnings.txt`）同源：合成语料刻意复刻基准的两类触发点 ——
  * 非事件 `@` 重名（spec: ErbLoader.cs:441-451）与 INPUTS 参数过多
  * （spec: ArgumentBuilder.cs:30-40，触发点 ArgumentParser.cs:1157）。
  *

@@ -40,9 +40,11 @@ import java.nio.file.Path
  * 因此 [consoleSink] / [consoleStyle] / [lineIsEmpty] / [textBox] / [configOverrides] /
  * [consoleLines] / [popPrintingLines] 都在类体里覆写，委托只负责其余成员
  * （clockMillis / readFileBytes / checkSaveData / soundDir 等）。
- * [inputState] / [fontSize] / [clientWidth] / [clientHeight] 同理不落在委托上，
+ * [inputState] / [fontSize] / [printCPerLine] / [printCLength] 同理不落在委托上，
  * 但它们用**构造属性**覆写（HOST-04 / GFX-06 同一模式）：注入值即读数，缺省时
  * 与 [BuiltinHost] 的出厂缺省逐项同值，headless 装配零行为差。
+ * [clientWidth] / [clientHeight] 两格例外：LIVE-REFLOW 起它们是**自定义 getter**
+ * （见下），注入的构造参数降为回落值，见这两个属性的 KDoc。
  *
  * **M11-E hostwire 的字形掩码透出走委托，不走显式覆写**（结论）：上述七项要覆写是因为
  * 值来自本类自持的控制台状态，落到委托对象上求值就丢；而 `glyphMaskHost` 的状态**本就住在
@@ -87,16 +89,28 @@ import java.nio.file.Path
  *   量宽尺，语料的指令按钮网格拿它和 `GETCONFIG("フォントサイズ")` 算出的格宽比，
  *   两把尺一分叉每个按钮就只占应得宽度的一半上下（错位判据见 [BuiltinHost.fontSize] 的 KDoc）。
  *   屏幕像素（状态页 / 体型图的排版宽）走下面两条，那才是真机实测值。
- * @param clientWidth `CLIENTWIDTH()` 的像素值（原版 = MainPicBox.Width，EmueraConsole.cs:232）。
- *   缺省 [BuiltinHost.DEFAULT_CLIENT_WIDTH] = 760（ConfigData.cs:56）；真机注入内容区像素宽。
- *   注意与 [LineBufferConsoleSink.clientWidth]（**半角格**，折行单位）不是同一个量，
+ * @param clientWidth 设备**客户区**像素宽（原版 = MainPicBox.Width，EmueraConsole.cs:232）。
+ *   缺省 [BuiltinHost.DEFAULT_CLIENT_WIDTH] = 760（ConfigData.cs:56）；真机注入
+ *   `CanvasConsoleView.clientWidthPx()` = 版面宽：窗口宽窄于物理屏时小于内容区宽，居中留白不算客户区。 *   注意与 [LineBufferConsoleSink.clientWidth]（**半角格**，折行单位）不是同一个量，
  *   见 GoldenPipeline.newConsole 的 KDoc。
- * @param clientHeight `CLIENTHEIGHT()` 的像素值（原版 = WindowY - LineHeight）。
- *   缺省 [BuiltinHost.DEFAULT_CLIENT_HEIGHT] = 461（ConfigData.cs:57,67）。
+ *   LIVE-REFLOW 起它是**回落值**：注入 [screenState] 时读数跟着那份活状态走（见 [clientWidth]）。
+ *   无论走哪条路，交给脚本的读数都会经 [ScriptPixels] 折成**脚本 px**（见 [deviceFontPixelSize]）。
+ * @param clientHeight `CLIENTHEIGHT()` 的设备像素值（原版 = WindowY - LineHeight）。
+ *   缺省 [BuiltinHost.DEFAULT_CLIENT_HEIGHT] = 461（ConfigData.cs:57,67）；同为回落值。
+ * @param deviceFontPixelSize 渲染层解算出的**设备像素字号**（`ScreenLayout.resolve` 的
+ *   `fontPixelSize`）；只在 [screenState] 缺席时用作回落折算的分子。0（缺省）= 不折算。
+ *   与 [fontSize]（脚本坐标系基准字号 = 生效 `Config.FontSize`）不是同一个量。
  * @param printCPerLine / @param printCLength `PRINTCPERLINE()` / `PRINTCLENGTH()` 的读数，
  *   原版语义就是 `Config.PrintCPerLine` / `Config.PrintCLength`（FunctionMethodCreator.cs:3922-3950）。
  *   生产由 [GameSession] 喂生效条目值：语料那层的网格宽度直接由 `PRINTCLENGTH()` 乘出来，
  *   读死缺省 25 而玩家把「PRINTCの文字数」改成别的值时，同一份网格里两个读数就会分叉。
+ * @param screenState 会话期屏幕像素的活数据源（LIVE-REFLOW）。null（缺省）= 读数由
+ *   [clientWidth] / [clientHeight] 两个注入值经 [ScriptPixels] 折算（字号缺省 0 ⇒ 恒等，
+ *   既有装配与既有用例的行为逐字不变）；非 null = 两格改读这份状态
+ *   （[ScriptScreenState.scriptWidthPx] / [ScriptScreenState.scriptHeightPx]），由
+ *   [GameSession.resizeConsole] 在窗口尺寸变化时写入 —— 对应原版 `EmueraConsole.ClientWidth`
+ *   每次现读控件尺寸的语义（EmueraConsole.cs:232/234）。生产装配点 =
+ *   [GameSession] 的 `screenState`（同一实例，不复制）。
  */
 class ConsoleBuiltinHost(
     root: Path,
@@ -107,8 +121,8 @@ class ConsoleBuiltinHost(
     private val audioStore: com.eratw.port.core.vars.VariableStore? = null,
     writeRoot: Path? = null,
     override val fontSize: Long = BuiltinHost.DEFAULT_FONT_SIZE,
-    override val clientWidth: Long = BuiltinHost.DEFAULT_CLIENT_WIDTH,
-    override val clientHeight: Long = BuiltinHost.DEFAULT_CLIENT_HEIGHT,
+    clientWidth: Long = BuiltinHost.DEFAULT_CLIENT_WIDTH,
+    clientHeight: Long = BuiltinHost.DEFAULT_CLIENT_HEIGHT,
     /**
      * 带样式的分段量宽（FN-04 core）：生产由 `GameSession` 从 Android 侧
      * `AndroidTextMeasure.measurePixels` 包一层传进来；null = 未接线，回落
@@ -127,7 +141,56 @@ class ConsoleBuiltinHost(
      */
     override val printCPerLine: Long = BuiltinHost.DEFAULT_PRINT_C_PER_LINE,
     override val printCLength: Long = BuiltinHost.DEFAULT_PRINT_C_LENGTH,
+    private val screenState: ScriptScreenState? = null,
+    private val deviceFontPixelSize: Int = 0,
+    /**
+     * 交给配置回填用的脚本 px 版面宽（R5.1，见 [BuiltinHost.windowWidthScriptPx] 的 KDoc）。
+     * 0（缺省）= 未接线 ⇒ 回填层不写，`WindowX` 保持链读数（headless / 既有装置逐值不变）；
+     * > 0 时 `ConfigMethods.backfillWindowWidth` 会在三层链之后把它回填成 `WindowX`
+     * （原版 MainWindow.cs:726 的「开窗后回填实际客户区宽」语义）。
+     * 生产由 [GameSession] 喂 `CanvasConsoleView.windowWidthScriptPx()` 的同尺逆折算结果。
+     *
+     * 用**构造属性覆写**而不是类体 getter：`BuiltinHost by delegate` 会把带默认实现的接口
+     * 成员转发给委托对象（[RootedBuiltinHost] 不认这枚读数、恒 0）。与 [fontSize] /
+     * [printCPerLine] / [printCLength] 同一模式，注入值即读数。
+     */
+    override val windowWidthScriptPx: Long = 0L,
 ) : BuiltinHost by delegate, ConfigChainSource by delegate, GlyphMaskHostProvider by delegate {
+
+    /**
+     * [clientWidth] / [clientHeight] 的回落值（注入的构造参数）。
+     *
+     * 为什么另存一份而不让 getter 直接读构造参数：构造参数与覆写属性同名
+     * （`clientWidth = …` 是既有测试与 [GameSession] 的**具名实参**，名字不能改），
+     * 而属性 getter 体里的 `clientWidth` 只会解析到**属性自己**（自递归）。初始化器作用域里
+     * 构造函数参数优先，所以这一行取到的确实是注入值。
+     */
+    private val injectedClientWidth: Long = clientWidth
+
+    /** 见 [injectedClientWidth]。 */
+    private val injectedClientHeight: Long = clientHeight
+
+    /**
+     * `CLIENTWIDTH()` 的读数（原版 = `EmueraConsole.ClientWidth => window.MainPicBox.Width`，
+     * EmueraConsole.cs:232；函数层 FunctionMethodCreator.cs:6797 每次求值现取）。
+     *
+     * 注入 [screenState] 时读那份活状态（窗口尺寸变化后脚本下一次读数即新值，LIVE-REFLOW）；
+     * 未注入时由构造参数经 [ScriptPixels] 折算。两条路交出的都是**脚本 px**（口径见
+     * [ScriptScreenState] 的类文档）：语料拿它开 CG 画布，渲染层再按 `设备字号 / 配置字号`
+     * 折回设备像素 —— 这里若原样给设备像素，图上屏就是放大过一轮的。
+     * 注意与 [LineBufferConsoleSink.clientWidth]（半角格）不是同一个量。
+     */
+    override val clientWidth: Long
+        get() = screenState?.scriptWidthPx(fontSize.toInt())
+            ?: ScriptPixels.toScriptPx(injectedClientWidth, deviceFontPixelSize, fontSize.toInt())
+
+    /**
+     * `CLIENTHEIGHT()` 的读数（原版 = `EmueraConsole.ClientHeight => window.MainPicBox.Height`，
+     * EmueraConsole.cs:234；函数层 FunctionMethodCreator.cs:6793）。回落与活读口径同 [clientWidth]。
+     */
+    override val clientHeight: Long
+        get() = screenState?.scriptHeightPx(fontSize.toInt())
+            ?: ScriptPixels.toScriptPx(injectedClientHeight, deviceFontPixelSize, fontSize.toInt())
 
     /**
      * fileOps 的写闸：读路径恒走 [RootedFileOps]`(root)`（与 [delegate] 同根），
@@ -208,6 +271,27 @@ class ConsoleBuiltinHost(
      * `defaultFontName` 取 sink 的注入项（`Config.FontName`）；sink 不追踪时依次回落到
      * 当前字体名与出厂缺省 —— 只影响行体 HTML 里 `<font face=...>` 的省略判断
      * （HtmlManager.cs:875），不改变文本与按钮结构。
+     *
+     * 段列坐标的图形尺**必须取 sink 自持的那一份**（[LineBufferConsoleSink.scriptFontSize] /
+     * [LineBufferConsoleSink.imageSizeOf]）：sink 排 `Button.startCol` 时用的就是它们
+     * （`segmentWidth` → `visibleHtmlCells(seg.text, scriptFontSize, imageSizeOf)`），
+     * 换成 [fontSize] 或任何别的字号源都会让回读的按钮包裹位置与屏上错位。
+     * 两个值都由 `GameSession` 在同一装配点喂（`effective.fontSize` + SpritePool 现读）；
+     * sink 不是 `LineBufferConsoleSink`（自定义实现）时退回 0 / null —— 图形段计 0 格，
+     * 与收口前读数逐位一致。
+     *
+     * **回读文案的两个配置值**（同一函数尾部的 `fontSize` / `focusColor` 实参）：
+     * - `fontSize`：`<img>` 重建 AltText 的百分比折算基数（`Config.FontSize`）。优先取
+     *   sink 的 [LineBufferConsoleSink.scriptFontSize]（与上一条的列坐标**同一把尺**，
+     *   `GameSession` 喂的就是生效 `Config.FontSize`）；sink 未接线（0，headless/装置）或
+     *   不是 `LineBufferConsoleSink` 时回落 [fontSize]（本宿主的 `Config.FontSize` 读数，
+     *   缺省 18 = `ConfigData.cs:66` 出厂值 ⇒ 改动前读数逐字节不变）。
+     * - `focusColor`：`bcolor` 的省略判据（`Config.FocusColor`）。取
+     *   [LineBufferConsoleSink.focusColor]（`GameSession` 喂
+     *   `effective.color(ConfigKey.FocusColor)`，与按钮焦点绘制同源）；下溯落空（自定义
+     *   sink / Noop）回落 [LineBufferConsoleSink.DEFAULT_FOCUS_COLOR] 出厂 0xFFFF00 ——
+     *   取法与 `fn/Builtins.kt` 的 `consoleStyleOf` 同一条规矩，不新造表。
+     *   卡点见 `fn/HtmlMethods.kt` 的 `consolePrintedLine` 的 TODO(verify)。
      */
     private fun printedLinesOf(
         lines: List<LineBufferConsoleSink.DisplayLine>,
@@ -215,7 +299,19 @@ class ConsoleBuiltinHost(
         val defFont = console?.defaultFontName
             ?: console?.fontName
             ?: LineBufferConsoleSink.DEFAULT_FONT_NAME
-        return consolePrintedLines(lines, defFont)
+        val sink = console as? LineBufferConsoleSink
+        // 空读文案尺：0 = sink 没接线（headless / 未喂 scriptFontSize），回落本宿主的
+        // Config.FontSize 读数（缺省 18）。与上面 graphicFontPx 的 0 语义**不同**：
+        // 那个 0 表示「图形不计格」，这里的 0 只是「sink 无这一项」。
+        val scriptPx = sink?.scriptFontSize?.toLong() ?: 0L
+        return consolePrintedLines(
+            lines,
+            defFont,
+            graphicFontPx = scriptPx,
+            imageSizeOf = sink?.imageSizeOf,
+            fontSize = if (scriptPx > 0) scriptPx else fontSize,
+            focusColor = sink?.focusColor ?: LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
+        )
     }
 
     /**
@@ -350,7 +446,7 @@ class ConsoleTextBox : TextBoxHost {
 class WriteBlockedFileOps(
     private val delegate: FileOps,
     private val writable: FileOps? = null,
-) : DirectoryProbeFileOps, BinaryFileOps {
+) : DirectoryProbeFileOps, BinaryFileOps, FileRootReadout {
 
     /** 被拒绝的写请求次数（开局报告读数；放行态下写不经过这里，恒为注入前的拒写数）。 */
     var blockedWrites: Int = 0
@@ -397,4 +493,14 @@ class WriteBlockedFileOps(
     override fun isDirectory(path: String): Boolean =
         (delegate as? DirectoryProbeFileOps)?.isDirectory(path)
             ?: runCatching { delegate.list(path, "*", false).isNotEmpty() }.getOrDefault(false)
+
+    /**
+     * 只读读数出口转发（2026-11-05 report-sqlroot，与 R5 的 [isDirectory] 同一形状）：
+     * 本装饰器是生产 `fileOps` 的唯一出口，函数层拿 `ops as? FileRootReadout` 判读
+     * 「试的哪个根」；若不实现，装饰后 `as?` 恒落空 ⇒ 真机上「找不到文件」永远没有根读数。
+     * delegate 未实现（自定义宿主桩）时给「无根」形状，绝不抛。
+     */
+    override fun describeReadAttempt(path: String): FileReadAttempt =
+        (delegate as? FileRootReadout)?.describeReadAttempt(path)
+            ?: FileReadAttempt(path, root = null, resolved = null, rejectedOutOfRoot = false, regularFile = false, isDirectory = false)
 }

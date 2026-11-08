@@ -26,6 +26,11 @@ data class FuncSig(
      * 默认 false = 旧行为（int 通道）；调用方（erbcc 桥/E2E）按符号表
      * `#FUNCTION`/`#FUNCTIONS` 声明传入（LabelDef 已合并二者，类型来源见
      * prescan funcTypes / ExprCalls 桥的 methodTypes）。
+     *
+     * 与 [returnsFloat] **互斥**：两者同真时按浮点通道优先（原版一个方法只有一个
+     * `MethodType`；fork-src `LogicalLineParser.cs:141-183` 的 `#FUNCTION` / `#FUNCTIONS` /
+     * `#FUNCTIONF` 三选一，浮点关键字的唯一形态就是 `FUNCTIONF`，装载器无 `#FUNCTION FLOAT`
+     * 别名）。
      */
     val returnsStr: Boolean = false,
     /**
@@ -37,6 +42,21 @@ data class FuncSig(
      * **头部**形参位）。空 = 调用方没有形参名信息，REF 绑定跳过（不猜）。
      */
     val paramNames: List<String> = emptyList(),
+    /**
+     * 浮点返回方法（4.981 的第三种 `MethodType`；声明关键字 = `#FUNCTIONF`，
+     * fork-src `LogicalLineParser.cs:141-183`；`RETURNF_Instruction` 按
+     * `label.MethodType` 三态判定，fork-src `Instraction.Child.cs:3688-3746`）= true。
+     *
+     * 置位时 `RETURNF` 编 [_RETF]（浮点通道，值不进帧槽 —— 帧槽只有整型列与字符串列），
+     * 函数**掉尾**也兜底发 `_RETF NONE`（原版掉尾 = `MethodReturnValue` 留 null =
+     * 消费侧按声明类型得 0.0，`UserDefinedMethodTerm.cs:39-49`）。
+     * 默认 false = 既有 int/str 行为逐字不变。
+     *
+     * **必须留在参数表末尾**：`FuncSig` 有按位置构造的调用方
+     * （`core-vm/src/test/kotlin/com/eratw/port/boot/RealCorpusCompile.kt:470` 传 5 个位置参），
+     * 插在 `returnsStr` 与 `paramNames` 之间会把 `paramNames` 顶成布尔位、编译即红。
+     */
+    val returnsFloat: Boolean = false,
 )
 
 /** 待链接的函数引用：`_CALL` 的 a 操作数（函数表下标）在 [ErbProgramCompiler.build] 时回填。 */

@@ -16,7 +16,7 @@ import kotlin.test.assertEquals
  *
  * 最小必红件（CMP-39）：`[SKIPSTART]` 内嵌 `[IF_NDEBUG]` —— 原版 `skip` 强制位在
  * 每条指令处理后把 `Disabled` 夹回 true（spec: ErbLoader.cs:163-166），因此
- * `@GHOST` 两侧都不得发射，也不得被 [SymbolTable.scanLabels] 登记成标签。
+ * `@GHOST` 两侧都不得发射，也不得被 [LabelTable.scanLabels] 登记成标签。
  *
  * CMP-41：`[ELSE]`/`[ELSEIF]`/`[SKIPSTART]`/`[IF]` 的多余参数、空栈不匹配时原版
  * 是 `Warn(level 1)` 后 **break**（不改栈/`disabled`/`done`），spec:
@@ -99,7 +99,7 @@ class PreprocessorParityTest {
         // 幽灵登记：预扫侧不得把 GHOST 当成函数标签（缺 skip 强制位时这里是红点）
         assertEquals(
             emptyList(),
-            SymbolTable.scanLabels(fixture.joinToString("\n")).map { it.name },
+            LabelTable.scanLabels(fixture.joinToString("\n")).map { it.name },
             "符号表不得登记 SKIPSTART 内的 @GHOST",
         )
         // core 侧已有 skip 强制位（LogicalLineReader.kt:126），作对照基准

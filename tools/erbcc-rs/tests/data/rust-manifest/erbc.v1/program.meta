@@ -1,0 +1,26 @@
+format-version 1
+engine "erbcc 0.1.0-SNAPSHOT"
+program-sha256 "152f8d4430ce5a5b0e2ead87696608a603ff1cc0f4396fb7c54949439a4db9e3"
+labels 2
+labelset "MINI_UTIL" 0
+labelset "SYSTEM_TITLE" 0
+files 2
+file "MINI_UTIL" "02_util.ERB"
+file "SYSTEM_TITLE" "01_main.ERB"
+data-sections 0
+functions 2
+function 0 1 "SYSTEM_TITLE" "SYSTEM_TITLE" 0 0 0 0 0 "01_main.ERB:1"
+function 1 2 "MINI_UTIL" "MINI_UTIL" 0 0 0 0 0 "02_util.ERB:1"
+global-dims 1
+global-dim "00_const.ERH" 1 "#DIM CONST G_CONST = 7"
+private-dims 1
+private-dim "SYSTEM_TITLE" "NN" 0 0 0 0 0 0 1 1 1 - -
+dim-config 0
+macros 1
+macro "G_FLAG" "1"
+constants 2
+const "G_CONST" 7
+const "G_FLAG" 1
+str-constants 0
+load-warnings 0
+end

@@ -11,6 +11,8 @@ import com.eratw.port.core.proc.ConsoleBuiltinHost
 import com.eratw.port.core.proc.RootedBuiltinHost
 import com.eratw.port.core.proc.RootedFileOps
 import com.eratw.port.core.proc.WriteBlockedFileOps
+import com.eratw.port.core.save.SaveConfig
+import com.eratw.port.core.save.SaveWiring
 import com.eratw.port.core.vars.VariableStore
 import java.nio.file.Files
 import java.nio.file.Path
@@ -236,6 +238,9 @@ class BinaryFileOpsWiringTest {
     @Test
     fun `GSAVE 经 RootedBuiltinHost 写真 PNG 字节等于 toSavePng`() = withTempRoot("eratw-bin-gsave-rooted") { root ->
         val ctx = BinCtx(RootedBuiltinHost(root))
+        // GSAVE 的路径 = {Config.SavDir}img{index:0000}.png（FunctionMethodCreator.cs:9471-9474）；
+        // 条目表出厂 UseSaveFolder=false ⇒ 显式装 YES 才落 sav/
+        SaveWiring.install(ctx.store, SaveConfig(useSaveFolder = true), 20)
         assertEquals(1L, ctx.i("GCREATE", 10, 4, 3))
         assertEquals(1L, ctx.i("GCLEAR", 10, 0xFF112233))
         assertEquals(1L, ctx.i("GSETCOLOR", 10, 0xFF00FF00, 1, 2))
@@ -264,6 +269,7 @@ class BinaryFileOpsWiringTest {
         try {
             val host = ConsoleBuiltinHost(root, writeRoot = wroot)
             val ctx = BinCtx(host)
+            SaveWiring.install(ctx.store, SaveConfig(useSaveFolder = true), 20)
             assertEquals(1L, ctx.i("GCREATE", 10, 3, 2))
             assertEquals(1L, ctx.i("GCLEAR", 10, 0xFF010203))
             assertEquals(1L, ctx.i("GSAVE", 10, 6))

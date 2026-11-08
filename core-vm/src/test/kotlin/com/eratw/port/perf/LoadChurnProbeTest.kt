@@ -20,6 +20,7 @@ import com.eratw.port.core.vars.VarConfig
 import com.eratw.port.core.vars.VariableStore
 import com.eratw.port.core.vars.withPureStaticDimFolders
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.Tag
 import java.lang.management.ManagementFactory
 import java.nio.file.Files
 import java.nio.file.Path
@@ -129,6 +130,8 @@ class LoadChurnProbeTest {
         return "${if (neg) "-" else ""}${tenths / 10}.${tenths % 10}"
     }
 
+    // realArtifacts 家标记（realarttag 路 2026-11-06）：本类 5 条产物门控钉打标；末尾那条 ERATW_PERF_BENCH 基准钉不属产物闸，不打标。判定逻辑一字不动。
+    @Tag("realArtifacts")
     @Test
     fun `生产装载链：逐段分配与常驻`() {
         val path = realArtifact()
@@ -200,6 +203,7 @@ class LoadChurnProbeTest {
      *
      * 用法：`ERATW_ERBC_DIR=<含 program.meta 的目录> ./gradlew --configure-on-demand :core-vm:test --tests "*LoadChurnProbeTest*"`
      */
+    @Tag("realArtifacts")
     @Test
     fun `侧车解析：meta 段的分配与常驻与峰值`() {
         val meta = realMetaArtifact()
@@ -246,6 +250,7 @@ class LoadChurnProbeTest {
      * 用法：`ERATW_ERBC_DIR=<含 program.meta 的目录> ERATW_REPS=3 ./gradlew --configure-on-demand
      * :core-vm:test --tests "*LoadChurnProbeTest.metaSidecarReps*" -i`
      */
+    @Tag("realArtifacts")
     @Test
     fun metaSidecarReps() {
         val meta = realMetaArtifact()
@@ -304,6 +309,7 @@ class LoadChurnProbeTest {
      * 读数：窗口峰值（2 ms 穷采样的整堆 used 最大值）、侧车线程自己的累计分配与耗时。
      * 各臂之间把两份结果彻底丢开 + GC，避免上一臂残留抬高下一臂。
      */
+    @Tag("realArtifacts")
     @Test
     fun `侧车与程序解码：并行与串行次序的窗口峰值对照`() {
         val erbc = realArtifact()
@@ -451,6 +457,7 @@ class LoadChurnProbeTest {
      * 用法：`ERATW_ERBC_DIR=<含 program.meta 的目录> ERATW_GAMEDIR=<游戏根> ERATW_PERF_ROUNDS=3 \`
      * `./gradlew --configure-on-demand :core-vm:test --tests "*LoadChurnProbe*" -i`
      */
+    @Tag("realArtifacts")
     @Test
     fun `会话装配 vars 面：四窗分配与常驻拆分`() {
         val metaPath = realMetaArtifact()

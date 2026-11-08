@@ -1,5 +1,7 @@
 package com.eratw.port.core.host
 
+import com.eratw.port.core.lexer.longFromScaledDouble
+
 /**
  * `PrintStringBuffer` 的**自动按钮**切分器：普通文本里的 `[123]` 会被原版变成可点段。
  *
@@ -267,7 +269,7 @@ internal object ButtonStringCreator {
                 ) {
                     return null
                 }
-                value = scaled.toLong()
+                value = longFromScaledDouble(scaled)
             }
         }
         return value

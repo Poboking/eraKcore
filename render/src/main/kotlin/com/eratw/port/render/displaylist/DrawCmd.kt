@@ -1,5 +1,6 @@
 package com.eratw.port.render.displaylist
 
+import com.eratw.port.core.host.CellWidth
 import com.eratw.port.render.GlyphKey
 import com.eratw.port.render.RunKind
 import com.eratw.port.render.TextRun
@@ -87,6 +88,20 @@ sealed class InlineGraphic {
      * @property bandResources 竖带块的**全部切片资源名**（自上而下，`ImageBandMerge` 产物）：
      *   标题图是 35 张 1041×16 的切片 sprite，单画 [resource] 只会出最上面 16px 一条。
      *   非 null 时绘制侧逐片堆叠到 [widthPx]×[heightPx] 的目标块里；null = 普通单张图
+     * @property flipX 水平镜像标记（B2）：脚本的 `width` 是**负数**时为 true。
+     *   出处 `ConsoleImagePart.cs:83-87` —— `destRect.Width < 0` 时
+     *   `destRect.X = -destRect.Width; base.Width = -destRect.Width`：目标矩形变成
+     *   `(X = |W|, Width = -|W|)`，GDI+ 把负宽矩形按**镜像**画进 `[0, |W|]`，
+     *   即「尺寸取绝对值占位 + **在原位水平翻转**」。注意本端口的布局侧始终用绝对值
+     *   （[HtmlRunFlatten.emitImage] 的 `widthPx`/`widthCells`），翻转只由本标记表达，
+     *   绘制侧等价实现是绕目标矩形**水平中线** `scale(-1, 1)` 后 `drawBitmap`。
+     *   零尺寸（`width.num == 0`）走的是「未给尺寸」分支（`:67`），不是这里
+     * @property flipY 垂直镜像标记（B2）：脚本的 `height` 是**负数**时为 true。
+     *   出处 `ConsoleImagePart.cs:88-92` —— `destRect.Height < 0` 时
+     *   `destRect.Y -= destRect.Height; num = -destRect.Height`：目标矩形变成
+     *   `(Y = top + |H|, Height = -|H|)`，同样按镜像画进 `[top, top + |H|]`，
+     *   `bottom = top + num`（`:93`）因此仍是 `top + |H|` —— **纵盒不变**，命中侧无需改动。
+     *   与 `ypos` 负值无关：`ypos < 0` 只是「往上摆」（`:81`），不是翻转
      */
     data class Image(
         val resource: String,
@@ -99,6 +114,8 @@ sealed class InlineGraphic {
         val altText: String? = null,
         val rowSpan: Int = 0,
         val bandResources: List<String>? = null,
+        val flipX: Boolean = false,
+        val flipY: Boolean = false,
     ) : InlineGraphic() {
 
         /**
@@ -168,17 +185,14 @@ sealed class InlineGraphic {
          *
          * [halfCellPx] 是实测半角步进（`CellMetrics.cellPixelWidth`），
          * 与「生产装配必须传 DrawableWidth ÷ 实测半角步进」同源。
+         *
+         * **实现只有一份**：取整 / 下限 / 正负镜像全部委托
+         * [com.eratw.port.core.host.CellWidth.cellsAtHalfCell]（core 与 render 同尺；
+         * 折行预算那边经 `CellWidth.graphicCells` 走到同一个函数）。本函数只把 [widthPx]
+         * 提成 Long —— `-Int.MIN_VALUE` 在 Int 上会回绕，Long 域取绝对值不回绕。
          */
-        fun cellsFor(widthPx: Int, halfCellPx: Float): Int {
-            if (widthPx == 0 || halfCellPx <= 0f) return 0
-            if (widthPx < 0) {
-                // 用 Long 取绝对值：-Int.MIN_VALUE 会 Int 回绕成负数。
-                val cells = kotlin.math.ceil(-widthPx.toLong() / halfCellPx).toInt()
-                return if (cells < 1) -1 else -cells
-            }
-            val cells = kotlin.math.ceil(widthPx / halfCellPx).toInt()
-            return if (cells < 1) 1 else cells
-        }
+        fun cellsFor(widthPx: Int, halfCellPx: Float): Int =
+            CellWidth.cellsAtHalfCell(widthPx.toLong(), halfCellPx)
 
         /**
          * GFX-09：图形段的**按下态判定** —— 本段列区间与当前按下按钮命中区间的几何相交
@@ -337,12 +351,15 @@ sealed class InlineGraphic {
  *   与位移无关（原版 `ShiftPositionX` 只动 `PointX` 不动 `Width`，spec: `ConsoleButtonString.cs:307-315`），
  *   除非段被左右边界裁短；负位移下跨界的那个码点整格保留时，右沿最多比几何右沿多出它的零头。
  * @property fore 前景色 `0xRRGGBB`
- * @property back 背景色 `0xRRGGBB`
+ * @property back 本段自带的底色矩形 `0xRRGGBB`，null = 无自有底色（落在整屏底色上）。
+ *   **只**承载 HTML `<div color>` 的「染矩形」语义；`SETBGCOLOR` 不是它——原版背景是
+ *   控制台级活值 `bgColor`（EmueraConsole.cs:200），每帧 `graph.Clear(bgColor)` 清整张画布
+ *   （`:1816`），经 `ConsoleFeed` 发布进 `ConsoleScreen.backgroundArgb` 整幅铺底。
  * @property focusFore 焦点态字色 `0xRRGGBB`（原版 `StringStyle.ButtonColor`，默认
  *   `Config.FocusColor` = `0xFFFF00`，`ConfigData.cs:70`；HTML `bcolor` 可逐段覆盖，
  *   `HtmlManager.cs:131-149`）。焦点绘制只读本字段，**不读** [back]：原版
  *   `ConsoleStyledString.cs:105-111` 在 `isFocus` 时取 `base.ButtonColor`，
- *   而 [back] 是控制台背景色（SETBGCOLOR 的行快照），两者不是一回事。
+ *   而 [back] 是行自带底色矩形，两者不是一回事。
  * @property styleMask 字体样式位 1=粗体 2=斜体 4=删除线 8=下划线（`Grid.STYLE_*`）
  * @property kind 段种类（决定绘制路径，不影响命中）
  * @property glyphs 提交时已展开的字形引用序列（TAB 已按 8 空格展开、负位移下整码点出左界的
@@ -350,14 +367,17 @@ sealed class InlineGraphic {
  *   [graphic] 非空的段这里是**空表** —— 图形段没有字形可铺
  * @property graphic 非文本内联图形负载（M10-GFX）；null = 普通文本段。
  *   非空时 [kind] 必为 [RunKind.IMAGE] 或 [RunKind.SHAPE]，绘制侧据此走位图/色块路径，
- *   不再逐字铺 [glyphs]
+ *   不再逐字铺 [glyphs]。
+ *   **镜像标记也走这一条**（B2）：[InlineGraphic.Image.flipX] / [InlineGraphic.Image.flipY]
+ *   由展平侧填、绘制侧从 `(cmd.graphic as? InlineGraphic.Image)` 读 —— 本类型不再单列
+ *   两个 `Boolean` 字段，否则同一份语义会有「段上」与「命令上」两个来源，必然漂移
  */
 data class DrawCmd(
     val row: Int,
     val colStart: Int,
     val colEnd: Int,
     val fore: Int,
-    val back: Int,
+    val back: Int?,
     val styleMask: Int,
     val kind: RunKind,
     val glyphs: List<GlyphKey>,

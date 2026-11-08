@@ -20,7 +20,7 @@ import java.util.IdentityHashMap
  *
  * 与实测堆增量的差在报告 §2 给出（`测算合计` vs `JVM 实测增量`），不做无据的「精确」宣称。
  */
-internal class SizeModel(private val refWidth: Int = 4) {
+internal class SizeModel(val refWidth: Int = 4) {
 
     private val shallowCache = HashMap<Class<*>, Int>()
 

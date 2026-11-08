@@ -144,11 +144,13 @@ class VmArithmeticAuditTest {
 
     @Test
     fun `除零与取余零都抛 CodeEE`() {
-        // C# DivIntInt/ModIntInt 的零检查（OperatorMethodManager.cs:132-135 / :151-154）。
+        // C# DivIntInt/ModIntInt 的零检查（OperatorMethodManager.cs:132-135 / :151-154），
+        // 文案取官方 Error.DivideByZero（Lang.cs:1326 / 语料根 emuera.zhs.xml:236 /
+        // reference 表 emuera-zhs.xml:286），与表达式通道（Expr.kt）同一真源。
         val div = assertFailsWith<CodeEE> { arith("_DIV", 1, 0) }
-        assertTrue(div.message!!.contains("除数为 0"), "实际文案: ${'$'}{div.message}")
+        assertEquals("除数为0的除法运算", div.message, "实际文案: ${'$'}{div.message}")
         val mod = assertFailsWith<CodeEE> { arith("_MOD", 1, 0) }
-        assertTrue(mod.message!!.contains("除数为 0"), "实际文案: ${'$'}{mod.message}")
+        assertEquals("除数为0的除法运算", mod.message, "实际文案: ${'$'}{mod.message}")
     }
 
     // ------------------------------------------------------------------

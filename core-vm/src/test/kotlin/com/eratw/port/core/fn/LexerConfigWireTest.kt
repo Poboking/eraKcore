@@ -78,11 +78,17 @@ class LexerConfigWireTest {
 
     @Test
     fun `GETVAR 动态表达式随开关报全角空格或放行`() {
-        // 默认（语料之外的出厂态）：U+3000 是空白，表达式照常求值
+        // 默认（语料之外的出厂态）：U+3000 是空白，词法照常吃进整串
         val (openCtx, openStore, _) = env()
         openStore.writeInt("FLAG", longArrayOf(0), 42)
-        val v = openCtx.callFunctionRef("GETVAR", listOf(com.eratw.port.core.expr.StrLiteral("FLAG:0　+1")))
-        assertEquals(43L, (v as Value.IntV).v) // LexicalAnalyzer.cs:748-754 的 true 分支
+        // 词法过关的证据：报的是变量闸门（IsNotVar，spec: FunctionMethodCreator.cs:392-405），
+        // 不是全角空格 —— 即 `FLAG:0　+1` 已被 LexicalAnalyzer 完整切开（LexicalAnalyzer.cs:748-754 的 true 分支）。
+        // `FLAG:0　+1` 解析成 CalcTerm，原版 GETVAR 只收 VariableTerm，不做算术。
+        val ok = assertFailsWith<CodeEE> {
+            openCtx.callFunctionRef("GETVAR", listOf(com.eratw.port.core.expr.StrLiteral("FLAG:0　+1")))
+        }
+        assertTrue(ok.message?.contains("不是变量") == true, "应过词法、停在变量闸门：${ok.message}")
+        assertEquals(42L, (openCtx.callFunctionRef("GETVAR", listOf(com.eratw.port.core.expr.StrLiteral("FLAG:0"))) as Value.IntV).v)
 
         // 语料配置（SystemAllowFullSpace=false）：同一串在词法层抛 UnexpectedFullWidthSpace，
         // 被 getvarDynamic 的 LexError 收口转 CodeEE（文案保持原版日文）

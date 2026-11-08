@@ -1,0 +1,9 @@
+# 标注（rust-staging-refresh 车道，2026-11-01）：本档是 1101 波动合并**前**的历史快照档，
+#         当时的编译器指纹 compiler-digest c166fa80b711… 已过期（core-vm 收编 31 个文件后
+#         现读为 4ef357c0758d…）；正文读数按纪律不改写，现状判据见
+#         haruki-staging-switches-1101.txt。
+# erbcc-rs / rust-staging 车道登记：开关纪律探针（闸 3）
+# 产法：python devtools/verify_rust_erbc_staging.py switches --register
+# 时间：2026-11-01 12:45:33
+# rc=1（配置期抛 GradleException，app/build.gradle.kts:958-963）
+-PeratwAllowStaleErbc 与 -PeratwRequireComplete 互斥：正式包必须能证明 erbc 产物新鲜（CMP-66 的 version/源 sha 对账），fixture 才用放行开关。

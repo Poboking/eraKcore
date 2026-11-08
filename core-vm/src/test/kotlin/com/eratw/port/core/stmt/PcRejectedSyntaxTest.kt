@@ -12,7 +12,7 @@ import kotlin.test.assertTrue
 /**
  * **PC 原版拒绝语料 → 解析器保真度回归（A10 parser-oracle）**
  *
- * 证据：`.workbuddy/golden-pc-loadwarnings.txt`（2026-10-18 用 Emuera_LazyLoadingV3.0_x64.exe
+ * 证据：`<internal-workdir>/golden-pc-loadwarnings.txt`（2026-10-18 用 Emuera_LazyLoadingV3.0_x64.exe
  * 装载 fixtures/golden/GOLDEN_*.ERB 实测，239 条，引擎以「由于ERB脚本出现无法解释的行，
  * Emuera停止运行」中止 —— Process.cs:2124-2128，触发点 ErbLoader.cs:469-473/486-490）。
  * 类别去重与根因见 `tools/golden_pc_oracle.py`（同一套类别 id）。

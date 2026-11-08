@@ -1,0 +1,52 @@
+=== 符号表 ===
+配置: IgnoreCase=true SortFilenames=true DebugMode=false Collator=ORDINAL 宏 1 个（含展开体） ERH #DIM CONST 声明 1 条
+尺寸可解常量 2 个  不可求值丢弃声明: 收集前 1 → 收集后 1
+  仍不可求值（前 1 条）:
+    sub/C_サブ.ERB:2 #DIM SORT_VALUE [[VARSIZE("RELATION")]]
+定义 25  唯一名 11  重名 11（非事件 9 / 事件 2）  被遮蔽 14  方法 1
+
+=== 重名组 ===
+[非事件] @G12_CTRL  2 处
+  1. a_second.ERB:38 (fileIndex=3) 
+  生效: a_second.ERB:38
+[非事件] @Z_PLAIN  3 处
+  1. a_second.ERB:5 (fileIndex=3) 
+  生效: a_second.ERB:5
+[事件] @EVENTCOM  3 处
+  1. Z_FIRST.ERB:8 (fileIndex=2) #PRI 
+  2. Z_FIRST.ERB:5 (fileIndex=2) 
+  3. a_second.ERB:9 (fileIndex=3) #LATER 
+[非事件] @G12_DUP  2 处
+  1. a_second.ERB:13 (fileIndex=3) 
+  生效: a_second.ERB:13
+[非事件] @G12_ARGS  2 处
+  1. a_second.ERB:17 (fileIndex=3) 
+  生效: a_second.ERB:17
+[非事件] @G12_ONLY  3 处
+  1. sub/C_サブ.ERB:21 (fileIndex=4) #SINGLE 
+  生效: sub/C_サブ.ERB:21
+[非事件] @G12_SINGLE  2 处
+  1. a_second.ERB:28 (fileIndex=3) 
+  生效: a_second.ERB:28
+[非事件] @G12_PATH  2 处
+  1. a_second.ERB:32 (fileIndex=3) 
+  生效: a_second.ERB:32
+[非事件] @日本語ラベル  2 处
+  1. a_second.ERB:42 (fileIndex=3) 
+  生效: a_second.ERB:42
+[非事件] @G12_SUB  2 处
+  1. sub/C_サブ.ERB:8 (fileIndex=4) 
+  生效: sub/C_サブ.ERB:8
+[事件] @EVENTTRAIN  2 处
+  1. sub/C_サブ.ERB:13 (fileIndex=4) #ONLY 
+  2. sub/C_サブ.ERB:17 (fileIndex=4) #PRI 
+
+=== 比较器自检（ja-JP Collator vs ORDINAL）===
+文件数 4  绝对位置位移 3（含被动位移，仅供观察）
+  首个位置差异: a_second.ERB
+重名定义文件 4 个，两两相对次序翻转 2 / 6 对
+重名组 11  定义集合/次序翻转 9  事件执行序翻转 0
+  翻转组(定义): EVENTCOM, G12_ARGS, G12_CTRL, G12_DUP, G12_ONLY, G12_PATH, G12_SINGLE, Z_PLAIN, 日本語ラベル
+结论: FAIL（需人工核对上面的翻转组）
+
+符号表摘要: C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\sym-probe\base\fixture-ordinal.json

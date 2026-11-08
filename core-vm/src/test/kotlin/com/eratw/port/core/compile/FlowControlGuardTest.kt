@@ -51,7 +51,8 @@ class FlowControlGuardTest {
     }
 
     private fun compileOne(vararg lines: String) {
-        val c = ErbProgramCompiler()
+        // 本类钉「融合前」指令形状：显式关掉 MODERN-T1 条件位融合（上游 171e7d1b 后缺省开）。
+        val c = ErbProgramCompiler(fuseEvalJump = false)
         c.compileFunction(FuncSig("TEST"), parse(*lines))
         c.build()
     }
@@ -105,7 +106,7 @@ class FlowControlGuardTest {
         // # 行在原版不进逻辑行链（ErbLoader.cs:413-422 解析后直接 continue，不 addLine），
         // 故 SIF 的目标仍是其后第一条可执行语句：`SIF A / #DIM … / PRINTL Y / PRINTL Z`
         // 的补跳必须落在 PRINTL Z 上，而不是把 #DIM 当目标消费掉。
-        val c = ErbProgramCompiler()
+        val c = ErbProgramCompiler(fuseEvalJump = false)
         val fb = c.compileFunction(
             FuncSig("TEST"),
             parse("SIF A", "#DIM TMPVAL", "PRINTL \"Y\"", "PRINTL \"Z\""),
@@ -166,7 +167,7 @@ class FlowControlGuardTest {
     fun `TRYCALLLIST 体内普通语句报错`() {
         val known = setOf("GOLDEN_LISTCALLED")
         val e = assertFailsWith<CompileException> {
-            val c = ErbProgramCompiler()
+            val c = ErbProgramCompiler(fuseEvalJump = false)
             c.compileFunction(
                 FuncSig("TEST"),
                 parse(
@@ -186,7 +187,7 @@ class FlowControlGuardTest {
     fun `TRYGOTOLIST 体内 IF 块报错`() {
         // 块结构语句同样命中 :1090-1096（原版 nestCheck 对指令行一律检查）。
         val e = assertFailsWith<CompileException> {
-            val c = ErbProgramCompiler()
+            val c = ErbProgramCompiler(fuseEvalJump = false)
             c.compileFunction(
                 FuncSig("TEST"),
                 parse(

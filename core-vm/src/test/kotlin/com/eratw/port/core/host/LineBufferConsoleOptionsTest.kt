@@ -147,6 +147,31 @@ class LineBufferConsoleOptionsTest {
         assertTrue(s.currentOptions().isEmpty(), "脚本换行且没重印按钮 ⇒ 旧页按钮作废")
     }
 
+    /**
+     * 情侣酒店链真机形（2026-11-01 玩家反馈「点情侣酒店后右侧选项全没」）：
+     * `INPUTS` 提交后脚本 `PRINTW` 一行错误提示（ENTER 等待清空快照、世代不动），
+     * 再回到**同一条** `INPUTS` 语句 —— 原版按脚本行身份判「同一行重试世代不动」
+     * （EmueraConsole.cs:789），屏上菜单没重印也必须仍可点。
+     */
+    @Test
+    fun `PRINTW 插一行后回同一 INPUTS 行选项保留`() {
+        val s = sink()
+        s.printLine("[6] - 情侣酒店 8 分")
+        note(s, type = InputRequest.InputType.STR, line = 77L)
+        assertEquals(1, s.currentOptions().size)
+
+        s.printLine("没办法一个人去")
+        note(s, form = InputRequest.RequestForm.ENTER_KEY)
+        assertTrue(s.currentOptions().isEmpty(), "PRINTW 等待页不列选项")
+
+        note(s, type = InputRequest.InputType.STR, line = 77L)
+        assertEquals(
+            listOf<Any>(6L),
+            s.currentOptions().map { it.value },
+            "同一 INPUTS 行重试不许把屏上按钮的世代推走",
+        )
+    }
+
     @Test
     fun `只收当前世代的按钮_旧页不复活`() {
         val s = sink()
@@ -689,5 +714,99 @@ class LineBufferConsoleOptionsTest {
         val opts = s.currentOptions()
         assertEquals(listOf<Any>(2L, 2L), opts.map { it.value }, "浮岛两处按钮 ⇒ 两枚候选；实际=$opts")
         assertEquals(listOf("A", "B"), opts.map { it.label })
+    }
+
+    /**
+     * [ConsoleOption.printsOwnNumber] 的口径（2026-10-31 玩家反馈「右边选项里经常找不到
+     * 400 移动，经常得直接在左边点」）：编号印在名字**前面**时，出快照会把它剥下来交给徽标，
+     * 标签只剩 `- 睁开眼睛` —— 显示层光看文本永远认不出这一形，所以引擎必须替它记住
+     * 「这颗按钮在屏上自己印了编号」。
+     *
+     * 真语料两形的出处：`[100] - 睁开眼睛`（主页面，2026-10-31 真机读数）、
+     * `[400] - OPTION`（`SHOP関連/SHOP.ERB:201`）、`移动[400]`
+     * （`USERCOM_コマンド表示処理.ERB:124`，编号在末尾 ⇒ 留在标签里，本句为 false）。
+     */
+    @Test
+    fun `屏上自带编号的按钮把这件事交出去`() {
+        val s = sink()
+        s.printHtml("<button value='100'>[100] - 睁开眼睛</button>", option = false)
+        s.printHtml("<button value='400'>移动[400]</button>", option = false)
+        s.printHtml("<button value='227'>[27]</button>", option = false)
+        s.printHtml("<button value='809'>[CONFIG]</button>", option = false)
+        s.printLine("[2000] 能力编辑")
+        note(s)
+
+        val byValue = s.currentOptions().associateBy { it.value }
+        assertEquals(5, byValue.size, "五颗按钮都该进快照；实际=${s.currentOptions()}")
+        assertEquals(
+            listOf("- 睁开眼睛", "移动[400]", "[27]", "[CONFIG]", "[2000] 能力编辑"),
+            listOf(100L, 400L, 227L, 809L, 2000L).map { byValue.getValue(it).label },
+            "编号等于值且在徽标量程内才剥前缀；对不上值（27/227）与超量程（2000）都留原文",
+        )
+        assertEquals(
+            listOf(true, false, false, false, true),
+            listOf(100L, 400L, 227L, 809L, 2000L).map { byValue.getValue(it).printsOwnNumber },
+            "只有屏上印着自己的编号才算：末尾形态靠标签文本认，前缀对不上值/括号里不是数字都不算",
+        )
+        assertEquals(
+            listOf(100, 400, null, 809, null),
+            listOf(100L, 400L, 227L, 809L, 2000L).map { byValue.getValue(it).ordinal },
+            "徽标口径一字不变（无前缀时仍由提交值兜底），本句只新增 printsOwnNumber",
+        )
+    }
+
+    /**
+     * 指令栏那一整行（`HTML_PRINTC` 制表缓存 `HTML_PRINT` 出来的形态）里，`移动[400]`
+     * 必须进候选 —— 玩家 2026-10-31 报的「右边选项里找不到 400 移动」点名的就是这一枚。
+     *
+     * 串的形态照语料：`魔改内容/PRINT系/HTML_PRINT_Components.ERB:191` 的
+     * `<font color=…><button value=…>%文本%</button></font>`，外面再套 `:155` 的
+     * `<shape type='space' param='…px'>` 制表空格；文本本身是
+     * `USERCOM_コマンド表示処理.ERB:124` 的 `移动[400]`。
+     */
+    @Test
+    fun `指令栏整行里的移动进候选且标签原样带编号`() {
+        val s = sink()
+        s.printHtml(
+            "<font color='#64fa8c'><shape type='space' param='37px'><button value='400'>移动[400]</button></font>" +
+                "<font color='#64fa8c'><shape type='space' param='20px'><button value='405'>约会[405]</button></font>" +
+                "<font color='#64fa8c'><button value='604'>散步[604]</button></font>",
+            option = false,
+        )
+        note(s)
+
+        val opts = s.currentOptions()
+        assertEquals(listOf<Any>(400L, 405L, 604L), opts.map { it.value }, "整行三枚按钮都该进候选；实际=$opts")
+        assertEquals(
+            listOf("移动[400]", "约会[405]", "散步[604]"),
+            opts.map { it.label },
+            "编号在名字末尾 ⇒ 标签留原文（前缀剥除只管开头的形态）",
+        )
+        assertTrue(opts.all { !it.printsOwnNumber }, "编号印在末尾，不是被剥掉的行首前缀")
+        assertEquals(
+            listOf(0x64FA8C, 0x64FA8C, 0x64FA8C),
+            opts.map { it.colorRgb },
+            "普通彩色指令保留颜色，但不是调色板色块",
+        )
+    }
+
+    /**
+     * 主页面那一整行（`[编号] - 名称` 形态，2026-10-31 真机读数）：编号被剥给徽标之后，
+     * 「这颗按钮自己印过编号」必须留在快照里，否则显示层认不出这一族（见 [ConsoleOption.printsOwnNumber]）。
+     */
+    @Test
+    fun `主页面整行的编号前缀剥掉后仍留下自印编号这件事`() {
+        val s = sink()
+        s.printHtml(
+            "<font color='#64fa8c'><button value='100'>[100] - 睁开眼睛</button></font>" +
+                "<font color='#64fa8c'><button value='400'>[400] - OPTION</button></font>",
+            option = false,
+        )
+        note(s)
+
+        val opts = s.currentOptions()
+        assertEquals(listOf("- 睁开眼睛", "- OPTION"), opts.map { it.label })
+        assertEquals(listOf(100, 400), opts.map { it.ordinal })
+        assertTrue(opts.all { it.printsOwnNumber }, "行首编号与提交值一致 ⇒ 屏上自带编号；实际=$opts")
     }
 }

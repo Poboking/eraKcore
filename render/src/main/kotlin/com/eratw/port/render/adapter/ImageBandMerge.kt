@@ -6,7 +6,12 @@ import com.eratw.port.render.TextRun
 import com.eratw.port.render.displaylist.InlineGraphic
 
 /**
- * 「竖带图块」合并：把连续若干**纯图片行**合成一张图、等比缩小，并**删掉多余行**。
+ * 「图块」收拢：把屏上**比窗口还高**的图片按块高预算等比缩小，并**删掉多余行**。
+ *
+ * 两趟，各治一种语料形态：
+ * - [mergeBandRuns]：连续若干**纯图片行**（4.980 首页标题图 = 35 条 1041×16 横带）合成一张图；
+ * - [collapseOversizedImage]：**单张超高图**（4.981 首页标题图 = 一张 `height='3500'` 的图）
+ *   缩到同一预算，并塌掉脚本为它腾出的空行。
  *
  * ## 为什么需要
  *
@@ -52,7 +57,7 @@ object ImageBandMerge {
      * 未收尾行，两条都会让承载行在屏上消失，图就压到下面的文字行上。
      */
     private val SPACER: RenderLine = RenderLine(
-        runs = listOf(TextRun(" ", 0xC0C0C0, 0x000000, 0, "ＭＳ ゴシック")),
+        runs = listOf(TextRun(" ", 0xC0C0C0, null, 0, "ＭＳ ゴシック")),
         isLogicalLine = false,
         isLineEnd = true,
     )
@@ -81,6 +86,22 @@ object ImageBandMerge {
         availWidthPx: Int,
         maxBlockHeightPx: Int,
         minBands: Int = 8,
+    ): List<RenderLine> = collapseOversizedImage(
+        mergeBandRuns(lines, lineHeightPx, cellPixelWidth, availWidthPx, maxBlockHeightPx, minBands),
+        lineHeightPx,
+        cellPixelWidth,
+        availWidthPx,
+        maxBlockHeightPx,
+    )
+
+    /** [merge] 的第一趟：连续扁横带合成一张等比缩小的图（判据见类文档）。 */
+    private fun mergeBandRuns(
+        lines: List<RenderLine>,
+        lineHeightPx: Int,
+        cellPixelWidth: Float,
+        availWidthPx: Int,
+        maxBlockHeightPx: Int,
+        minBands: Int,
     ): List<RenderLine> {
         if (lines.size < minBands) return lines
         var out: ArrayList<RenderLine>? = null
@@ -173,4 +194,120 @@ object ImageBandMerge {
         }
         return out ?: lines
     }
+
+    /**
+     * 第二趟：**单张超高图**按同一块高预算缩小，并把它自己腾出来的空行塌缩到缩后行数。
+     *
+     * ## 为什么需要（4.981 首页标题图整张不见）
+     *
+     * 4.981 把 4.980 那 35 条 `SPRITECREATE` 横带整段注释掉（`TITLE.ERB:179-183`），改成一张
+     * `<img src='TW_title' height='3500'>`（`TITLE.ERB:61`）。裸数字在原版是**百分比**：
+     * `ParseMixedNum` 只在带 `px` 后缀时置 `isPx`（spec: `Utils.cs:342-362`），`ToPixel` 那支
+     * 走 `num * Config.FontSize / 100`（`:27-31`）⇒ 语料 18/18 档（`emuera.config:22-23`）下
+     * 高 = 630 脚本 px = **整 35 行**，脚本紧接着 `PRINTFORML %"\n" * 34%` 给这 35 行腾位置。
+     *
+     * 端口为了让 136 列在手机上读得清，生效字号是 41（行高 43）而不是 18 ⇒ 同一个 3500% 在端口
+     * 折成 **1435px**（`emitImage` 的百分比支按生效字号乘），比 1080 的屏还高；图行 + 脚本腾出的
+     * 35 行 = 36 行 > 30 行窗口 ⇒ 图所在那一行整个落在**绘制**窗口之外
+     * （`ConsoleAdapter.DRAW_EXTRA_ABOVE = 1` 只多带一行），而绘制命令只来自
+     * `ConsoleScreen.visibleRows()` ⇒ 整张标题图**一条命令都不产生**。
+     * 玩家看到的不是「图糊了」，是图没了（真机原话：「标题图片看不见，得上滑才能看到」）。
+     *
+     * 第一趟救不了这一支：合并判据要 ≥ [minBands] 行连续扁横带且宽高比 ≥ [MIN_BAND_ASPECT]，
+     * 这里只有一行、且 2682:1435 ≈ 1.87。所以「标题图按屏高缩放」这条既有裁定（2026-10-30 方案 C）
+     * 需要一个单图形态。
+     *
+     * ## 判据（只做脚本自己已经留了位置的那一支）
+     *
+     * - 行内**只有一个**图形段（混排「图 + 文字」不动，缩了会把同行文字一起推走）；
+     * - 不是第一趟的产物（`rowSpan > 0` 或 `bandResources != null` 一律放行，幂等）；
+     * - `heightPx > maxBlockHeightPx`：高过块高预算的图在手机上必然看不见；
+     * - **其后紧跟至少一行空白**：那是脚本为这张图腾的位置，本趟只在这块位置里动手。
+     *   没有预留空行就一行不动 —— 原版让图溢出压到后面内容上（`ConsoleImagePart.cs:82` 的
+     *   `destRect` + `EmueraConsole.cs:1855` 的恒定行距），端口不替它发明版面。
+     *
+     * 语料实测（4.981 全库 `<img>` 的 height 只有 200 / 900 / 1000 / 3500 四档）：1000% 那族
+     * 折成 410px、900% 折成 369px，都低于真机 648px 的块高预算 ⇒ 一行都不动；只有标题图过线。
+     *
+     * @param lines 第一趟的产物
+     */
+    private fun collapseOversizedImage(
+        lines: List<RenderLine>,
+        lineHeightPx: Int,
+        cellPixelWidth: Float,
+        availWidthPx: Int,
+        maxBlockHeightPx: Int,
+    ): List<RenderLine> {
+        if (maxBlockHeightPx <= 0 || lineHeightPx <= 0) return lines
+        var out: ArrayList<RenderLine>? = null
+        var i = 0
+        while (i < lines.size) {
+            val image = oversizedImageOf(lines[i], maxBlockHeightPx)
+            if (image == null) {
+                out?.add(lines[i])
+                i++
+                continue
+            }
+            var j = i + 1
+            while (j < lines.size && isBlankLine(lines[j])) j++
+            if (j == i + 1) {
+                // 没有预留空行：这张图不是「脚本给它留了位置的一块」，原样放行。
+                out?.add(lines[i])
+                i++
+                continue
+            }
+            val scale = minOf(
+                1f,
+                maxBlockHeightPx.toFloat() / image.heightPx.toFloat(),
+                if (availWidthPx > 0) availWidthPx.toFloat() / image.widthPx.toFloat() else 1f,
+            )
+            val drawWidth = (image.widthPx * scale + 0.5f).toInt().coerceAtLeast(1)
+            val drawHeight = (image.heightPx * scale + 0.5f).toInt().coerceAtLeast(1)
+            val rowsNeeded = ((drawHeight + lineHeightPx - 1) / lineHeightPx).coerceAtLeast(1)
+            val cells = InlineGraphic.cellsFor(drawWidth, cellPixelWidth)
+            if (out == null) {
+                out = ArrayList(lines.size)
+                for (k in 0 until i) out.add(lines[k])
+            }
+            out.add(
+                lines[i].copy(
+                    runs = listOf(
+                        lines[i].runs[0].copy(
+                            text = " ".repeat(cells),
+                            graphic = image.copy(
+                                widthPx = drawWidth,
+                                heightPx = drawHeight,
+                                widthCells = cells,
+                                // 跨行数交给绘制侧：`artRowScale` 的第一条守卫据此不按单行高压它，
+                                // `RowLayout.compressible` 的第三条据此把这行排除出纯图行压缩。
+                                rowSpan = rowsNeeded,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            // 预留空行只留缩后真正需要的那几行，其余删掉（屏上内容变短，图行才落得进窗口）；
+            // 预留不够时补承载行，形态与第一趟同口径（见 [SPACER] 的注释）。
+            for (k in 1 until rowsNeeded) {
+                out.add(SPACER)
+            }
+            i = j
+        }
+        return out ?: lines
+    }
+
+    /** 本趟要处理的那一行：单段纯图片、不是第一趟产物、且高过块高预算；否则 null。 */
+    private fun oversizedImageOf(line: RenderLine, maxBlockHeightPx: Int): InlineGraphic.Image? {
+        if (line.runs.size != 1) return null
+        val run = line.runs[0]
+        if (run.kind != RunKind.IMAGE) return null
+        val g = run.graphic as? InlineGraphic.Image ?: return null
+        if (g.rowSpan > 0 || g.bandResources != null) return null
+        if (g.heightPx <= maxBlockHeightPx) return null
+        return g
+    }
+
+    /** 空白行（零 run，或全部是空白文本 run）：脚本给超高图腾位置的就是这种行。 */
+    private fun isBlankLine(line: RenderLine): Boolean =
+        line.runs.all { it.kind == RunKind.TEXT && it.text.isBlank() }
 }

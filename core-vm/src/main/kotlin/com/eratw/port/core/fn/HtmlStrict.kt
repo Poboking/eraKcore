@@ -81,6 +81,14 @@ internal class HtmlStrictParser(
      * （[flush] 发生在标签生效之前），与 `HtmlPrintRun` 的样式来源同一处。
      */
     private val measureStyled: ((String, HtmlPrintStyle) -> Long)? = null,
+    /**
+     * 图元尺寸查表（IMG-A4 I1）：`(src) -> DestBaseSize`，null = 图元缺失**或宿主未接线**。
+     * 被 [imgGroupNode] 消费：先判「图元在不在」（ConsoleImagePart.cs:60-65 的相位 ——
+     * miss 时显式 `width` 也不生效，宽改按 AltText 文本度量），命中后无 `width` 属性才按
+     * 图元真实宽高比折算段宽（ConsoleImagePart.cs:67-71）。本参数缺省（宿主未接线）时
+     * 判不了在不在，读数与接线前逐位一致。
+     */
+    private val imageSizeOf: ((String) -> ImagePixelSize?)? = null,
 ) {
     private val text = StringBuilder()
     private var pos = 0
@@ -715,7 +723,7 @@ internal class HtmlStrictParser(
         addTagMixedNumArg(sb, "width", width)
         addTagMixedNumArg(sb, "ypos", ypos)
         sb.append('>')
-        if (measuring) group.add(imgGroupNode(sb.toString(), width))
+        if (measuring) group.add(imgGroupNode(src, sb.toString(), height, width))
         if (collectRows) runs.add(HtmlPrintRun(HtmlRunKind.IMAGE, sb.toString(), currentStyle(), curButton))
     }
 
@@ -891,33 +899,60 @@ internal class HtmlStrictParser(
     }
 
     /**
-     * `<img>` 段的**宽度**（FN-01）—— `ConsoleImagePart` 的构造 + `SetWidth` 两条路径。
+     * `<img>` 段的**宽度**（FN-01 + IMG-A4 I1）—— `ConsoleImagePart` 构造的属性路径与
+     * 「图元在/不在」两支。
      *
-     * 图元取到时宽度只由属性决定（ConsoleImagePart.cs:66-80）：
+     * 图元**取到**时宽度只由属性决定（ConsoleImagePart.cs:66-80）：
      * - `width='Npx'` → `Width = N`（:72-75），`XsubPixel` 不写、留在字段初值 0
      *   （⇒ 亚像素余数在这里被**清零**）；
      * - `width='N'`（不带 px = FontSize 的百分比）→ `Width = FontSize * N / 100` 整除，
      *   余数进 `XsubPixel = FontSize * N / 100f - Width`（:77-79）；
-     * - 上面两条算出的宽为负时取绝对值（:83-87 的 `destRect.Width < 0` 分支）。
+     * - **无 `width` 属性（或为 0）**→ 按图元真实宽高比：`num` = height 折算值（:66，
+     *   `raw_height` 缺省/0 → `Config.FontSize`，px 原值，百分比 `FontSize * num / 100` 整除），
+     *   `Width = DestBaseSize.Width * num / DestBaseSize.Height`（:69 整数除法），
+     *   `XsubPixel = (float)DestBaseSize.Width * num / (float)DestBaseSize.Height - Width`
+     *   （:70，原版 float，这里同值到 1e-6 量级）—— 这就是 IMG-A4 I1 落地的那条官方形态；
+     * - 上面各条算出的宽为负时取绝对值（:83-87 的 `destRect.Width < 0` 分支）。
      *
-     * `width` 缺省或为 0 时（:67-71）原版要用**图元自身宽高比**
-     * `DestBaseSize.Width * num / DestBaseSize.Height`（:69，num = height 折算值，:66）。
-     * core 层是纯 JVM，没有 sprite 度量表（`:render` 的图元尺寸不在本路文件面），
-     * 于是落到原版的另一条分支 —— **图元取不到**：`cImage == null` 时
-     * `Text = AltText`（:61-64，宽度的计算整段被 return 跳过），随后
-     * `SetWidth`（:110-114）用**文本度量**量出整串重建文案的像素宽。
+     * 图元**取不到**（`cImage == null`，:61-64）→ `Text = AltText`（宽度的计算整段被 return
+     * 跳过），随后 `SetWidth`（:110-114）用**文本度量**量出整串重建文案的像素宽。
+     * 移植侧对应 [imageSizeOf]：宿主未接线（null 属性）或查表未命中，或图元登记退化
+     * （`heightPx <= 0`，见下）时都走这条 —— 宿主缺位的读数与接线前逐位一致。
      *
-     * 本层据此取「有 `width` 属性 ⇒ 属性路径；无 ⇒ 图元缺失回落（量 AltText）」，
-     * 因为它是 core 唯一能确定性算出的读数。
-     * TODO(verify)：不带 `width` 的 `<img>` 在 PC 上（图元存在）读数是
-     * `图元宽 * 折算高 / 图元高`，需要宿主接 sprite 尺寸后经 `BuiltinHost` 的新通道
-     * 才能精确；语料 110 处 img/shape 里带 `width` 的占多数
-     * （如 `ERB/CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERB:438` 的 `width='{SPRITEWIDTH(L_SPR)}px'`）。
+     * **判 miss 的相位**：原版 `:60-65` 在整段尺寸计算之前（`:66` 起才看属性），所以显式
+     * `width` 也不生效。宿主已接线时这里也先查表、miss 直接落 AltText，**无论有没有写
+     * `width`**；未接线（判不了在不在）保持旧行为（缺宽走文本、显式宽走显式宽）。
+     *
+     * 有意偏差（ADR-005 登记）：原版 `:69` 在 `DestBaseSize.Height == 0` 时是整数除零
+     * （`DivideByZeroException`，进程级崩溃）；移植侧把 `heightPx <= 0` 的退化登记当
+     * 「图元缺失」回落量 AltText，不崩。语料无法构造该形态（CSV/SPRITECREATE 登记均校验正尺寸），
+     * TODO(verify)：真语料出现零高 sprite 登记时再对拍原版崩溃口径；卡点＝无实测样本。
      */
-    private fun imgGroupNode(altText: String, rawWidth: MixedNum?): HtmlGroupNode {
-        if (rawWidth == null || rawWidth.num == 0) {
-            // 缺图回落量 AltText：原版 SetWidth 用的仍是当前样式（ConsoleImagePart.cs:110-114）。
+    private fun imgGroupNode(src: String, altText: String, rawHeight: MixedNum?, rawWidth: MixedNum?): HtmlGroupNode {
+        // :60-65 的查表在尺寸计算**之前**：接线了就先把「图元在不在」判掉，miss 时
+        // width/height 一律不看（原版 return 在 :66 前）。未接线 ⇒ 判不了，沿用旧分支。
+        val size = imageSizeOf?.invoke(src)
+        if (imageSizeOf != null && (size == null || size.heightPx <= 0)) {
+            // 图元缺失回落量 AltText：原版 SetWidth 用的仍是当前样式（ConsoleImagePart.cs:110-114）。
             return HtmlGroupNode.renderedAsText(altText, measureWithStyle(altText, currentStyle()))
+        }
+        if (rawWidth == null || rawWidth.num == 0) {
+            if (size == null) {
+                // 走到这里 = 宿主未接线（`imageSizeOf == null`）：与原分支逐值一致。
+                return HtmlGroupNode.renderedAsText(altText, measureWithStyle(altText, currentStyle()))
+            }
+            // :66 num = height 折算值（原版整段 int 运算；这里按 Long 折算后落回，
+            // 现实字号/百分比下与 int 同值，溢出面同 HtmlSubString 的既有 TODO(verify) 口径）。
+            val num: Long = when {
+                rawHeight == null || rawHeight.num == 0 -> fontSize
+                rawHeight.isPx -> rawHeight.num.toLong()
+                else -> fontSize * rawHeight.num / 100
+            }
+            // :69 整数除法（C# 与 Kotlin 的 Long 除法同形：向零截断）。
+            val w = size.widthPx * num / size.heightPx
+            // :70 XsubPixel = (float)W * num / (float)H - Width —— 原版 float，这里同值到 1e-6 量级。
+            subPixel = size.widthPx.toDouble() * num / size.heightPx - w
+            return HtmlGroupNode.element(if (w < 0) -w else w) // :83-87 取绝对值
         }
         val w: Int = if (rawWidth.isPx) {
             subPixel = 0.0 // :74 分支不给 XsubPixel 赋值 ⇒ 余数清零

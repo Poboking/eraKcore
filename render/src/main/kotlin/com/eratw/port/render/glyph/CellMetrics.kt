@@ -130,8 +130,9 @@ class CellMetrics(
      * 与百分比支的一致性判据：`px(v)` 与 `pct(v * 100 / 基准字号)` 同值，
      * 上面那两条语料写法在本端口也画成同一个 410px。
      *
-     * 竖向为什么用**字号**而不是行高做比例：版面侧的行高恒为 `字号 * 19/18`
-     * （`view/PageFitter.LINE_HEIGHT_RATIO`），两支同尺才不会横纵各缩一档；而预留空行那一侧
+     * 竖向为什么用**字号**而不是行高做比例：版面侧的行高缺省为 `字号 * 19/18`
+     * （`view/ScreenLayout.LINE_HEIGHT_RATIO`；`emuera.config` 的 `LINE HEIGHT` 可改），
+     * 两支同尺才不会横纵各缩一档；而预留空行那一侧
      * 的 10 行 = `10 * 真机行高` ≥ 折算后的图高，图只会略短于预留块（空档回到 1 行上下，
      * 与 PC 同比例），不会压到下一行文字上。
      *
@@ -141,8 +142,15 @@ class CellMetrics(
      * 本机取证（无 WinForms），且语料 0 处这样配。真机若出现「图压字/差半行」先查这一条。
      *
      * @param pixels 脚本写的像素值（可为负 —— `param='-180px'` 那种把图层压回同一行的负 space，
-     *   符号原样保留；**注意下游 `InlineGraphic.cellsFor` 对非正宽返回 0 格**，负 space 目前
-     *   不产生回退推进，见 BOARD 2026-10-27 的登记）
+     *   符号原样保留；**下游 `InlineGraphic.cellsFor` 对负宽返回保号的 `-ceil(|W| / 半角步进)`**
+     *   （绝对宽不足 1 格也回退 1 格），只有 `W == 0` 才落 0 格 ⇒ 负 space 是**真回退推进**，
+     *   与原版在像素域带符号累加同向（spec: `ConsoleShapePart.cs:50-53` 直接把脚本给的负数收进
+     *   `RectangleF` 的宽、`ConsoleSpacePart.cs:11` 把它存成 `WidthF`、`:18-23` 的 `SetWidth`
+     *   截断时保号、`ConsoleButtonString.cs:281`/`:337` 的
+     *   `num += aConsoleDisplayNode.Width` 把后续部件左移；钉在
+     *   `displaylist/DisplayListTest` 的「负宽space把列游标回退使后续图段叠回起点」与
+     *   「cellsFor负宽与正宽严格互为镜像」两例。镜像取 `-ceil` 而非 C# 的向零截断，
+     *   理由见 `displaylist/DrawCmd.kt` 里 `cellsFor` 的文档（整格网格下的配对净位移））
      * @param scriptFontPixelSize 脚本像素所依据的基准字号（= 引擎生效 `Config.FontSize`）；
      *   0/负数或与 [fontPixelSize] 相等 = 不折算（恒等）
      */
@@ -151,7 +159,8 @@ class CellMetrics(
             return pixels
         }
         // Long 中间量：脚本能写出接近 Int 上限的 px（`SPRITEWIDTH` 乘放大率那条），
-        // Int 乘法会回绕成**符号相反**的值 ⇒ 整张图静默消失（cellsFor 对非正宽给 0，
+        // Int 乘法会回绕成**符号相反**的值 ⇒ 整张图静默消失（cellsFor 对负宽给**保号的
+        // -ceil(|W|/half)**、绝对宽不足 1 格时模至少 1 格，见 DrawCmd.cellsFor；
         // drawImage 对 ≤0 直接 return），屏上没有任何报错可查。
         val scaled = (pixels.toLong() * fontPixelSize / scriptFontPixelSize)
             .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong())

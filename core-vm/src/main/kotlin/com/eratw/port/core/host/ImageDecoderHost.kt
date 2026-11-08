@@ -42,6 +42,18 @@ interface ImageDecoderHost {
      * 调用方回落到 core 自带解码器与文本载体。
      */
     fun decode(path: String, bytes: ByteArray): PngImage?
+
+    /**
+     * **只读文件头**取 `[width, height]`，一个像素都不分配；量不出来返回 null。
+     *
+     * 存在的理由是延迟装载（见 `GraphicsBuffer.createDeferredFromFile`）：`GCREATEFROMFILE`
+     * 要照原版语义立刻答「成功/失败」并让 `GWIDTH`/`GHEIGHT` 可用，但本作语料的立绘工作表
+     * 单张就有 8000x4000（ARGB 122 MiB），不能为了量个尺寸先把它整张解进 Dalvik 堆。
+     *
+     * 默认实现返回 null = 宿主没有这个能力，调用方回落到「立即解码」的老路 ——
+     * 这样纯 JVM 闸与既有假宿主不必跟着改。
+     */
+    fun probe(path: String, bytes: ByteArray): IntArray? = null
 }
 
 /**

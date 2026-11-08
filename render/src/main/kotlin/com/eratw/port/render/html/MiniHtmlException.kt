@@ -7,7 +7,7 @@ package com.eratw.port.render.html
  * 官方行为里的「看着像 bug」的分支（如 `#` 前缀缺失时裸十六进制串也报错、
  * `&nbsp;` 还原成半角空格）一律照抄（ADR-005），不做「顺手修好」。
  * 行号主体指向
- * `D:/DSH/eratw-安卓移植计划/reference/emuera-cs/MinorShift.Emuera.UI.Game/HtmlManager.cs`（下面统一写
+ * `<work-root>/eratw-安卓移植计划/reference/emuera-cs/MinorShift.Emuera.UI.Game/HtmlManager.cs`（下面统一写
  * `HtmlManager.cs`）；属性数值解析走同一个 `Utils.ParseMixedNum`，另注
  * `MinorShift.Emuera.Runtime.Utils.EvilMask/Utils.cs`（统一写 `Utils.cs`），
  * 那条同时是「同名属性重复」在数值属性上的真正抛点（`Utils.cs:361`）。

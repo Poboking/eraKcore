@@ -81,7 +81,7 @@ internal fun registerVarMethods(r: BuiltinRegistry) {
     // 移植侧 CFLAG 就是角色 1D 整数变量（SystemLayout.kt:105、VariableSizes.kt:100、
     // 装载写回 VariableStore.kt:524），故该谓词可逐字复现，见 [findCharaByNoSp]。
     int("GETCHARA", 1, 2) { c, a ->
-        val no = iv(a[0]!!)
+        val no = requiredIntArg(a, 0, "GETCHARA")
         if (!spCharaEnabled(c.host)) {
             findCharaByNo(c, no)
         } else {
@@ -99,7 +99,7 @@ internal fun registerVarMethods(r: BuiltinRegistry) {
     // SP 开启则 `GetChara_UseSp(no, getSp: true)`（:3171）。
     int("GETSPCHARA", 1, 1) { c, a ->
         if (!spCharaEnabled(c.host)) throw CodeEE(SP_CHARACTER_FEATURE_DISABLED)
-        findCharaByNoSp(c, iv(a[0]!!), sp = true)
+        findCharaByNoSp(c, requiredIntArg(a, 0, "GETSPCHARA"), sp = true)
     }
     // spec: FunctionMethodCreator.cs:3175-3229 CsvStrDataMethod + VariableEvaluator.cs:1584-1634
     // 模板不存在 → CodeEE（RefUndefinedChara）
@@ -112,7 +112,7 @@ internal fun registerVarMethods(r: BuiltinRegistry) {
         "CSVNICKNAME" to "nickname", "CSVMASTERNAME" to "mastername",
     )) {
         str(fnName, 1, 2) { c, a ->
-            val no = iv(a[0]!!)
+            val no = requiredIntArg(a, 0, fnName)
             if (!spCharaEnabled(c.host) && optInt(a, 1, 0) != 0L) throw CodeEE(SP_CHARACTER_FEATURE_DISABLED)
             val tmpl = c.store.template(no) ?: throw codeEE(fnName, "引用未定义的角色（NO $no）")
             when (field) {
@@ -126,8 +126,8 @@ internal fun registerVarMethods(r: BuiltinRegistry) {
     // spec: FunctionMethodCreator.cs:3230-3263 CsvcstrMethod（门控 :3255-3258，
     // SP 形参同样落进未被读取的 GetCharacterTemplate_UseSp）
     str("CSVCSTR", 2, 3) { c, a ->
-        val no = iv(a[0]!!)
-        val idx = iv(a[1]!!)
+        val no = requiredIntArg(a, 0, "CSVCSTR")
+        val idx = requiredIntArg(a, 1, "CSVCSTR")
         if (!spCharaEnabled(c.host) && optInt(a, 2, 0) != 0L) throw CodeEE(SP_CHARACTER_FEATURE_DISABLED)
         val tmpl = c.store.template(no) ?: throw codeEE("CSVCSTR", "引用未定义的角色（NO $no）")
         val size = csvArraySize(c, "CSTR")
@@ -149,8 +149,8 @@ internal fun registerVarMethods(r: BuiltinRegistry) {
         Triple("CSVJUEL", "juel", "JUEL"),
     )) {
         int(fnName, 2, 3) { c, a ->
-            val no = iv(a[0]!!)
-            val idx = iv(a[1]!!)
+            val no = requiredIntArg(a, 0, fnName)
+            val idx = requiredIntArg(a, 1, fnName)
             if (!spCharaEnabled(c.host) && optInt(a, 2, 0) != 0L) throw CodeEE(SP_CHARACTER_FEATURE_DISABLED)
             val tmpl = c.store.template(no) ?: throw codeEE(fnName, "引用未定义的角色（NO $no）")
             val size = csvArraySize(c, varName)
@@ -172,7 +172,7 @@ internal fun registerVarMethods(r: BuiltinRegistry) {
     // 门控 :3412-3415；getSp 同样只透传给未被读取 sp 形参的模板查找（ConstantData.cs:1230-1238）。
     int("EXISTCSV", 1, 2) { c, a ->
         if (!spCharaEnabled(c.host) && optInt(a, 1, 0) != 0L) throw CodeEE(SP_CHARACTER_FEATURE_DISABLED)
-        if (c.store.template(iv(a[0]!!)) != null) 1L else 0L
+        if (c.store.template(requiredIntArg(a, 0, "EXISTCSV")) != null) 1L else 0L
     }
 
     // spec: FunctionMethodCreator.cs:3321-3387 FindcharaMethod + VariableEvaluator.FindChara
@@ -210,7 +210,7 @@ internal fun registerVarMethods(r: BuiltinRegistry) {
 
     // spec: FunctionMethodCreator.cs:3420-3475 VarsizeMethod（名字字符串参数）
     int("VARSIZE", 1, 2) { c, a ->
-        val name = sv(a[0]!!)
+        val name = requiredStrArg(a, 0, "VARSIZE")
         val dim = optInt(a, 1, 0).toInt()
         // spec: FunctionMethodCreator.cs:3449-3452 —— Config.VarsizeDimConfig 为真且维度 > 0 时
         // 下标先减一，再取 GetLength（ERD 口径）；出厂默认 false ⇒ 行为与旧实现逐位相同。
@@ -225,8 +225,8 @@ internal fun registerVarMethods(r: BuiltinRegistry) {
 
     // spec: FunctionMethodCreator.cs:4835-4863 GetnumBMethod（名字字符串参数）
     int("GETNUMB", 2, 2) { c, a ->
-        val name = sv(a[0]!!)
-        val keyword = sv(a[1]!!)
+        val name = requiredStrArg(a, 0, "GETNUMB")
+        val keyword = requiredStrArg(a, 1, "GETNUMB")
         // 原版 GetVariableToken 认系统与用户变量（含私有）；这里同样走全量变量表。
         c.store.resolveVarInfo(name)
             ?: throw codeEE("GETNUMB", "第 1 个参数(\"$name\")不是变量名")
@@ -250,10 +250,10 @@ internal fun registerVarMethods(r: BuiltinRegistry) {
     }
     // spec: FunctionMethodCreator.cs:4864-4905 GetPalamLVMethod/GetExpLVMethod + VariableEvaluator.cs:241-263
     int("GETPALAMLV", 2, 2) { c, a ->
-        lvOf(c, "PALAMLV", iv(a[0]!!), iv(a[1]!!))
+        lvOf(c, "PALAMLV", requiredIntArg(a, 0, "GETPALAMLV"), requiredIntArg(a, 1, "GETPALAMLV"))
     }
     int("GETEXPLV", 2, 2) { c, a ->
-        lvOf(c, "EXPLV", iv(a[0]!!), iv(a[1]!!))
+        lvOf(c, "EXPLV", requiredIntArg(a, 0, "GETEXPLV"), requiredIntArg(a, 1, "GETEXPLV"))
     }
     // spec: FunctionMethodCreator.cs:5968-6020 JoinMethod + VariableEvaluator.cs:439-497 GetJoinedStr
     // 首参是 RefAnyArray（2073 = AllowConstRef|Ref|Array|Any）⇒ **整数数组**与 2D/3D 同样合法：
@@ -266,17 +266,24 @@ internal fun registerVarMethods(r: BuiltinRegistry) {
         val start = if (argExprs.size >= 3 && argExprs[2] != null) argExprs[2]!!.getIntValue(c) else 0L
         val len = lastDimLength(c, ref.name)
         val count = if (argExprs.size >= 4 && argExprs[3] != null) argExprs[3]!!.getIntValue(c) else len - start
+        // 下标求值点位照原版：delimiter→start→count→**GetFixedVariableTerm**→负数检→区间检
+        // （spec: FunctionMethodCreator.cs:5993-6002）；旧次序把下标推到负数/区间校验之后，
+        // 带副作用的下标表达式触碰时机分叉。
+        val elem = elemIndices(c, ref)
         // spec: :5995-5998 —— count 为负报 ArgIsNegative（第 4 位）
         if (count < 0) throw codeEE("STRJOIN", "第 4 个参数 $count 为负数")
         // 区间校验对应 FixedVariableTerm.IsArrayRangeValid（spec: VariableData.cs:89-100）：
         // 端点允许等于该维长度，故 start==len && count==0 是合法空区间。
-        if (start < 0 || start > len || start + count > len) {
-            throw codeEE("STRJOIN", "区间 [$start,${start + count}) 越界（变量 ${ref.name} 长度 $len）")
+        // end 用 unchecked long 加法（原版 :6002 传的就是 `num + num2`，回绕后照样交给
+        // IsArrayRangeValid；那边 index2 < 0 也抛 OoR，VariableData.cs:96-99）。所以溢出成负数
+        // 时官方抛 CodeEE，不能像旧实现那样因 `start + count > len` 为假而静默返回空串。
+        val end = start + count
+        if (start < 0 || start > len || end < 0 || end > len) {
+            throw codeEE("STRJOIN", "区间 [$start,$end) 越界（变量 ${ref.name} 长度 $len）")
         }
         if (count == 0L) return@refStr ""
-        val elem = elemIndices(c, ref)
         val isStr = varIsStr(c, ref.name)
-        (start until start + count).joinToString(delimiter) { i ->
+        (start until end).joinToString(delimiter) { i ->
             if (isStr) {
                 c.store.readStr(ref.name, elem + longArrayOf(i))
             } else {
@@ -366,8 +373,9 @@ private fun lastDimLength(c: BuiltinContext, name: String): Long {
  * - MAX/MINARRAY 是 `RefAny1D`（2090，仅 1 维）⇒ 长度取 `GetLength()`，
  *   多维变量一律报「必须指定维度」（与 GetMaxArray 只认 `new long[1]{i}` 一致）。
  *
- * MAX/MIN 版（initial=null）先读 start 元素——start==len 时由 readInt 抛 OoR，
- * 与原版 GetMaxArray 对空区间的行为一致（spec: VariableEvaluator.cs:637-639）。
+ * MAX/MIN 版（initial=null）无条件先读 start 元素（spec: VariableEvaluator.cs:639/:660），
+ * 循环从 start+1 起：`start == end` 与 `start > end` 都返回 `arr[start]` 本身；
+ * `start == 长度` 时由 readInt 抛 OoR，与原版裸越界异常同向（spec: VariableData.cs:89-100 只判端点落界，不判 start<=end）。
  */
 private fun rangeFold(
     c: BuiltinContext,
@@ -395,16 +403,22 @@ private fun rangeFold(
     if (end < 0 || end > len) {
         throw arrayRangeOoR(fn, 3, end, ref.name)
     }
-    var acc = initial
-    if (acc == null && start == end) {
-        // 原版 GetMaxArray 对空区间仍会读 arr[start]（start==len 时抛 OoR）
-        return c.store.readInt(ref.name, elem + longArrayOf(start))
+    if (initial != null) {
+        var acc: Long = initial
+        for (i in start until end) {
+            acc = op(acc, c.store.readInt(ref.name, elem + longArrayOf(i)))
+        }
+        return acc
     }
-    for (i in start until end) {
-        val v = c.store.readInt(ref.name, elem + longArrayOf(i))
-        acc = if (acc == null) v else op(acc, v)
+    // 原版 GetMaxArray 无条件先读 start 元素（spec: VariableEvaluator.cs:637-648）：
+    // start==end 与 start>end 都返回该元素，既不报错也不返回 0。
+    var acc = c.store.readInt(ref.name, elem + longArrayOf(start))
+    var i = start + 1
+    while (i < end) {
+        acc = op(acc, c.store.readInt(ref.name, elem + longArrayOf(i)))
+        i++
     }
-    return acc ?: 0L
+    return acc
 }
 
 /** 角色区间折叠（SUMC/MAXC/MINCARRAY）：区间参数是**角色位置**范围（spec: VariableEvaluator.cs:429-437,658-671）。 */
@@ -425,12 +439,22 @@ private fun charaRangeFold(
     if (start >= count || start < 0 || end > count || end < 0) {
         throw codeEE(fn, "角色区间 [$start,$end) 越界（角色数 $count）")
     }
-    var acc = initial
-    for (i in start until end) {
-        val v = c.store.readInt(ref.name, longArrayOf(i) + elem)
-        acc = if (acc == null) v else op(acc, v)
+    if (initial != null) {
+        var acc: Long = initial
+        for (i in start until end) {
+            acc = op(acc, c.store.readInt(ref.name, longArrayOf(i) + elem))
+        }
+        return acc
     }
-    return acc ?: 0L
+    // 原版 GetMaxArrayChara 同样无条件先读位置 start（VariableEvaluator.cs:660），
+    // start==end / start>end 都返回该角色值。
+    var acc = c.store.readInt(ref.name, longArrayOf(start) + elem)
+    var i = start + 1
+    while (i < end) {
+        acc = op(acc, c.store.readInt(ref.name, longArrayOf(i) + elem))
+        i++
+    }
+    return acc
 }
 
 /**
@@ -447,10 +471,12 @@ private fun matchCount(c: BuiltinContext, argExprs: List<Expr?>, fn: String, cha
     val isStr = varIsStr(c, ref.name)
     var count = 0L
     if (!chara) {
-        val elem = elemIndices(c, ref)
         val len = c.store.getLength(ref.name, -1).toLong()
         val start = if (argExprs.size >= 3 && argExprs[2] != null) argExprs[2]!!.getIntValue(c) else 0L
         val end = if (argExprs.size >= 4 && argExprs[3] != null) argExprs[3]!!.getIntValue(c) else len
+        // 下标求值在 start/end **之后**、区间校验之前（spec: FunctionMethodCreator.cs:4465-4469：
+        // num→num2→GetFixedVariableTerm）——旧次序把带副作用的下标表达式提前触碰。
+        val elem = elemIndices(c, ref)
         if (start < 0 || start > len) throw arrayRangeOoR(fn, 3, start, ref.name)
         if (end < 0 || end > len) throw arrayRangeOoR(fn, 4, end, ref.name)
         if (isStr) {
@@ -465,11 +491,12 @@ private fun matchCount(c: BuiltinContext, argExprs: List<Expr?>, fn: String, cha
             }
         }
     } else {
-        val full = ref.indices.map { it.getIntValue(c) }.toLongArray()
-        val elem = full.drop(1).toLongArray()
         val n = c.store.characters.count
         val start = if (argExprs.size >= 3 && argExprs[2] != null) argExprs[2]!!.getIntValue(c) else 0L
         val end = if (argExprs.size >= 4 && argExprs[3] != null) argExprs[3]!!.getIntValue(c) else n.toLong()
+        // 同非 chara 支：角色位置/元素下标在 start/end 之后才求值（spec: :4467-4469）
+        val full = ref.indices.map { it.getIntValue(c) }.toLongArray()
+        val elem = full.drop(1).toLongArray()
         if (start >= n || start < 0 || end > n || end < 0) {
             throw CodeEE("函数 $fn 的角色范围无效（$start,$end，角色数 $n）")
         }
@@ -619,9 +646,11 @@ private fun inRangeCount(c: BuiltinContext, argExprs: List<Expr?>, fn: String, c
     val start = if (argExprs.size >= 4 && argExprs[3] != null) argExprs[3]!!.getIntValue(c) else 0L
     var count = 0L
     if (!chara) {
-        val elem = elemIndices(c, ref)
         val len = c.store.getLength(ref.name, -1).toLong()
         val end = if (argExprs.size >= 5 && argExprs[4] != null) argExprs[4]!!.getIntValue(c) else len
+        // 下标求值在 lo/hi/start/end 全部落定、区间校验之前（spec: FunctionMethodCreator.cs:5057-5065：
+        // arg1→arg2→arg3→arg4→GetFixedVariableTerm→IsArrayRangeValid）
+        val elem = elemIndices(c, ref)
         // IsArrayRangeValid(index1, index2, "INRANGEARRAY", 4, 5)：端点落在 [0, 长度]，等于长度合法
         // （spec: FunctionMethodCreator.cs:5068 + VariableData.cs:92-99；start == len ⇒ 0 个元素）
         if (start < 0 || start > len) throw arrayRangeOoR(fn, 4, start, ref.name)
@@ -631,10 +660,11 @@ private fun inRangeCount(c: BuiltinContext, argExprs: List<Expr?>, fn: String, c
             if (v >= lo && v < hi) count++
         }
     } else {
-        val full = ref.indices.map { it.getIntValue(c) }.toLongArray()
-        val elem = full.drop(1).toLongArray()
         val charaNum = c.store.characters.count.toLong()
         val end = if (argExprs.size >= 5 && argExprs[4] != null) argExprs[4]!!.getIntValue(c) else charaNum
+        // 同非 chara 支：下标在 start/end 之后求值（spec: :5060-5065）
+        val full = ref.indices.map { it.getIntValue(c) }.toLongArray()
+        val elem = full.drop(1).toLongArray()
         if (start >= charaNum || start < 0 || end > charaNum || end < 0) {
             throw CodeEE("函数 $fn 的角色范围无效（$start,$end，角色数 $charaNum）")
         }
@@ -707,14 +737,26 @@ private fun varIsStr(c: BuiltinContext, name: String): Boolean =
 /** GETVAR/GETVARS：动态解析变量表达式字符串并求值（spec: FunctionMethodCreator.cs:377-436）。 */
 private fun getVarValue(c: BuiltinContext, argExprs: List<Expr?>, wantStr: Boolean): Value {
     val fn = if (wantStr) "GETVARS" else "GETVAR"
-    val exprStr = (argExprs.firstOrNull()?.toValue(c) as? Value.StrV)?.v
+    val arg = argExprs.firstOrNull()
+    val exprStr = (arg?.toValue(c) as? Value.StrV)?.v
+        ?: throw CodeEE("函数 $fn 的第 1 个参数必须是字符串")
+    // 原版把第 1 参 **求值两次**：第一次存 `strValue`（只进错误文案），第二次才喂给
+    // `LexicalAnalyzer.Analyse`（spec: FunctionMethodCreator.cs:388-389 GetVar /
+    // :418-419 GetVars / :811-812 VarSetEx —— 三处都是 `arguments[0].GetStrValue(exm)`
+    // 连续出现两次）。对纯字符串表达式无差别；带副作用的实参（用户函数、RAND 等）在
+    // **触达次数**上会分叉，故照抄，不做「合并成一次」的优化。
+    //
+    // 可观测性：本作语料 0 个调用点（`eratw-画蛇添足版eratw4.980` 4,542 份 +
+    // `eraTW4.981-261017-EAGLOV3` 4,831 份 ERB/ERH，GETVAR/GETVARS/VARSETEX 三词
+    // 全 0 命中）⇒ 对读数零影响；照抄只为前向兼容 mod（ADR-005 理由 3）。
+    val parseInput = (arg?.toValue(c) as? Value.StrV)?.v
         ?: throw CodeEE("函数 $fn 的第 1 个参数必须是字符串")
     val ast = try {
         // 词法/语法都在 try 内：LexError 不是 CodeEE，漏到执行层就会穿过 TRYC（原版
         // LexicalAnalyzer 抛的正是 CodeEE，见 spec: FunctionMethodCreator.cs:377-436）。
         // 词法配置走 VM 条目表（SystemAllowFullSpace 等；spec: LexicalAnalyzer.cs:748-754 的
         // 静态字段读取点 Config.cs:370 —— 移植侧等价物是 ConfigMethods.lexerConfig）。
-        val tokens = ErbLexer(ConfigMethods.lexerConfig(c)).analyse(CharStream(exprStr), LexEndWith.EoL, LexAnalyzeFlag.NONE, 1)
+        val tokens = ErbLexer(ConfigMethods.lexerConfig(c)).analyse(CharStream(parseInput), LexEndWith.EoL, LexAnalyzeFlag.NONE, 1)
         val parser = ExprParser(tokens.map { it.toExprToken() }, storeResolver(c), c.parserConfig)
         parser.reduceExpressionTerm() ?: throw CodeEE("函数 $fn：无法解释为表达式 \"$exprStr\"")
     } catch (e: LexError) {
@@ -725,13 +767,16 @@ private fun getVarValue(c: BuiltinContext, argExprs: List<Expr?>, wantStr: Boole
     } catch (e: ExprParseException) {
         throw CodeEE("函数 $fn：${e.message}")
     }
-    // 原版限定目标是变量（拒绝 IsCalc 表达式）。TODO(verify): 非变量表达式的报错口径
+    // 原版只接受**变量项**：`aExpression is VariableTerm` 且 `Identifier != null`，否则 `IsNotVar`
+    // （spec: FunctionMethodCreator.cs:392-405 / :418-430）。闸门必须在求值之前——含副作用的
+    // 表达式（`GETVAR "@FINDCHARA(...)"` 之类）原版连一次都不跑，先跑再看类型会把副作用多做出来。
+    if (ast !is VarRef) throw CodeEE("${exprStr}不是变量")
     val v = ast.toValue(c)
     if (wantStr) {
-        if (v !is Value.StrV) throw CodeEE("函数 GETVARS：表达式 \"$exprStr\" 不是字符串变量")
+        if (v !is Value.StrV) throw CodeEE("${exprStr}不是字符串型")
         return v
     }
-    if (v !is Value.IntV) throw CodeEE("函数 GETVAR：表达式 \"$exprStr\" 不是整数变量")
+    if (v !is Value.IntV) throw CodeEE("${exprStr}不是整型")
     return v
 }
 

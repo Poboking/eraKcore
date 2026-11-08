@@ -2,6 +2,10 @@ package com.eratw.port.core.proc
 
 import com.eratw.port.core.audio.SoundChannelTable
 import com.eratw.port.core.code.CallArg
+import com.eratw.port.core.code.InfiniteLoopAlert
+import com.eratw.port.core.code.InfiniteLoopAnswer
+import com.eratw.port.core.code.RuntimeCallArg
+import com.eratw.port.core.code.RuntimeCallResolution
 import com.eratw.port.core.code.Opcode
 import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.SlotAddr
@@ -11,9 +15,13 @@ import com.eratw.port.core.code.VirtualMachine
 import com.eratw.port.core.compile.EXPR_STR_TEMP_PREFIX
 import com.eratw.port.core.compile.EXPR_TEMP_PREFIX
 import com.eratw.port.core.err.CodeEE
+import com.eratw.port.core.err.notDefinedLabelName
+import com.eratw.port.core.expr.ArgsEndWith
+import com.eratw.port.core.lexer.LangKey
 import com.eratw.port.core.expr.EvalContext
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.ExprEvalException
+import com.eratw.port.core.expr.ExprParseException
 import com.eratw.port.core.expr.ExprParser
 import com.eratw.port.core.expr.FormStringTerm
 import com.eratw.port.core.expr.IdentifierResolver
@@ -30,12 +38,14 @@ import com.eratw.port.core.fn.ConfigMethods
 import com.eratw.port.core.fn.UserFunctionKind
 import com.eratw.port.core.fn.EmDataPools
 import com.eratw.port.core.fn.formatDotNet
+import com.eratw.port.core.stmt.BuiltinSymbols
 import com.eratw.port.core.save.SaveWiring
 import com.eratw.port.core.host.Alignment
 import com.eratw.port.core.host.ConsoleBridge
 import com.eratw.port.core.host.ConsoleSink
 import com.eratw.port.core.host.GlyphMaskHost
 import com.eratw.port.core.host.GlyphMaskHostProvider
+import com.eratw.port.core.host.GRAPHICS_SLOT
 import com.eratw.port.core.host.GraphicsPool
 import com.eratw.port.core.host.GraphicsSink
 import com.eratw.port.core.host.InputSink
@@ -50,8 +60,10 @@ import com.eratw.port.core.lexer.CharStream
 import com.eratw.port.core.lexer.ErbLexer
 import com.eratw.port.core.lexer.FormStrEndWith
 import com.eratw.port.core.lexer.LexAnalyzeFlag
+import com.eratw.port.core.lexer.LexError
 import com.eratw.port.core.lexer.LexEndWith
 import com.eratw.port.core.lexer.LexerConfig
+import com.eratw.port.core.lexer.StrEndWith
 import com.eratw.port.core.rand.Sfmt19937
 import com.eratw.port.core.sem.DataSections
 import com.eratw.port.core.sem.ExecContext
@@ -175,8 +187,9 @@ class ProcessRuntime(
     /**
      * 函数键（大写）→ 源文件显示名（FN-05），UNICODE 告警的 WarnPrefix 用。
      *
-     * 缺省 null = 从 [FunctionTable.sourceFileOf]（`FuncMeta.position` 的 `文件:行号`）
-     * 反推，不额外持有侧车的 `fileByKey` 表；显式注入优先，供装置钉文件表。
+     * 缺省 null = 从 [FunctionTable.sourceFileOfIndex]（帧下标直取 `FuncMeta.position` 的
+     * `文件:行号`；B6 FN-05 起不再走按键的 `sourceFileOf`，键形与事件成员帧名不同源）
+     * 反推，不额外持有侧车的 `fileByKey` 表；显式注入优先，供装置钉文件表（注入表仍按 key 调用）。
      * 内存编译/测试无 position ⇒ 当前行恒 null，走原版无前缀回落（:5713-5716）。
      */
     private val sourceFileOf: ((String) -> String?)? = null,
@@ -201,6 +214,15 @@ class ProcessRuntime(
      * store.aux 的同一张声道表，语句层播的东西函数层（SOUNDCONTROL 等）立刻读得到。
      */
     soundSink: SoundSink = NoopSoundSink,
+    /**
+     * functionDispatch 表直通注入（M2 dispatch ISA，ABI-3 候选）：链接产物
+     * （[com.eratw.port.core.patch.LinkedProgram.catalog] 的 dispatch 数组）在会话
+     * 装配点喂入，透传给 [VirtualMachine]。缺省 null = 无 Mod 产物快路径（行为与
+     * 不带 Mod 的既有装配逐位一致）。装配点接线（LinkedProgram → 本参数 → VM）在
+     * M2-2 容器读取落地后由 mod 链完成；宿主名字通道（resolveFunctionIndex）的
+     * 胜者表接 catalog.bindings 归同一批接线。
+     */
+    val functionDispatch: IntArray? = null,
     /**
      * 语句层输入 sink 注入点（sem 契约：直接成为 [ExecContext.input]）。缺省
      * [NoopInputSink] = 等待立即返回请求默认值（`InputSink.kt:55-58`），既有装置
@@ -242,6 +264,16 @@ class ProcessRuntime(
      * 名字匹配大小写不敏感（口径同 `FuncMeta.key` / `Config.StrComper`，spec: `Config.cs:33`）。
      */
     disabledFunctions: Set<String> = EngineFunctionPolicy.DEFAULT_DISABLED,
+    /**
+     * 死循环告警（ENGFIX-4）的宿主通道，契约见 [VmHost.askInfiniteLoop]。
+     *
+     * null（缺省）= [InfiniteLoopAnswer.NoUi]：装置 / headless 与改造前逐条一致，
+     * 永不因为「跑太久」被打死；真机由 GameHost 接一个 AlertDialog + CountDownLatch
+     * 的阻塞式实现（在 VM 线程上等 UI 线程作答）。**实现方不得抛出**：
+     * 异常会沿 VM 语句路径收口成脚本终局，所以本类把回调整段包在 runCatching 里，
+     * 失败一律回落 [InfiniteLoopAnswer.NoUi]（同 onPressureCheckpoint 的纪律）。
+     */
+    private val infiniteLoopPrompt: ((InfiniteLoopAlert) -> InfiniteLoopAnswer)? = null,
 ) : VmHost {
 
     private val table: FunctionTable = functionTable
@@ -317,7 +349,7 @@ class ProcessRuntime(
         if (store.randProvider == null) {
             store.randProvider = Sfmt19937(randSeed ?: System.currentTimeMillis().toInt().toLong())
         }
-        vm = VirtualMachine(program, this, config)
+        vm = VirtualMachine(program, this, config, functionDispatch = functionDispatch)
         activeVm = vm
 
         // 局部长度注册（spec: VariableLocal.cs:40-90 —— LOCAL/LOCALS 声明优先，ARG/ARGS 取 max）
@@ -330,16 +362,36 @@ class ProcessRuntime(
         //    map has no iteration reader => final observable semantics are equal;
         // 2) count non-zero rows first and pre-size the bucket table once
         //    (reserveLocalLengths), avoiding repeated HashMap rehash/copies.
+        // PERF(MEM)：ARGF 的形参名走 `paramNamesPeek`（段 8 只读视图）而不是
+        //    `program.paramNames(...)` —— 后者对惰性表是 `functions.get(i)`，会把 M11-MEM
+        //    按需解码的 110,072 个 FunctionInfo 全量物化并**永久驻留**（每装配一次 store 付一次）；
+        //    容器根本没有段 8（v1/v2 产物）时整趟读数直接省掉，恒 0 与改造前同值。
         val functions = table.all()
+        val scanArgf = program.hasAnyParamNames()
         var lengthEntries = 0
         for (m in functions) {
-            if (m.localSize != 0 || m.localsSize != 0 || m.argIntCount != 0 || m.argStrCount != 0) {
+            if (m.localSize != 0 || m.localsSize != 0 || m.floatLocalSize != 0 ||
+                m.argIntCount != 0 || m.argStrCount != 0 ||
+                (scanArgf &&
+                    VariableStore.LocalLengths.floatArgFromParams(program.paramNamesPeek(m.index)) != 0)
+            ) {
                 lengthEntries++
             }
         }
         store.reserveLocalLengths(lengthEntries)
         for (m in functions) {
-            if (m.localSize == 0 && m.localsSize == 0 && m.argIntCount == 0 && m.argStrCount == 0) {
+            // ARGF 的形参声明长：原版是 `label.ArgFloatLength`（spec: fork-src ErbLoader.cs:787），
+            // 由 VariableLocal 拿去和 VARIABLESIZE.CSV 的浮点档位取 max（spec: :48-53）——
+            // 「声明只增不减」。移植侧从程序表的形参名数出来（口径与逐字等价于整数侧
+            // erbcc 的 argInt/argStr 分桶，见 VariableStore.LocalLengths.floatArgFromParams）。
+            val floatArg = if (scanArgf) {
+                VariableStore.LocalLengths.floatArgFromParams(program.paramNamesPeek(m.index))
+            } else {
+                0
+            }
+            if (m.localSize == 0 && m.localsSize == 0 && m.floatLocalSize == 0 &&
+                m.argIntCount == 0 && m.argStrCount == 0 && floatArg == 0
+            ) {
                 continue
             }
             store.defineLocalLengths(
@@ -349,6 +401,9 @@ class ProcessRuntime(
                     locals = m.localsSize,
                     arg = m.argIntCount,
                     args = m.argStrCount,
+                    // `#LOCALFSIZE`：必须在首次 LOCALF/ARGF 访问前注册（FloatLocal 实例懒建并缓存长度）。
+                    floatLocal = m.floatLocalSize,
+                    floatArg = floatArg,
                 ),
             )
         }
@@ -492,6 +547,8 @@ class ProcessRuntime(
                 when (args[i]) {
                     is Value.IntV -> ni++
                     is Value.StrV -> ns++
+                    // 浮点实参不进任何类型桶（本轮无浮点变量族，见交付报告的 TODO）
+                    is Value.FloatV -> {}
                     null -> {}
                 }
             }
@@ -503,6 +560,7 @@ class ProcessRuntime(
                 when (val a = args[i]) {
                     is Value.IntV -> iv[ii++] = a.v
                     is Value.StrV -> sv[ss++] = a.v
+                    is Value.FloatV -> {}
                     null -> {}
                 }
             }
@@ -791,12 +849,16 @@ class ProcessRuntime(
         /**
          * ② 路落地：在求值点重入被调帧（见上方 KDoc 的 Process.cs:514-540 行号），
          * 通道按被调方法的声明类型选（[invokeUserMethod]：int 取帧返回值、str 取 `_RETS`
-         * 字符串通道），与原版 `MethodReturnValue` 同源（spec: ProcessState.cs:30、
+         * 字符串通道、**float 取 `_RETF` 浮点通道**（4.981 路次 g2-returnf-float；浮点位按
+         * 「被调帧从 `_RETF` 出帧」识别，因为 [FuncMeta] 尚无浮点位），与原版 `MethodReturnValue` 同源（spec: ProcessState.cs:30、
          * Process.cs:529）。消费侧的类型容错（原版 `SuperUserDefinedMethodTerm.cs:26-38`
          * 不匹配时 int 得 0 / str 得 ""）在本侧由两条既有通道等价覆盖：
          * 编译期降级走 VM 的 `_RET`/`_RETS`（Vm.kt:555-573），本通道按声明类型返回、
          * 与解析期 `funcTypes` 同源 ⇒ 正常语料不会出现消费/声明错配。
          * TODO(verify): 错配时的 0/"" 静默容错未逐字复刻（现走 [Expr] 的"返回了非整数结果"）。
+         * 浮点消费侧（[com.eratw.port.core.expr.FuncCall.getFloatValue]）要 `Value.FloatV`，
+         * 由本通道的第三支供值；浮点方法**不会**被编译期降级（帧槽无浮点列，
+         * 见 ErbProgramCompiler.compileMethod 的 FLOAT 分支），所以浮点位只有这一条消费路。
          */
         private fun exprCallUserMethod(name: String, args: List<Value?>): Value =
             invokeUserMethod(name, args)
@@ -834,7 +896,7 @@ class ProcessRuntime(
                     val pn = paramNames.getOrNull(i)
                     if (pn != null && refUserParamAt(pn, meta) != null) {
                         val e = args[i]
-                            ?: throw CodeEE("@${meta.name}的第${i + 1}个参数是引用形式因此无法省略")
+                            ?: throw CodeEE.keyed(LangKey.CanNotOmitRefArg, meta.name, i + 1)
                         val vr = e as? VarRef
                             ?: throw CodeEE("@${meta.name}的第${i + 1}个参数必须是是引用形式的数组变量")
                         values.add(null) // REF 位不求值（原版只取数组本体）
@@ -846,7 +908,7 @@ class ProcessRuntime(
                 }
                 for (p in args.size until paramNames.size) {
                     if (refUserParamAt(paramNames[p], meta) != null) {
-                        throw CodeEE("@${meta.name}的第${p + 1}个参数是引用形式因此无法省略")
+                        throw CodeEE.keyed(LangKey.CanNotOmitRefArg, meta.name, p + 1)
                     }
                 }
                 return invokeUserMethod(name, values, refs)
@@ -870,22 +932,105 @@ class ProcessRuntime(
             store.resolveVarInfo(name, store.currentFunction)
 
         override fun resolveFunction(name: String): OperandType? {
-            table.nonEvent(name)?.let { return if (it.returnsStr) OperandType.STR else OperandType.INT }
+            table.nonEvent(name)?.let {
+                // 方法返回类型按声明面三分（#FUNCTIONF → FLOAT，路次 g7）。
+                return when {
+                    it.returnsFloat -> OperandType.FLOAT
+                    it.returnsStr -> OperandType.STR
+                    else -> OperandType.INT
+                }
+            }
             return Builtins.registry.returnType(name)
         }
+
+        /**
+         * `POWER` 一类：内建方法且任一实参浮点 ⇒ 返回浮点（spec: FunctionMethodTerm.cs:44-56）。
+         * 用户函数（[com.eratw.port.core.code.RuntimeCallResolution] 的 nonEvent 表）按声明面定类型，
+         * 不参与晋升（fork 只给内建方法设 `CanReturnFloat`，spec: FunctionMethodCreator.cs:5418-5436）。
+         */
+        override fun canReturnFloat(name: String): Boolean =
+            table.nonEvent(name) == null && BuiltinSymbols.canReturnFloat(name)
     }
+
+    /**
+     * 运行期 FORM 解析缓存的键：解析结果取决于**文本**与**当前函数作用域** ——
+     * [runtimeFormResolver] 的变量解析走 `store.resolveVarInfo(name, store.currentFunction)`，
+     * 私有 `#DIM` 只在声明它的函数里可见，跨函数复用同一份解析结果会把变量解析错。
+     * 词法/解析模式（`EoL` + `trim=false`、`ParserConfig()`）在本实例内是常量，不进键。
+     */
+    private data class RuntimeFormKey(val scope: String?, val text: String)
+
+    /** 运行期整数列表解析缓存的键（口径同上）。 */
+    private data class RuntimeIntListKey(val scope: String?, val text: String)
+
+    /**
+     * 运行期 FORM 解析缓存（有界 LRU，`accessOrder=true`）：键见 [RuntimeFormKey]。
+     *
+     * 只缓存**解析结果**（AST 结构）；求值每次都用当前 `evalContext`，所以变量改写后
+     * 下一次求值立刻读到新值。`VarRef`/`KeywordIndexArg` 的求值期记忆是派生缓存且按
+     * `(读取方, 作用域)` 自行失效（见 `core/expr/Expr.kt`），共享 AST 不串值。
+     * 只缓存 `text.length <= [RUNTIME_PARSE_CACHE_MAX_TEXT]` 的输入：长文本命中率低、
+     * 常驻内存不划算。同步监视器 = 缓存对象本身：运行期单 VM 线程，加锁只为防嵌套 VM /
+     * 测试装置跨线程调用的极小可能，热路径上是无竞争锁。
+     */
+    private val runtimeFormCache = object : LinkedHashMap<RuntimeFormKey, FormStringTerm>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<RuntimeFormKey, FormStringTerm>): Boolean =
+            size > RUNTIME_PARSE_CACHE_LIMIT
+    }
+
+    /** 运行期 RETURNFORM 整数列表解析缓存（口径同 [runtimeFormCache]）。 */
+    private val runtimeIntListCache = object : LinkedHashMap<RuntimeIntListKey, List<Expr>>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<RuntimeIntListKey, List<Expr>>): Boolean =
+            size > RUNTIME_PARSE_CACHE_LIMIT
+    }
+
+    /** 观测读数：运行期 FORM 的真实解析次数（缓存未命中数；测试锁命中/淘汰用）。 */
+    @Volatile
+    internal var runtimeFormParseCount: Int = 0
+        private set
+
+    /** 观测读数：RETURNFORM 整数列表的真实解析次数（口径同上）。 */
+    @Volatile
+    internal var runtimeIntListParseCount: Int = 0
+        private set
+
+    /**
+     * 运行期字符串调用（`_CALL_STR`）的**单槽逐位实参表**（契约 C-CALL-STR-HOST@1）。
+     *
+     * VM 在 `callInto`/`jumpInto` 之前调 [onRuntimeCallArgs] 写入（键 = 调用点 pc），
+     * [bindCallArgs] 在下一次取实参元数据时优先读它并**用后清**：运行期调用点没有静态
+     * `callArgsAt` 表，凭这一槽把「实参位 → 类型桶槽号」交给按位置绑定。`pc` 不匹配即
+     * 视为无运行期表（退回既有 `program.callArgsAt` 类型桶路径）。
+     */
+    private var runtimeCallArgsPc: Int = -1
+    private var runtimeCallArgs: List<CallArg>? = null
 
     /**
      * PRINTFORMS 二段展开：CheckEscape → 按 FORM 重新词法/解析 → 求值。
      * spec: FunctionIdentifier.cs:203-209（CheckEscape + AnalyseFormattedString + StrForm.GetString）、
      * ExpressionMediator.cs:92-128（CheckEscape）。
+     *
+     * 解析结果进 [runtimeFormCache]（键含当前函数作用域），**求值仍每次走当前 evalContext**。
      */
     private fun expandRuntimeForm(text: String): String {
-        val form = ErbLexer(runtimeLexerConfig).analyseFormattedString(
-            CharStream(checkEscape(text)), FormStrEndWith.EoL, trim = false, lineNo = -1,
-        )
-        return FormStringTerm.fromLexerStrForm(form, runtimeFormResolver, ParserConfig(), -1, -1)
-            .getStrValue(evalContext)
+        val key = if (text.length <= RUNTIME_PARSE_CACHE_MAX_TEXT) RuntimeFormKey(store.currentFunction, text) else null
+        val hit = if (key != null) synchronized(runtimeFormCache) { runtimeFormCache[key] } else null
+        val term = hit ?: run {
+            val form = ErbLexer(runtimeLexerConfig).analyseFormattedString(
+                CharStream(checkEscape(text)), FormStrEndWith.EoL, trim = false, lineNo = -1,
+            )
+            val parsed = FormStringTerm.fromLexerStrForm(form, runtimeFormResolver, ParserConfig(), -1, -1)
+            if (key != null) {
+                synchronized(runtimeFormCache) {
+                    runtimeFormCache[key] = parsed
+                    runtimeFormParseCount++
+                }
+            } else {
+                runtimeFormParseCount++
+            }
+            parsed
+        }
+        return term.getStrValue(evalContext)
     }
 
     /**
@@ -893,19 +1038,35 @@ class ProcessRuntime(
      * 逐段按 `LexEndWith.Comma` 词法、`reduceIntegerTerm`（默认 endWith=EoL）求值，
      * 段间越过逗号并跳过半角空格，spec: FunctionIdentifier.cs:3223-3231。
      * 空串返回空列表（RESULT 补 0 由 sem 负责）；解析器用 [runtimeFormResolver] + 求值用 [evalContext]。
+     *
+     * 解析出的表达式列表进 [runtimeIntListCache]（键含当前函数作用域），求值每次重做 ——
+     * 缓存未命中时仍按「解析一段求值一段」的旧顺序执行，求值异常的出现时点不变。
      */
     private fun parseRuntimeIntList(text: String): List<Long> {
+        val key = if (text.length <= RUNTIME_PARSE_CACHE_MAX_TEXT) RuntimeIntListKey(store.currentFunction, text) else null
+        val hit = if (key != null) synchronized(runtimeIntListCache) { runtimeIntListCache[key] } else null
+        if (hit != null) return hit.map { it.getIntValue(evalContext) }
         val st = CharStream(text)
         val lexer = ErbLexer(runtimeLexerConfig)
-        val out = ArrayList<Long>()
+        val exprs = ArrayList<Expr>()
+        val values = ArrayList<Long>()
         while (!st.eos) {
             val tokens = lexer.analyse(st, LexEndWith.Comma, LexAnalyzeFlag.NONE, -1)
             val expr = ExprParser(toExprTokens(tokens), runtimeFormResolver, ParserConfig()).reduceIntegerTerm()
-            out.add(expr.getIntValue(evalContext))
+            exprs.add(expr)
+            values.add(expr.getIntValue(evalContext))
             st.shiftNext()
             lexer.skipHalfSpace(st)
         }
-        return out
+        if (key != null) {
+            synchronized(runtimeIntListCache) {
+                runtimeIntListCache[key] = exprs
+                runtimeIntListParseCount++
+            }
+        } else {
+            runtimeIntListParseCount++
+        }
+        return values
     }
 
     /**
@@ -999,7 +1160,7 @@ class ProcessRuntime(
         // 调用（invokespecial 非虚分派，JIT 单态内联）。probe 非 null 才计时、才回调。
         val probe = statementProbe ?: return executeStatementRaw(stmt, env)
         val startNs = System.nanoTime()
-        // 旧树通道没有池下标可给（这条通道只在「没有扁平池」的装置里走到）：
+        // 对象树通道（Android 生产默认：`Program.flatStmtSource == null` 时走到）没有池下标可给：
         // op 用 `FunctionCode.ordinal` 与扁平池同口径，index 用哨兵。
         try {
             val outcome = executeStatementRaw(stmt, env)
@@ -1026,10 +1187,11 @@ class ProcessRuntime(
     }
 
     /**
-     * 扁平池通道（T2-64 波次 B）：VM marker 分支在 Program 扁平池就绪时走这里。
-     * 与旧 [executeStatement] 同一条观测内衬（探针守卫 + 计时 + 吞口），裸路径换成
-     * [executeStatementFlatRaw]；探针只需要 `op`（语句的 `FunctionCode.ordinal`）与
-     * `index`（语句池下标）两个 int —— 波次 C 起**不再为回调物化语句树**
+     * 扁平池通道（T2-64 波次 B；归因/装置通道，`files/flat-statements.on` 或
+     * `--ez eratwFlatStatements true` 打开）：VM marker 分支在 Program 扁平池就绪时走这里。
+     * 与对象树通道（Android 生产默认）的 [executeStatement] 同一条观测内衬（探针守卫 + 计时 +
+     * 吞口），裸路径换成 [executeStatementFlatRaw]；探针只需要 `op`（语句的 `FunctionCode.ordinal`）
+     * 与 `index`（语句池下标）两个 int —— 波次 C 起**不再为回调物化语句树**
      * （数据节改下标键、装载期压扁即弃后，物化一次就是整棵树；见 [StatementProbe] KDoc）。
      * 要语句树的探针（vmdbg trace）自己按 index 取。
      */
@@ -1057,15 +1219,24 @@ class ProcessRuntime(
      *
      * 不能只在 [executeStatementRaw] 里刷新：`_EVAL_*`、`_CALL` 这类降级指令不是语句 marker
      * （`_EVAL_STR` 里的 `UNICODE(...)` 前不会有 [StmtEnv]），所以取
-     * `activeVm.currentFunctionKey` + `activeVm.lastPc` + `Program.lineOf` 三件套。
+     * `activeVm.currentFunctionIndex`（帧下标）+ `activeVm.lastPc` + `Program.lineOf` 三件套。
      * 调用频率 = 诊断路径（UNICODE 控制码告警）本身，热循环零成本。
      * 未注入 [sourceFileOf] / 无帧 / 行号未知 → null（原版 `getCurrentLine == null` 口径）。
+     *
+     * B6 FN-05 收口：缺省通道**不再**按 VM 的 `currentFunctionKey`（大写函数名）反查
+     * `table.sourceFileOf`——事件成员与同文件被遮蔽重名定义在 Program 里的函数名是
+     * `KEY#defIndex` 形（erbcc 切片签名），`FunctionTable` 键表存的是裸大写名，两形必不
+     * 命中，事件成员帧的源文件曾恒 null。改走 [FunctionTable.sourceFileOfIndex]：帧下标
+     * 直取 meta.position，绕开键表（事件成员帧 / 非事件帧 / 合成入口同判据）。
+     * 显式注入的 [sourceFileOf] 仍按 key 调用（装置钉文件表的既有契约不变）。
      */
     private fun currentScriptLineNow(): Pair<String, Int>? {
         val key = activeVm.currentFunctionKey ?: return null
-        // 缺省从 FuncMeta.position 反推（不持有侧车 fileByKey 表，见 BootMetadataLazyTest）；
+        // 缺省从帧下标直取 meta.position（不持有侧车 fileByKey 表，也不经键表，见 B6 FN-05）；
         // 显式注入的 sourceFileOf 优先（装置可直接钉文件表）。
-        val file = sourceFileOf?.invoke(key) ?: table.sourceFileOf(key) ?: return null
+        val file = sourceFileOf?.invoke(key)
+            ?: table.sourceFileOfIndex(activeVm.currentFunctionIndex)
+            ?: return null
         if (file.isEmpty() || file.startsWith("·")) return null
         val line = program.lineOf(activeVm.lastPc)
         if (line < 0) return null
@@ -1078,13 +1249,25 @@ class ProcessRuntime(
      * 输入等待把它带进 [com.eratw.port.core.host.InputRequest.scriptLine]，控制台的
      * `newGeneration()`（EmueraConsole.cs:789-797）据此判断「脚本走到了另一行」。
      * 约定只用于**相等比较**：同一函数内的同一 pc 恒同值；换语句即变。
+     * 返回值必须**非负** —— 消费侧以 `>= 0` 为「宿主已接线」的判据（负数会被
+     * 当成缺省的未接线哨兵 `-1` 退回行水位，散策屏 `PRINTW` 插一行再回同一
+     * `INPUTS` 时就会把整屏按钮的世代误推走，2026-11-01 玩家反馈「点情侣酒店
+     * 后右侧选项全没」即此）。
      * 无帧 / pc 未知 → -1（控制台退回行水位近似）。
+     *
+     * **AUD-b5-linestamp（挖虫波 W9 判活）**：身份位改「函数键 → 单调 id」打包
+     * （高 32 位 id / 低 32 位 pc，见 [LineIdentityIds]），恒非负。旧写法
+     * `(key.hashCode().toLong() shl 32) xor pc` 把 JVM `String.hashCode` 的符号位带进来，
+     * 负 hash 键（语料实测 `TITLE_MAIN` / `TESTLIFE` / `H_EVAL` 等约半数函数）的 token
+     * 为负，被消费端 `scriptLine >= 0L` 的「已接线」哨兵吞掉 ⇒ 身份位静默退化成行水位。
+     * 原版判据是行对象引用恒等；id 表按串内容分配，同 `hashCode` 的不同串也不会折叠。
+     * 表挂 `store.aux`（铁律 4），随 VariableStore 重建。
      */
     private fun scriptLineTokenNow(): Long {
         val key = activeVm.currentFunctionKey ?: return -1L
         val pc = activeVm.lastPc
         if (pc < 0) return -1L
-        return (key.hashCode().toLong() shl 32) xor (pc.toLong() and 0xffffffffL)
+        return store.aux.slot(LINE_IDENTITY_SLOT) { LineIdentityIds() }.tokenOf(key, pc)
     }
 
     /** 语句执行裸路径（[executeStatement] 观测内衬所包的原有语义体）。 */
@@ -1194,6 +1377,102 @@ class ProcessRuntime(
      */
     override fun yieldBoundaryCount(): Long = statementExecutor.yieldBoundaryCount
 
+    /** 见 [VmHost.askInfiniteLoop]；宿主回调缺席或抛异常时一律按「没有可用 UI」走。 */
+    override fun askInfiniteLoop(alert: InfiniteLoopAlert): InfiniteLoopAnswer =
+        infiniteLoopPrompt?.let { runCatching { it(alert) }.getOrNull() } ?: InfiniteLoopAnswer.NoUi
+
+    /**
+     * 见 [VmHost.infiniteLoopSourceName]：取当前语句的源文件显示名。
+     *
+     * 当前帧就是 VM 问这一句时正在跑的函数（[functionKey] 与 `activeVm.currentFunctionKey`
+     * 同源），所以直接用 [currentScriptLineNow] 的 `文件:行号` 拆出文件名，不另按 key 查表；
+     * `.erbc` / 内存编译没有 position（文件名以 `·` 开头的合成键）时返回 null，
+     * 让 VM 按原版无前缀口径回落函数名。
+     */
+    override fun infiniteLoopSourceName(functionKey: String?): String? {
+        if (functionKey == null) return null
+        return currentScriptLineNow()?.first?.takeUnless { it.startsWith("·") }
+    }
+
+    /**
+     * 长页自救口（宿主钩子）：VM 指令循环每 ≈30 ms 调一次，宿主用它在**一页还没算完**的时候
+     * 回收可重解的图、并把「这一页已经跑了 N 秒、卡在哪支函数」钉进运行轨迹。
+     *
+     * 为什么挂在运行期而不是等待点：等待点（[com.eratw.port.core.proc.QueueInputSink.onTurnReady]）
+     * 是「页尾」，而玩家报的卡死正是页尾迟迟不来（收件箱 0.2.34 的 `turn 58515ms`）。
+     * null = 不挂钩（裸装置 / 测试），VM 那一侧是空实现，一条语句都不多跑。
+     *
+     * 线程与安全点：只在 VM 线程、两条语句之间触发（检查点在取指之前，语句体不会被截断）。
+     * 实现方**不得抛出** —— 抛出会被 VM 当成语句异常收口成脚本终局，所以本类把宿主回调
+     * 整段 `runCatching` 兜住：自救动作失败不该反过来把这一局打死。
+     */
+    @Volatile
+    var onPressureCheckpoint: (() -> Unit)? = null
+
+    /** 见 [VmHost.pressureCheckpoint]；读一次 [onPressureCheckpoint] 的 @Volatile 引用后调用。 */
+    override fun pressureCheckpoint() {
+        val hook = onPressureCheckpoint ?: return
+        runCatching(hook)
+    }
+
+    // ------------------------------------------------------------------
+    // 后台暂停闸（跨线程）
+    // ------------------------------------------------------------------
+
+    /**
+     * 暂停位：宿主线程经 [setBackgroundPaused] 写、VM 线程在主语句循环读（[backgroundPaused]）。
+     * `@Volatile` 单写多读（ADR-003 单线程 VM；暂停是宿主线程唯一允许的跨线程写入）。
+     */
+    @Volatile
+    private var backgroundPausedFlag = false
+
+    /** 暂停等待的监视器：恢复时 `signalAll` 立即唤醒，不必等满 250 ms 轮询。 */
+    private val pauseLock = java.util.concurrent.locks.ReentrantLock()
+
+    /** 与 [pauseLock] 配对：暂停位由 true 变 false 时唤醒 VM 线程。 */
+    private val resumeSignal = pauseLock.newCondition()
+
+    /**
+     * 后台暂停（跨线程，任意线程可调，幂等）：true 后 VM 在**下一条语句执行前**阻塞，
+     * false 立即唤醒并继续。暂停不消耗步数、不改变执行顺序、不推进任何计时。
+     */
+    fun setBackgroundPaused(paused: Boolean) {
+        pauseLock.lock()
+        try {
+            backgroundPausedFlag = paused
+            if (!paused) resumeSignal.signalAll()
+        } finally {
+            pauseLock.unlock()
+        }
+    }
+
+    /** 见 [com.eratw.port.core.code.VmHost.backgroundPaused]。 */
+    override fun backgroundPaused(): Boolean = backgroundPausedFlag
+
+    /**
+     * 见 [com.eratw.port.core.code.VmHost.awaitResume]：暂停期间以 250 ms 超时轮询，
+     * 线程被 interrupt（`GameHost.close`）或暂停位被清（含 `GameSession.close` 的放行）
+     * 时立即返回；返回时**保留中断位**，由 VM 侧决定退出本次 run。
+     */
+    override fun awaitResume() {
+        while (backgroundPausedFlag) {
+            if (Thread.currentThread().isInterrupted) return
+            pauseLock.lock()
+            try {
+                // 走进锁前暂停位可能已被清（setBackgroundPaused 的 signal 丢失窗口）⇒ 重查。
+                if (backgroundPausedFlag) {
+                    resumeSignal.await(250L, java.util.concurrent.TimeUnit.MILLISECONDS)
+                }
+            } catch (_: InterruptedException) {
+                // 恢复中断位再返回：VM 循环看到它即退出，close 不必等满一次超时。
+                Thread.currentThread().interrupt()
+                return
+            } finally {
+                pauseLock.unlock()
+            }
+        }
+    }
+
     /**
      * `_CALL_BY_NAME` 的运行期名字解析（契约 C5）。三条路与原版
      * `CalledFunction.CallFunction` 一一对应：
@@ -1250,6 +1529,100 @@ class ProcessRuntime(
             }
             FunctionTable.TargetKind.EVENT, FunctionTable.TargetKind.NOT_FOUND -> null
         }
+    }
+
+    /**
+     * 运行期字符串调用（`TRYCALLSTR`/`TRYCCALLSTR`，操作码 `_CALL_STR`）的解析 + 求值
+     * （契约 C-CALL-STR-HOST@1，`specs/isa.yaml:2542`）。
+     *
+     * 输入 = `a` 槽整串原文；输出 = [RuntimeCallResolution]。**本方法不抛异常**：
+     * 词法 / 解析 / 求值 / 非法目标的一切失败折成 [RuntimeCallResolution.Failed]，
+     * 目标查不到折成 [RuntimeCallResolution.NotFound]（`name` = 解析后函数名，供 VM 文案），空串 / 全空白折成
+     * [RuntimeCallResolution.Blank]，由 VM 按 TRY 位决定上抛 `CodeEE` 或降级。
+     *
+     * 解析口径：先按 `LeftParenthesis_Bracket_Comma_Semicolon` 读函数名
+     *（[ErbLexer.readString] + [StrEndWith.LeftParenthesis_Bracket_Comma_Semicolon]），
+     * 再按名后首字符分两种：`(` ⇒ 实参以 `)` 收尾（[ArgsEndWith.RightParenthesis]）；
+     * `,` ⇒ 逗号分隔至行尾（[ArgsEndWith.EoL]）。实参逐个求值、按 `Expr.operandType`
+     * 分 int / str 桶。目标经 [resolveFunctionIndex] 查 `Program.functions` 下标。
+     */
+    override fun resolveRuntimeCall(raw: String): RuntimeCallResolution {
+        if (raw.isBlank()) return RuntimeCallResolution.Blank
+        try {
+            val st = CharStream(raw)
+            val lexer = ErbLexer(runtimeLexerConfig)
+            val name = lexer.readString(st, StrEndWith.LeftParenthesis_Bracket_Comma_Semicolon, -1).trim()
+            if (name.isEmpty()) return RuntimeCallResolution.Blank
+            val args = ArrayList<RuntimeCallArg>()
+            when (st.current) {
+                '(' -> {
+                    // 从 `(` 起整段词法（保留开括号以维持 nestBracket 配平，否则 analyse 以
+                    // "'('に対応する')'が見つかりません" 抛 LexError）；词法后丢掉开头的 `(` token，
+                    // 把余下 `实参… )` 交 reduceArguments 以 `)` 收尾。
+                    val argText = st.rowString.substring(st.currentPosition)
+                    val tokens = lexer.analyse(CharStream(argText), LexEndWith.EoL, LexAnalyzeFlag.NONE, -1)
+                    val rest = if (tokens.isNotEmpty()) tokens.subList(1, tokens.size) else tokens
+                    val terms = ExprParser(toExprTokens(rest), runtimeFormResolver, ParserConfig())
+                        .reduceArguments(ArgsEndWith.RightParenthesis)
+                    collectRuntimeArgs(terms, args)
+                }
+                ',' -> {
+                    st.shiftNext()
+                    lexer.skipHalfSpace(st)
+                    val argText = st.rowString.substring(st.currentPosition)
+                    val tokens = lexer.analyse(CharStream(argText), LexEndWith.EoL, LexAnalyzeFlag.NONE, -1)
+                    val terms = ExprParser(toExprTokens(tokens), runtimeFormResolver, ParserConfig())
+                        .reduceArguments(ArgsEndWith.EoL)
+                    collectRuntimeArgs(terms, args)
+                }
+                else -> {}
+            }
+            val target = resolveFunctionIndex(name) ?: return RuntimeCallResolution.NotFound(name)
+            return RuntimeCallResolution.Ready(target, args)
+        } catch (e: ExprEvalException) {
+            return RuntimeCallResolution.Failed(e.message ?: "运行期调用实参求值失败")
+        } catch (e: ExprParseException) {
+            return RuntimeCallResolution.Failed(e.message ?: "运行期调用实参解析失败")
+        } catch (e: LexError) {
+            return RuntimeCallResolution.Failed(e.message ?: "运行期调用实参词法错误")
+        } catch (e: CodeEE) {
+            return RuntimeCallResolution.Failed(e.message ?: "运行期调用目标非法")
+        }
+    }
+
+    /**
+     * [resolveRuntimeCall] 的实参求值：逐个 [Expr] 按 `operandType` 分桶求值。
+     * `null` 位（空实参位）按 int 0 占位，保持位置数守恒 ——
+     * TODO(verify)：运行期调用点拿不到被调缺省值，空实参位一律记 0（无 C# 取证）。
+     */
+    private fun collectRuntimeArgs(terms: List<Expr?>, out: MutableList<RuntimeCallArg>) {
+        for (term in terms) {
+            if (term == null) {
+                out.add(RuntimeCallArg(false, 0L, null))
+            } else if (term.operandType == OperandType.STR) {
+                out.add(RuntimeCallArg(true, 0L, term.getStrValue(evalContext)))
+            } else {
+                out.add(RuntimeCallArg(false, term.getIntValue(evalContext), null))
+            }
+        }
+    }
+
+    /**
+     * 运行期调用点的逐位实参元数据落点（契约 C-CALL-STR-HOST@1）：VM 在 `callInto`/`jumpInto`
+     * 之前调；[bindCallArgs] 下一次取元数据时优先读这一槽（pc 匹配即用、用后清）。
+     */
+    override fun onRuntimeCallArgs(pc: Int, args: List<CallArg>) {
+        runtimeCallArgsPc = pc
+        runtimeCallArgs = args
+    }
+
+    /** 取出并清空匹配 [pc] 的运行期实参表（不匹配返回 null，无副作用）。 */
+    private fun takeRuntimeCallArgs(pc: Int): List<CallArg>? {
+        if (runtimeCallArgsPc != pc) return null
+        val table = runtimeCallArgs
+        runtimeCallArgsPc = -1
+        runtimeCallArgs = null
+        return table
     }
 
     /**
@@ -1312,11 +1685,16 @@ class ProcessRuntime(
         // 这里不再每调用一次 `program.paramNames(meta.index).isNotEmpty()`。
         if (bindCallArgs(meta, callerKey, refArgSources)) return
         // 零实参调用点没有 callArgs 表：`Program.declareCallArgs` 只收非空表（Program.kt:1045），
-        // 而 v2 段 7 也明确只登记非空站点。此时不能落回 bindArgs 按形参个数回读调用方槽——
-        // 原版对 `Arguments[i] == null` 的位直接跳过（spec: ProcessState.cs:437），被调
-        // ARG/ARGS 保留上次值；照形参个数读还会在调用方帧槽不足时报「槽越界」
-        // （STONELEVEL_8 / M_KOJO_MESSAGE_SCOM_K70_9 两处实测）。
-        if (callSiteArgc() == 0) return
+        // 而 v2 段 7 也明确只登记非空站点。此时仍然要把**全部形参位**当省略位处理：
+        // 原版 `ConvertArg` 对 `srcArgs.Count == 0` 逐位取 `Def[i]`（CalledFunction.cs:133-200），
+        // 而装载期已把 ARG/ARGS/私有形参的无显式默认位折成 0/""（ErbLoader.cs:714-722）
+        // ⇒ 每次零参调用都会把被调 ARG/ARGS 复位，语料大量依赖 `SIF ARGS == ""` 的零参缺省实参写法。
+        // 旧实现在这里直接 return（误读为「原版 `Arguments[i] == null` 跳过 ⇒ ARG/ARGS 保留上次值」），
+        // 于是 DISHNAME_TR 之类函数恒用上一次调用的参数（做菜菜单所有菜名显示成同一个）。
+        if (callSiteArgc() == 0) {
+            bindZeroArgImplicitDefaults(meta)
+            return
+        }
         bindArgs(meta)
     }
 
@@ -1399,7 +1777,7 @@ class ProcessRuntime(
      *   （jumpInto 不加深度、根绑定已消费，故不能按深度早退）；
      * - 其余（普通 `_CALL`）：实参在调用方帧槽（VM 尚未切 frameBase，见类 KDoc）。
      *
-     * 零实参调用点在 [onFunctionEnter] 已提前返回，不会进入本函数。
+     * 零实参调用点在 [onFunctionEnter] 走 [bindZeroArgImplicitDefaults] 后返回，不会进入本函数。
      */
     private fun bindArgs(meta: FuncMeta) {
         val root = pendingRoot
@@ -1562,6 +1940,8 @@ class ProcessRuntime(
                 val sv = when (v) {
                     is Value.StrV -> v.v
                     is Value.IntV -> intToStrArgValue(meta.name, argNo, v.v)
+                    // TODO(verify): 浮点实参写字符串形参的格式化口径无 C# 证据（1.824 无浮点）
+                    is Value.FloatV -> v.v.toString()
                 }
                 bindIdx1[0] = i0
                 store.writeStr(ARGS_VAR, bindIdx1, sv)
@@ -1586,6 +1966,8 @@ class ProcessRuntime(
                 val sv = when (v) {
                     is Value.StrV -> v.v
                     is Value.IntV -> intToStrArgValue(meta.name, argNo, v.v)
+                    // TODO(verify): 同 [bindPositionalValues] 的浮点口径（无 C# 证据）
+                    is Value.FloatV -> v.v.toString()
                 }
                 store.writeStr(baseName, indices, sv)
             } else {
@@ -1675,7 +2057,10 @@ class ProcessRuntime(
     ): Boolean {
         val pc = activeVm.lastCallPc
         if (pc < 0) return false
-        val args = program.callArgsAt(pc) ?: return false
+        // 运行期字符串调用点没有静态 callArgs 表：优先读 VM 投递的单槽运行期表
+        //（pc 匹配即用、用后清），否则退回既有 program.callArgsAt 的类型桶路径。
+        val runtimeArgs = takeRuntimeCallArgs(pc)
+        val args = runtimeArgs ?: program.callArgsAt(pc) ?: return false
         // 形参表**只在首次调用该函数时取一次**（[paramPlansOf] 缓存），热路径上不再
         // 每调用一次 `program.paramNames(meta.index)`（一次虚调用 + 一次惰性函数表查）。
         // null = 该函数没有头部形参名 ⇒ 与旧实现的 `paramNames.isEmpty() → false` 同口径。
@@ -1693,7 +2078,7 @@ class ProcessRuntime(
             val paramNames = program.paramNames(meta.index)
             for (p in args.size until plans.size) {
                 if (refUserParamAt(paramNames[p], meta) != null) {
-                    throw CodeEE("@${meta.name}的第${p + 1}个参数是引用形式因此无法省略")
+                    throw CodeEE.keyed(LangKey.CanNotOmitRefArg, meta.name, p + 1)
                 }
                 // 非 REF 的尾部省略：ARG/ARGS/私有形参有装载期隐式默认 0/""（ErbLoader.cs:714-722）；
                 // 其余形参 Def 必为 null，CompatiFuncArgOptional 关 ⇒ CanNotOmitArgWithMessage
@@ -1716,7 +2101,7 @@ class ProcessRuntime(
                 // （CalledFunction.cs:150-153）—— 该判在 CompatiFuncArgOptional
                 // 分支之前（:147 vs :165），任何配置下都是硬错误。
                 if (refUserParamAt(paramName, meta) != null) {
-                    throw CodeEE("@${meta.name}的第${a.position + 1}个参数是引用形式因此无法省略")
+                    throw CodeEE.keyed(LangKey.CanNotOmitRefArg, meta.name, a.position + 1)
                 }
                 // ARG/ARGS/私有形参的省略 = 隐式默认 0/""（ErbLoader.cs:714-722），写回后
                 // 与原版 `Def[i]` 顶替等价；其余形参才落到 CompatiFuncArgOptional 分支。
@@ -1863,6 +2248,8 @@ class ProcessRuntime(
             val sv = when (v) {
                 is Value.StrV -> v.v
                 is Value.IntV -> intToStrArgValue(meta.name, argNo, v.v)
+                // TODO(verify): 同上，浮点写字符串形参的格式化口径无 C# 证据
+                is Value.FloatV -> v.v.toString()
             }
             store.writeStr(baseName, indices, sv)
         } else {
@@ -2041,13 +2428,56 @@ class ProcessRuntime(
         val parts = paramName.removeSuffix("$").split(':')
         val baseName = parts[0].trim()
         val idx = foldParamSubscripts(parts.drop(1), meta.name)
+        return bindImplicitArgDefault(baseName, idx, meta)
+    }
+
+    /**
+     * 零实参调用点（`_CALL`/`_CALL_BY_NAME` 的 b 实参数 = 0，无调用点实参表）的逐位省略绑定。
+     *
+     * 原版 `ConvertArg` 对 `srcArgs.Count == 0` 仍逐位判定（CalledFunction.cs:133-200）：
+     * 省略位 = 装载期 `Def[i]`，而 `Def[i]` 对 ARG/ARGS/私有形参的无显式默认位是
+     * `0`/`""`（ErbLoader.cs:714-722）⇒ **每次零参调用都把被调 ARG/ARGS 复位**。
+     * REF 形参省略 = `CanNotOmitRefArg` 硬错误（:150-153）；其余形参按
+     * `CompatiFuncArgOptional` 报错或跳过（:165-172）。
+     *
+     * 走 [ParamPlan] 缓存，热路径（ARG/ARGS 且无下标）零分配。
+     */
+    private fun bindZeroArgImplicitDefaults(meta: FuncMeta) {
+        val plans = paramPlansOf(meta) ?: return
+        for (p in plans.indices) {
+            val plan = plans[p]!!
+            val idx = plan.constIdx
+            if (plan.isArg) {
+                bindIdx1[0] = if (idx.isEmpty()) 0L else idx[0]
+                store.writeInt(ARG_VAR, bindIdx1, 0L)
+                continue
+            }
+            if (plan.isArgs) {
+                bindIdx1[0] = if (idx.isEmpty()) 0L else idx[0]
+                store.writeStr(ARGS_VAR, bindIdx1, "")
+                continue
+            }
+            if (refUserParamAt(plan.baseName, meta) != null) {
+                throw CodeEE.keyed(LangKey.CanNotOmitRefArg, meta.name, p + 1)
+            }
+            if (bindImplicitArgDefault(plan.baseName, idx, meta)) continue
+            if (!funcArgCompat(ConfigKey.CompatiFuncArgOptional)) {
+                throw cannotOmitArgError(meta.name, p + 1)
+            }
+        }
+    }
+
+    /** [bindImplicitArgDefault] 的已解析形态（形参名与常量下标来自 [ParamPlan] / 调用点原文）。 */
+    private fun bindImplicitArgDefault(baseName: String, idx: LongArray, meta: FuncMeta): Boolean {
         val sysName = baseName.uppercase()
         if (sysName == ARG_VAR) {
-            store.writeInt(ARG_VAR, longArrayOf(idx.firstOrNull() ?: 0L), 0L)
+            bindIdx1[0] = if (idx.isEmpty()) 0L else idx[0]
+            store.writeInt(ARG_VAR, bindIdx1, 0L)
             return true
         }
         if (sysName == ARGS_VAR) {
-            store.writeStr(ARGS_VAR, longArrayOf(idx.firstOrNull() ?: 0L), "")
+            bindIdx1[0] = if (idx.isEmpty()) 0L else idx[0]
+            store.writeStr(ARGS_VAR, bindIdx1, "")
             return true
         }
         val param = store.userVar(baseName, meta.key) ?: return false
@@ -2815,8 +3245,9 @@ class ProcessRuntime(
 
     /**
      * 方法执行：独立帧（形参绑定与 CALL 一致——按**头部形参位**逐位写，见
-     * [bindPositionalValues]、私有 #DIM 作用域），返回值整型取 `_RET` 槽值、字符串按约定
-     * 取 RESULTS:0（RETURNF 写入，见类 KDoc 调用约定）。方法栈深度上限 100。
+     * [bindPositionalValues]、私有 #DIM 作用域），返回值整型取 `_RET` 槽值、
+     * 字符串取顶层 `_RETS` 写入的 [VirtualMachine.stringResult]（**不碰 RESULTS 数组**）、
+     * 浮点取 [VirtualMachine.floatResult]。方法栈深度上限 100。
      * spec: Process.cs:502-506（methodStack > 100 → OverflowFuncStack）。
      */
     private fun executeMethod(meta: FuncMeta, args: List<Value?>): Value {
@@ -2832,14 +3263,30 @@ class ProcessRuntime(
             // `ConvertArg` 只有「形参位 i ↔ srcArgs[i]」一种对位方式
             // （CalledFunction.cs:136-200），没有按类型分桶这一步。
             val ret = runEntry(meta.index, rootBindOf(args, args))
-            return if (meta.returnsStr) {
-                // `#FUNCTIONS` 的返回通道是 `_RETS`（合同 M3-A §3 A7）：depth 0 处写进
-                // [VirtualMachine.stringResult]（Vm.kt:737），**不碰 RESULTS 数组**。
-                // 旧实现读 `RESULTS:0` 拿到的是上一次 METHOD 语句留下的陈旧串
-                // （与 [invokeUserMethod] 的 `nested.stringResult` 口径不一致）。
-                Value.StrV(activeVm.stringResult ?: "")
-            } else {
-                Value.IntV(ret)
+            return when {
+                // 判序与编译期同一条：浮点位**先于**字符串位（`ErbProgramCompiler.kt:350`
+                // 的掉尾兜底、`:1066` 的 `RETURNF` 发射都先 `sig.returnsFloat`；本文件
+                // :908 的 `UserDefinedMethodTerm` 类型判定同序）。两真时若这里让
+                // `returnsStr` 先，编译器发的是 `_RETF`、运行期取的是 `stringResult`
+                // ⇒ 静默 `StrV("")`。互斥是合同（见 `FunctionBytecode.kt:30`），
+                // 本行只保证「合同破了也按浮点通道走」。
+                meta.returnsFloat -> {
+                    // 浮点方法（4.981 `#FUNCTIONF`，路次 g7）：按**声明**选道（不再靠
+                    // 「寄存器非 null」反推）。`_RETF` 在 depth 0 把值写进
+                    // [VirtualMachine.floatResult]，long 结果恒 0 —— 与 `_RETS`/stringResult 同形。
+                    // 被屏蔽方法（stubTable）不进 VM，寄存器可能是上一次执行的残留 ⇒ 按原版
+                    // 消费侧默认项给 0.0（`UserDefinedMethodTerm.cs:39-49`）；同理寄存器为
+                    // null（声明与旧产物不一致）也按 0.0，仍是原版 `GetFloatValue` 的容错口径。
+                    Value.FloatV(if (stubTable.hit(meta.index)) 0.0 else activeVm.floatResult ?: 0.0)
+                }
+                meta.returnsStr -> {
+                    // `#FUNCTIONS` 的返回通道是 `_RETS`（合同 M3-A §3 A7）：depth 0 处写进
+                    // [VirtualMachine.stringResult]（只认顶层帧的 `_RETS`），**不碰 RESULTS 数组**。
+                    // 旧实现读 `RESULTS:0` 拿到的是上一次 METHOD 语句留下的陈旧串
+                    // （与 [invokeUserMethod] 的 `nested.stringResult` 口径不一致）。
+                    Value.StrV(activeVm.stringResult ?: "")
+                }
+                else -> Value.IntV(ret)
             }
         } finally {
             methodDepth--
@@ -2901,7 +3348,13 @@ class ProcessRuntime(
         // 同样绕开 `callInto` —— 被屏蔽方法按空体 `RETURN 0`/`RETURN ""` 就地短路，
         // 不借嵌套 VM、不动方法栈深度（与 [runEntry] 的根级短路同口径）。
         if (stubTable.hit(meta.index)) {
-            return if (meta.returnsStr) Value.StrV("") else Value.IntV(0L)
+            return when {
+                // 判序同 [executeMethod]：浮点位先于字符串位。
+                // 浮点方法被屏蔽 = 空体 `RETURN 0` 的浮点默认项（原版消费侧 0.0）。
+                meta.returnsFloat -> Value.FloatV(0.0)
+                meta.returnsStr -> Value.StrV("")
+                else -> Value.IntV(0L)
+            }
         }
         if (methodDepth >= METHOD_STACK_LIMIT) {
             throw CodeEE(OVERFLOW_FUNC_STACK_MES)
@@ -2921,12 +3374,36 @@ class ProcessRuntime(
             pendingRefBindings = refs
             try {
                 val ret = nested.run(meta.index)
-                return if (meta.returnsStr) {
-                    Value.StrV(nested.stringResult ?: "")
-                } else {
-                    // 小整数走缓存（见 [Value.intV]）：方法返回值同样多为 0/1 标志，
-                    // JFR 实测这一行分配 26.97 MiB 的 `Value$IntV`。
-                    Value.intV(ret)
+                // 三条返回通道（4.981：g2 补浮点通道，g7 把选道判据改到**声明面**）：
+                // * `#FUNCTIONS`（str）→ `VirtualMachine.stringResult`（`_RETS` 落的寄存器）。
+                // * 浮点方法（`FuncMeta.returnsFloat`）→ `VirtualMachine.floatResult`
+                //   （`_RETF` 落的寄存器）：本移植的帧槽只有整型列/字符串列，浮点返回值
+                //   **不经槽**，见 Vm.kt 的 floatResult KDoc。浮点方法的**所有**出帧点
+                //   （RETURNF 浮点表达式 / RETURNF 无参 / RETURNF 类型不符 / 掉尾兜底）都由
+                //   编译器编成 `_RETF`，且 `run` 起始把该寄存器重置为 null。
+                //   语义依据（fork-src qirchen421/emuera.sk@48494165）：载体是
+                //   `ProcessState.MethodReturnValue`（Process.State.cs:760、:762-789，
+                //   RETURNF **不写 RESULTF**），浮点态 = `SingleFloatTerm`（Term.cs:108-141），
+                //   消费侧 `UserDefinedMethodTerm.cs:19-38` 按**项类型**取值、不符静默 0/""/0.0。
+                // * 其余（`#FUNCTION` int）→ `_RET` 的 long 读数。
+                val floatRet = nested.floatResult
+                return when {
+                    // 浮点判位先于字符串判位，与 [executeMethod]、本文件 :908 的
+                    // `OperandType` 选定和编译期 `ErbProgramCompiler.kt:350/:1066` 同序。
+                    meta.returnsFloat -> {
+                        // 浮点方法按**声明**选道（FuncMeta.returnsFloat，4.981 `#FUNCTIONF`，
+                        // 路次 g7）：被调帧的所有出帧点都由编译器编成 `_RETF`，`run` 起始把
+                        // 寄存器重置为 null，所以不会把上一次执行的残留读成浮点返回。
+                        // 寄存器为 null（声明与旧产物不一致）按原版消费侧默认项 0.0
+                        // （`UserDefinedMethodTerm.cs:39-49` 的 GetFloatValue 容错口径）。
+                        Value.FloatV(floatRet ?: 0.0)
+                    }
+                    meta.returnsStr -> Value.StrV(nested.stringResult ?: "")
+                    else -> {
+                        // 小整数走缓存（见 [Value.intV]）：方法返回值同样多为 0/1 标志，
+                        // JFR 实测这一行分配 26.97 MiB 的 `Value$IntV`。
+                        Value.intV(ret)
+                    }
                 }
             } finally {
                 pendingRoot = null
@@ -3107,6 +3584,12 @@ class ProcessRuntime(
      * 运行期经 [resolveLabel]/[tryResolveLabel] 把标签解析为目标 pc，再驱动 VM
      * 转移（core/code 目前无按 pc 的动态跳转指令，需与 compile agent 协商，
      * 见 TODO(verify)）。
+     *
+     * **现行生产路径并不经过本接口**（2026-11-04 lane labeldollar 核）：扁平字节码通道里
+     * GOTOFORM/TRYGOTOFORM 编成 `_JUMP_BY_NAME`，由 [com.eratw.port.core.code.VirtualMachine]
+     * 直查 `FunctionInfo.labelNames/labelPcs`（`Vm.kt` 的 `_JUMP_BY_NAME` 分支）；本表只服务
+     * 侧车投影（`BootMetadata.labelPc` / `GameSession` 装配）与测试/探针注入。两条入口的
+     * 名字归一必须保持同口径（大写归一，见 [tryResolveLabel] 的 KDoc）。
      */
     interface LabelTable {
         /** 返回目标 pc；未定义返回 null。functionKey 与 label 均已大写归一。 */
@@ -3127,14 +3610,57 @@ class ProcessRuntime(
      * CurrentCalled.CallLabel → LabelDictionary.GetLabelDollar
      * （按**当前函数**查，LabelDictionary.cs:382-389）；未定义 → CodeEE
      * NotDefinedLabelName。
+     *
+     * 屏上文案（2026-11-04 lane labeldollar 逐字核）：zhs 模板
+     * `当前函数中不存在指定的标签名"${0}"`（lang.emuera-zhs.xml:540）**自带字面 `$`**，
+     * `{0}` = 求值名**原文**（FunctionIdentifier.cs:3703 传 `text`，不大写化、不剥 `$`）；
+     * 故命中失败显示 `名"$TAIL"`，求值名自带 `$` 时显示 `名"$$TAIL"`（官方双 `$`，照抄不修）。
+     * 官方**从不剥 `$`**：`$` 只在标签定义行被词法剥掉（LogicalLineParser.cs:316-328，
+     * ShiftNext 跳过行首 `$`/`@` 后取标识符），字典键因此恒不带 `$`
+     * （LabelDictionary.cs:339-348）；引用侧 `$TAIL` 拼进 GOTO/GOTOFORM 参数时按字面查表
+     * 恒 miss（LexicalAnalyzer.cs:330-399 的 ReadString 原样保留 `$`）。
      */
     fun resolveLabel(functionKey: String, label: String): Int =
         tryResolveLabel(functionKey, label)
-            ?: throw CodeEE("当前函数中不存在指定的标签名\"$label\"") // 官方 zhs 文案（emuera-zhs.xml:540；抛点 FunctionIdentifier.cs:3703）
+            // 官方 zhs 文案（emuera-zhs.xml:540，模板自带字面 `$`；抛点
+            // FunctionIdentifier.cs:3703 传 text 原文）走 err/LabelErrorText.kt 的单一真源，
+            // 与 `Vm.kt` 的 `_JUMP_BY_NAME` 分支是同一条串（判据见上方 KDoc）。
+            ?: throw notDefinedLabelName(label)
 
     /**
-     * TRYGOTOFORM 的标签解析：未定义 → null（语句层跳 $CATCH 或静默跳过）。
+     * TRYGOTOFORM 的标签解析：未定义 → null（纯 TRY 语句层静默跳过本行；TRYC 变体由
+     * 编译期两步式跳 catch 体首，见下）。
      * spec: FunctionIdentifier.cs:3699-3708（isTry：JumpToEndCatch 有则跳，无则不动作）。
+     *
+     * 「$CATCH」口径更正（2026-11-04 lane labeldollar 核）：官方**不存在** `$CATCH` 标签——
+     * TRY 变体未命中时跳的是 `func.JumpToEndCatch`，即**装载期**由 TRYC 配对链写进语句对象的
+     * CATCH/ENDCATCH 行（ErbLoader.cs:1339-1358：CATCH 行把 TRYC\* 语句的 JumpToEndCatch 指到
+     * 自己、ENDCATCH 把 CATCH 行的指到 ENDCATCH），配合主循环 JumpTo-后先 ShiftNext 的口径
+     * （Process.cs:1011/1016 + ProcessState.cs:129-133）落进 catch 体首。**纯 TRY**
+     * （TRYGOTO/TRYGOTOFORM）不配对 CATCH、JumpToEndCatch 恒 null ⇒ 未命中 = 什么都不做、
+     * 顺序落到下一行（= 跳过本行）。移植侧对应：`_JUMP_BY_NAME` 未命中 TRY 位 pc++；
+     * TRYCGOTOFORM 由编译期两步式（miss 顺序落入 `_JUMP → catch 体首`，
+     * `ErbProgramCompiler.kt` DYNAMIC_LABEL_CODES 分支）承担。
+     *
+     * 大小写口径：官方查表用 `Config.StrComper`（LabelDictionary.cs:16；= OrdinalIgnoreCase，
+     * Config.cs:33/299-308，由 `IgnoreCase` 配置决定、默认 true（ConfigData.cs:45），本游戏
+     * emuera.config 未关闭）。OrdinalIgnoreCase 是**逐字符 ASCII 折叠**；本侧归一用
+     * `String.uppercase()`（**全 Unicode 大小写映射**）。ASCII 面两侧恒同；非 ASCII 折叠面
+     * （全角拉丁 `ｔ→Ｔ`、`ß→SS`、`ﬁ→FI`、`ı→I`）`uppercase()` 会合并官方 Ordinal 判不同的
+     * 键 = 移植侧**多命中**方向。双语料实测可达性：4.980/4.981 共 3624 条 `$标签` 定义里含
+     * 全角拉丁者仅 6 条（`COUNTERＣ/Ｃ/Ｖ`、`Ｍ絶頂系`），其 GOTO 引用与定义**逐字节同形**，
+     * 两种口径给出同一命中；汉字标签 `uppercase()` 恒等（单测实测钉死），两侧同果。
+     * 语料 0 处 GOTOFORM/TRYGOTOFORM、0 处 `GOTO $X` 形态。差异登记见 specs/isa.yaml GOTO
+     * 条目注释块（不修的判据：折叠口径是**全工程键归一**（VarDef/符号表/loader.md §keyOf），
+     * 单改标签面会与已落盘的 .erbc/侧车大写键互斥）。
+     *
+     * 作用域口径：官方按**当前被调函数的定义实例**查（`CalledFunction.CallLabel` 传
+     * `CurrentLabel`，CalledFunction.cs:204-207；字典内层键是 FunctionLabelLine **对象引用**，
+     * LabelDictionary.cs:382-389 + 339-348，默认引用等值）——同名标签跨函数/跨文件**永不
+     * 互串**，事件多成员时 `CurrentLabel` 随 ShiftNext 切到当前成员（CalledFunction.cs:228-243），
+     * 查的是**正在跑的那一条定义**的标签，不是同名事件的并集。移植侧：VM 通道
+     * `program.functions[funcStack[depth]]` 与官方同形；本接口的 `functionKey` 是**按定义**
+     * 唯一的键（事件成员 = `KEY#defIndex`，`BootMetadata.labels` KDoc），调用方传错键即错域。
      */
     fun tryResolveLabel(functionKey: String, label: String): Int? =
         labelTable?.labelPc(functionKey.uppercase(), label.uppercase())
@@ -3309,8 +3835,21 @@ class ProcessRuntime(
                 store.writeInt("ASSIPLAY", longArrayOf(0L), 0L)
                 store.writeInt("PREVCOM", longArrayOf(0L), -1L)
                 store.writeInt("NEXTCOM", longArrayOf(0L), -1L)
+                // eraTW 面板折叠开关（TFLAG:170 `PALAM非表示` / :171 `Status非表示` /
+                // :173 `USERCOM非表示` / :174 `LOOK非表示`，`AutoConst_TFLAG.ERH:147-150`）
+                // —— 移植侧**有意偏差**，登记于 `specs/verify-notes.md` §28：
+                // 原版底下 TFLAG 整表清 0（:1673-1676），于是每次 BEGIN TRAIN（每日起床
+                // `SHOP.ERB:304-308` RESULT==100）后 `SHOW_INFO_PALAM` 读到
+                // `TFLAG:PALAM非表示 = 0` 就重新展开（`INFO.ERB:695`）；玩家 2026-11-03
+                // 反馈「每次开始新的一天都会自动把palam打开」。仅这四个开关跨复位保留，
+                // 其余 TFLAG 元素照 C# 清 0。
+                val panelToggles = PANEL_TOGGLE_TFLAG_INDEXES.map {
+                    it to store.readInt("TFLAG", longArrayOf(it))
+                }
                 // 全局 TFLAG（`DataIntegerArray[4]`）整表清 0（:1673-1676）。
                 clearGlobalInt("TFLAG")
+                // 回写面板折叠开关（见上）。
+                for ((index, value) in panelToggles) store.writeInt("TFLAG", longArrayOf(index), value)
                 // 全局 TSTR（`DataStringArray[6]`）整表清空串（:1677-1680）。
                 clearGlobalStr("TSTR")
                 // 逐角色整数段（C# 每角色 foreach 内，列下标见 SystemLayout.charaInt1D）：
@@ -3351,18 +3890,45 @@ class ProcessRuntime(
             }
 
             override fun trainName(code: Int): String? {
-                val len = trainNameCount() ?: return null
+                val len = trainNameCount()
                 if (code < 0 || code >= len) return null
-                val s = runCatching { store.readStr("TRAINNAME", longArrayOf(code.toLong())) }.getOrNull()
-                    ?: return null
+                // 不兜 runCatching：CSV 名字表按 maxDataList 满容建（空槽读回空串，
+                // CsvNameTable.get），界内取不到值本身就是缺陷，兜成 null 会让那一格
+                // 在指令菜单里静默消失（真机 0.2.35 那条「宿主未提供 TrainName 表」的
+                // 误报就是这么来的 —— 见 trainNameCount 的 KDoc）。
+                val s = store.readStr("TRAINNAME", longArrayOf(code.toLong()))
                 return s.ifEmpty { null }
             }
 
-            /** `TrainName.Length`；CSV 未装载（变量不存在）→ null = 宿主未提供。 */
-            override fun trainNameCount(): Int? = runCatching {
-                val len = store.getLength("TRAINNAME", -1)
-                if (len <= 0) null else len
-            }.getOrNull()
+            /**
+             * `TrainName.Length` —— 原版是数组字段直读，永不失败，所以这里读注册表的
+             * 声明尺寸而不是走 [VariableStore.getLength]：后者按名查表，查不到要抛 CodeEE，
+             * 而上一版把整段 `runCatching` 兜住 ⇒ 任何一次抛错（真机 512 MiB 挡位下的
+             * `OutOfMemoryError` 也算）都被折成「宿主未提供 TrainName 表」的 BLOCKED，
+             * 一局好档当场判死、报告里连异常都留不下。
+             *
+             * 表真没装载时 dims[0] = 0（`ConstantData.cs` 的 `MaxDataList` 槽位），
+             * 与原版 0 长度数组同形：枚举整趟跳过，直接 SHOW_USERCOM（Process.cs:2263-2318）。
+             */
+            override fun trainNameCount(): Int =
+                store.registry.def("TRAINNAME")?.dims?.firstOrNull() ?: 0
+
+            /**
+             * 系统字符串变量 `SAVEDATA_TEXT`（`VariableEvaluator.cs:119-129`：属性即
+             * `varData.DataString[0]`）。与语句层 `PUTFORM`/`CALLSAVEINFO` 的追加路
+             * （`StatementExecutor` 的 `Process.cs:1295-1306` 分支）**同一格变量**：
+             * 自动存档链写入（`Process.cs:2573`）→ `SAVEINFO` 脚本可改写 → `SaveTo`
+             * 读当前值（`:2583`），旁路另存就会把这条链断在中间。
+             */
+            override fun savedataText(): String =
+                runCatching { store.readStr("SAVEDATA_TEXT", longArrayOf()) }.getOrDefault("")
+
+            override fun setSavedataText(value: String) {
+                store.writeStr("SAVEDATA_TEXT", longArrayOf(), value)
+            }
+
+            /** 原版 `count == coms.Count`（`Process.cs:2437`）：CALLTRAIN 队列已全部执行完。 */
+            override fun commandsConsumed(): Boolean = callTrainCommands.isEmpty()
 
             override fun pendingBegin(): BeginType? = pendingBeginType
             override fun takePendingBegin(): BeginType? =
@@ -3380,6 +3946,13 @@ class ProcessRuntime(
         // 见 [ExecContext.doTrainHook] 的 KDoc（语料 USERCOM → DOTRAIN 999 主链）。
         execContext.doTrainHook = { no -> beginFlow.doTrain(no) }
     }
+
+    /**
+     * eraTW 四个面板折叠开关的 TFLAG 下标（`AutoConst_TFLAG.ERH:147-150`）：
+     * 170 `PALAM非表示` / 171 `Status非表示` / 173 `USERCOM非表示` / 174 `LOOK非表示`。
+     * 这四个开关跨 BEGIN TRAIN 保留（移植侧有意偏差），落点见 [beginTrainReset] 的说明。
+     */
+    private val PANEL_TOGGLE_TFLAG_INDEXES = longArrayOf(170L, 171L, 173L, 174L)
 
     /**
      * 系统 1 维整数数组整体清零（C# `VariableEvaluator.UpdateAfterShowUsercom` 对
@@ -3678,10 +4251,15 @@ class ProcessRuntime(
      * 移植侧同构（`SpritePool.Sprite.buffer` 与 `SpritePool.Frame.buffer` 就是池里同一个
      * GraphicsBuffer 实例，见 `fn/GraphicsMethods.kt` 的 SPRITECREATE / SPRITEANIMEADDFRAME
      * 都取 `gfx().get(gid)`）。于是：
-     * 1. 遍历 sprite 池，把每个 sprite 的基图与每个动画帧的基图就地调用
-     *    `GraphicsBuffer.dispose()`
-     *    —— 效果与原版一致：静态 sprite 的 `isCreated` 转 false（`ASpriteSingle.cs:24-34`），
-     *    动画 sprite 的 `isCreated` 保持 true（`SpriteAnime.cs:54`），而**登记项不删**
+     * 1. 遍历 sprite 池，只把 **gList 段**的基图与动画帧基图就地调用
+     *    `GraphicsBuffer.dispose()`。判据是 [GraphicsBuffer.id] >= 0：gList 装的是
+     *    `GraphicsImage` = SpriteG 的基图，由 `GraphicsPool.get(gid)` 发号，而
+     *    `GraphicsMethods.readGraphics` 逐字拒绝负编号 —— 正号段与 gList 一一对应。
+     *    CSV 资源父图（`SpriteF`）是负号段（`ResourceContents.kt:255` 用
+     *    `-(buffers.size + 1)` 发号），不在 gList 里，官方一个都不卸，这里同样跳过。
+     *    —— 效果与原版一致：SpriteG 的 `isCreated` 转 false（`ASpriteSingle.cs:24-34`），
+     *    动画 sprite 的 `isCreated` 保持 true（`SpriteAnime.cs:54`），SpriteF 的创建态是
+     *    登记期事实（[SpritePool.Sprite.isCreated]），而**登记项不删**
      *    （原版不动 `imageDictionary`，`AppContents.cs:196-203`）。
      * 2. `GraphicsPool.clear()` ↔ `gList.Clear()`：此后按编号取到的都是未创建的空条目
      *    （`AppContents.GetGraphics` 的惰性建条目语义，`AppContents.cs:28-37` ↔
@@ -3695,13 +4273,28 @@ class ProcessRuntime(
     private fun unloadGraphicListForGotoTitle() {
         val aux = store.aux
         aux.peek<SpritePool>("sprite")?.let { pool ->
-            for (name in pool.names()) {
-                val sprite = pool.find(name) ?: continue
-                sprite.buffer?.dispose()
-                sprite.frames?.forEach { frame -> frame.buffer.dispose() }
+            // 流式口（census3 波）：旧形状 `for (name in pool.names()) { pool.find(name) ?: continue }`
+            // 每一发都在回标题相位现搭一份按登记数长的名字集合、再逐名 uppercase + 二次查表，
+            // 而循环体只要 sprite 本身。直遍历在同一把池锁内走登记序（与旧 `keys.toSet()` 同序），
+            // 每条恰好一次、不存在「找不到」分支；登记项一律保留（见上方 KDoc），
+            // dispose 的作用域按下方的「正号段 = gList」判据收窄。
+            pool.forEachSprite { sprite ->
+                // 官方 `AppContents.UnloadGraphicList()` 只遍历 `gList.Values` 逐条 GDispose
+                // （AppContents.cs:196-203）：gList 装的是 GraphicsImage = `SpriteG` 的基图，
+                // 本移植里就是**正号段 gid** 的缓冲。CSV 资源表（`SpriteF`，负号段父图，
+                // `ResourceContents.kt:252-255` 发号）根本不在 gList 里，官方一个都不卸。
+                //
+                // 旧实现逐 sprite 无差别 `dispose()`，把整张 CSV 资源表也打成「未创建」，而且
+                // 回标题后 `installGraphics` 不会重装资源表 ⇒ 从此这一会话里所有
+                // `SPRITECREATED(资源名)` 恒假、`SPRITEHEIGHT` 恒 0。语料
+                // `Toolkits.ERB:135` 的 MOB 分支正是拿它当除数（玩家报「除数为0的除法运算」）。
+                // 负号段父图的像素回收归 `evictDeferredPixels` 那一档（只退像素、保尺寸/重解源），
+                // 不该由回标题这一刀 dispose 掉。
+                sprite.buffer?.takeIf { it.id >= 0 }?.dispose()
+                sprite.frames?.forEach { frame -> frame.buffer.takeIf { it.id >= 0 }?.dispose() }
             }
         }
-        aux.peek<GraphicsPool>("gfx")?.clear()
+        aux.peek<GraphicsPool>(GRAPHICS_SLOT)?.clear()
     }
 
     /**
@@ -3716,6 +4309,12 @@ class ProcessRuntime(
     private fun callScriptFunction(name: String, force: Boolean, isEvent: Boolean): Boolean {
         if (isEvent) {
             if (table.eventCallOrder(name) == null) {
+                // CalleventToNonEventFunc（spec: CalledFunction.cs:69-77）：事件派发路命中
+                // **非事件同名函数**时无条件当场抛（官方在 `return null` 之前就 throw）——
+                // `force`（Process.cs:2090-2099）只在 calledFunction==null（两表皆无）后才生效。
+                // 旧次序把 nonEvent 查找整个漏掉：静默 false 等于把「错标 @EVENT 调用普通函数」
+                // 伪装成「没有这个事件」。文案走 executeEvent 同一条 zhs key（:2906- 深审波已接）。
+                table.nonEvent(name)?.let { throw nonEventAsEventError(name, it) }
                 if (force) throw CodeEE(funcIsNotFoundMes(name))
                 return false
             }
@@ -3748,6 +4347,12 @@ class ProcessRuntime(
 
     private companion object {
         const val METHOD_STACK_LIMIT = 100
+
+        /** 运行期 FORM / RETURNFORM 解析缓存的条目上限（LRU 淘汰，见 [runtimeFormCache]）。 */
+        const val RUNTIME_PARSE_CACHE_LIMIT = 256
+
+        /** 只缓存不超过该长度的输入（长文本命中率低、常驻内存不划算）。 */
+        const val RUNTIME_PARSE_CACHE_MAX_TEXT = 512
 
         /**
          * [refCallScratchPool] 的容量上限（防御性，正常语料远达不到）。
@@ -3894,3 +4499,6 @@ private fun checkEscape(str: String): String = buildString {
         i += 2
     }
 }
+
+/** `store.aux` 槽名：脚本行身份位的函数 id 表（[LineIdentityIds]，AUD-b5-linestamp）。 */
+private const val LINE_IDENTITY_SLOT = "proc.lineid"

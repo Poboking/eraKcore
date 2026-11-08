@@ -65,7 +65,7 @@ class ShopHostModelTest {
         override fun afterInputComReset() {}
         override fun afterSourceCheckReset() {}
         override fun trainName(code: Int): String? = null
-        override fun trainNameCount(): Int? = null
+        override fun trainNameCount(): Int = 0
         override fun pendingBegin(): BeginType? = pending
         override fun takePendingBegin(): BeginType? = pending.also { pending = null }
         override fun clearPendingBegin() {
@@ -79,11 +79,27 @@ class ShopHostModelTest {
         var shopInput: Long? = null
         var temporaryLine = false
         val written = ArrayList<String>()
+        val deletedCounts = ArrayList<Int>()
+        val temporaryLines = ArrayList<String>()
+        var generationMarks = 0
 
         override fun awaitShopInput(): Long? = shopInput
         override fun writeLine(text: String) {
             written.add(text)
         }
+
+        override fun deleteLine(count: Int) {
+            deletedCounts += count
+        }
+
+        override fun printTemporaryLine(text: String) {
+            temporaryLines += text
+        }
+
+        override fun markGenerationUpdated() {
+            generationMarks++
+        }
+
         override fun lastLineIsTemporary(): Boolean = temporaryLine
     }
 
@@ -186,7 +202,14 @@ class ShopHostModelTest {
         assertEquals(1000L, store.readInt("MONEY", longArrayOf(0L)), ":1980-1983 不成交不扣钱")
         assertEquals(0L, store.readInt("ITEM", longArrayOf(1L)))
         assertEquals(-1L, store.readInt("BOUGHT", longArrayOf(0L)), "BOUGHT 不记账")
-        assertEquals(listOf("MONEY不足"), host.written, "Lang.Error.NotEnoughMoney（zhs xml:742）")
+        assertEquals(listOf(1), host.deletedCounts, "Process.cs:2624 deleteLine(1)（OBS2-L1 换道，删回显行）")
+        assertEquals(
+            listOf("MONEY不足"),
+            host.temporaryLines,
+            "Process.cs:2625 PrintTemporaryLine 走临时行通道（Lang.cs:3150 / zhs xml:742）",
+        )
+        assertTrue(host.written.isEmpty(), "换道后不再经 writeLine 落普通行")
+        assertEquals(0, host.generationMarks, "原版商店两支都不置 updatedGeneration（对照 :2500）")
         assertTrue(calls.called.isEmpty(), "不触发 EVENTBUY")
     }
 
@@ -200,7 +223,13 @@ class ShopHostModelTest {
 
         assertEquals(StepOutcome.CONTINUE, step.outcome)
         assertEquals(SystemStateCode.Shop_WaitInput, flow.state)
-        assertEquals(listOf("售罄"), host.written, "Lang.Error.OutOfStock（zhs xml:743）")
+        assertEquals(listOf(1), host.deletedCounts, "Process.cs:2629 deleteLine(1)（OBS2-L1 换道）")
+        assertEquals(
+            listOf("售罄"),
+            host.temporaryLines,
+            "Process.cs:2630 PrintTemporaryLine 走临时行通道（Lang.cs:3154 / zhs xml:743）",
+        )
+        assertTrue(host.written.isEmpty(), "换道后不再经 writeLine 落普通行")
         assertTrue(calls.called.isEmpty())
     }
 
@@ -214,7 +243,9 @@ class ShopHostModelTest {
         val step = flow.step()
 
         assertEquals(StepOutcome.CONTINUE, step.outcome)
-        assertEquals(listOf("售罄"), host.written)
+        assertEquals(listOf(1), host.deletedCounts, "Process.cs:2629 deleteLine(1)（OBS2-L1 换道）")
+        assertEquals(listOf("售罄"), host.temporaryLines, "Process.cs:2630 临时行通道（:1961-1964 缺名字格同售罄）")
+        assertTrue(host.written.isEmpty(), "换道后不再经 writeLine 落普通行")
         assertEquals(1000L, store.readInt("MONEY", longArrayOf(0L)))
     }
 

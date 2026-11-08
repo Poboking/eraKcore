@@ -147,7 +147,14 @@ object ProgramDiagnostics {
         t == DoubleArray::class.java || t == BooleanArray::class.java ||
         t == Array<String>::class.java
 
-    /** 语句的短形态摘要（真机 logcat 友好）：原 `GameHost.brief`（:1170）逐字下沉。 */
+    /**
+     * 语句的短形态摘要（真机 logcat 友好）：原 `GameHost.brief`（:1170）逐字下沉。
+     *
+     * 里面那个 `line=` 打的是 [Statement.line] 原值（**内部 0 基下标**），刻意不走
+     * [com.eratw.port.core.err.erbDisplayLine]：本串是键面对账（拿它去比 `Program.lines`、
+     * 产物行号表、断点表），不是给人读的行号。给人看的「行N」只许走
+     * [com.eratw.port.core.err.CodeEE.displayLine] 那一条出口。
+     */
     internal fun brief(s: Statement?): String {
         if (s == null) return "(null)"
         val sb = StringBuilder("${s.javaClass.simpleName}(line=${s.line})")
@@ -238,7 +245,9 @@ object ProgramDiagnostics {
             }
             lines += line
         }
-        if (op == Opcode._EVAL_INT && program.a(pc) in 0 until program.exprCount) {
+        if ((op == Opcode._EVAL_INT || op == Opcode._EVAL_INT_JZ) &&
+            program.a(pc) in 0 until program.exprCount
+        ) {
             lines += "死循环表达式 expr=${program.expr(program.a(pc))}"
         }
         // 字母快照：撞闸瞬间 A–Z 的值（23:44 那次全 0；与「计数器写丢失」假设对账）。

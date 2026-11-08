@@ -41,7 +41,7 @@
   RFN 只能来自版权声明之后逐个列出的名字，故该授权文本未保留任何字体名。
   → 子集属「可自由改作并再分发」，**族名保持 `Saitamaar`，不必改名重发**（契约 §3「#family 原样」不变）。
 - **口径修正（重要）**：本仓多处把该字体写成「OFL」（`tools/fontsubset/build_subset.py:15-16`、
-  `.workbuddy/CONTRACT-M4-C.md:73`、c-glyphmetrics 路 `core/.../font/PortFonts.kt:19,46`）。
+  `<internal-workdir>/CONTRACT-M4-C.md:73`、c-glyphmetrics 路 `core/.../font/PortFonts.kt:19,46`）。
   准确标签是 **public domain**；OFL 只出现在那个下游重建仓对其自身产物的授权里，
   且 Saitamaar 并未进 Google Fonts（`google/fonts` 无 `ofl/saitamaar`，HTTP 404）。
   这三处不属本路文件面，未改，已写进交付报告「需组长接线」。
@@ -81,23 +81,25 @@
 `字体与显示.txt:9` 提到的系统字体关键字），产物不落仓；`probe_metrics.py` 允许在本机读它们
 ——只产出度量文本（advance 参照），不复制二进制。
 
-## 2 设备回退路线（2808 个 Saitamaar 本就没有的码点往哪走）
+## 2 设备回退路线（2787 个 Saitamaar 本就没有的码点往哪走）
 
 覆盖率实测（`python build_subset.py --verify` 读数，两套独立解析器一致）：
-required 8076 → hit 5268 / miss 2808；`missing-in-Saitamaar-subset.txt` 与
-`missing-in-Saitamaar.txt` 逐行一致（复核结论：miss 的 2808 码点**源字体 cmap 本就没有**，
-不是子集化裁掉的）。
+required 7956 → hit 5169 / miss 2787；`missing-in-Saitamaar-subset.txt` 与
+`missing-in-Saitamaar.txt` 逐行一致（复核结论：miss 的 2787 码点**源字体 cmap 本就没有**，
+不是子集化裁掉的）。2026-11-05 起闭包按 4.981 出货语料重扫（旧值 required 8076 /
+hit 5268 / miss 2808，仅作历史对照）。
 
 1. APK 内只随包 `saitamaar-subset.ttf`；sidecar 按 §3「缺失即缺行」，
    消费方（c-glyphmetrics）查不到行即走缺字回退链——本路不为缺口新增任何二进制。
-2. 设备侧回退顺序：Android 系统字体栈（CJK 覆盖通常是 Noto Sans CJK / 思源系），
-   由渲染层 `Typeface` 回退完成；具体实现与缺字方框（子集已带 notdef 轮廓，
-   `notdef_outline=True`）的分工归 c-glyphmetrics。
+2. 设备侧回退顺序（2026-11-05 起是**固定随包链**，不再走 Android 系统字体栈）：
+   `选中族 → Sarasa Mono SC → Unifont → 子集 .notdef 方框`，
+   整链只含随包族（`BundledFontFamilies.fallbacksFor`，判据 `Paint.hasGlyph`）⇒
+   同一份 APK 在任何机器上缺字表现一致。方框轮廓由子集自带（`notdef_outline=True`）。
 3. PC 开发参照口径：`字体与显示.txt:8`「目前默认加载黑体[SimHei]」，
-   故 M4 截图对齐验收的"PC 真值"是 simhei 的度量（probe-report.txt 的 simhei 段，
+   故截图对齐验收的"PC 真值"是 simhei 的度量（probe-report.txt 的 simhei 段，
    1:2 网格在其上严格成立 gridMismatch=0），Saitamaar 子集只保证字形可画、
    数值如实——它的比例宽度（空格400/数字640/拉丁800/CJK1280，upem=1280）
-   不允许被拿去做 1:2 冒充。
+   不允许被拿去做 1:2 冒充。默认正文族因此是 Sarasa Mono SC（黑体替身），不是 Saitamaar。
 
 ## 3 本文件维护约定
 

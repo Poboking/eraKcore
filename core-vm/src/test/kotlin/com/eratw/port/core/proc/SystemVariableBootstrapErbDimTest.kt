@@ -42,6 +42,25 @@ class SystemVariableBootstrapErbDimTest {
     private fun decl(raw: String, file: String, line: Int) =
         SystemVariableBootstrap.RawDeclaration(raw, file, line)
 
+    /**
+     * 4.981 fork 的 `#DIMF` 在 **ERH** 里与 `#DIM` 同一装配路径（[DimParser.parse] 同一分支）。
+     *
+     * 接线前 `splitDeclaration` 只认 `#DIM/#DIMS` ⇒ 全局 `#DIMF` 被当「不是声明」丢掉，
+     * 而 erbcc 预扫描已把它登记进全局符号表 ⇒ 编译过、运行期「未定义的变量」。
+     * 语料实测 0 条全局 `#DIMF`，本用例钉的是「同一份关键字集」这条不变量。
+     */
+    @Test
+    fun `ERH 全局 DIMF 注册为浮点变量`() {
+        val store = newStore()
+        val r = SystemVariableBootstrap.install(
+            store,
+            listOf(decl("#DIMF GLOBAL 全局倍率, 5", "DIM.ERH", 1)),
+        )
+        assertEquals(1, r.declared, "全局 #DIMF 必须注册: ${r.failures.map { it.message }}")
+        store.writeFloat("全局倍率", longArrayOf(2), 1.5)
+        assertEquals(1.5, store.readFloat("全局倍率", longArrayOf(2)), 0.0)
+    }
+
     @Test
     fun `ERB 函数外 dim 在收集点丢弃并留痕`() {
         val sink = ArrayList<SystemVariableBootstrap.Failure>()

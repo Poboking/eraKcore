@@ -1,5 +1,6 @@
 package com.eratw.port.core.config
 
+import com.eratw.port.boot.CorpusProfile
 import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.EvalContext
 import com.eratw.port.core.expr.OperandType
@@ -15,7 +16,6 @@ import com.eratw.port.core.vars.VariableStore
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -33,7 +33,11 @@ import kotlin.test.assertTrue
  * * 三个优先级用例 = [fixed 层覆盖 default 与用户 config]、[用户 config 覆盖 default]、
  *   [fixed 键拒绝任何后续写回]（fixed 不被用户/设置页覆盖，含设置页那条写入器守卫）；
  * * **2 个用例吃 `ERATW_GAMEDIR` 环境变量**（[语料三层文件的实测读数与钉位]、
- *   [语料装载链上的 GETCONFIG 读数]）；未设置或语料缺文件时 `assumeTrue` 判跳过。
+ *   [语料装载链上的 GETCONFIG 读数]）。这两个用例**按根取列**：先用 [CorpusProfile.detect]
+ *   从语料根就近读 `ERB/DIM.ERH` 的 `#DIM CONST NOW_VERSION` 认出当前根（4.980 / 4.981），
+ *   再断言那一根的真实读数（corpusroot 波 lane J `64b5acb4` 立的同一把尺，本路复用不另造）。
+ *   环境变量没设、根不完整、或 `NOW_VERSION` 不在册 ⇒ **一律判红**，不退 `assumeTrue`、
+ *   也不 `return` 假装通过 —— 这道闸的价值就是拿真实语料三层对账（configroot 波，2026-11-05）。
  *
  * ## 语义出处
  * C# 侧的链是 `ConfigData.LoadConfig`（`reference/emuera-cs/MinorShift.Emuera.Runtime.Config/ConfigData.cs:479-510`）
@@ -360,35 +364,86 @@ class ConfigChainTest {
     }
 
     // ------------------------------------------------------------------
-    // 语料真实文件（2 个用例吃 ERATW_GAMEDIR）
+    // 语料真实文件（2 个用例吃 ERATW_GAMEDIR，按认出的根取列；判不出根 = 红，不是跳过）
     // ------------------------------------------------------------------
 
     @Test
     fun `语料三层文件的实测读数与钉位`() {
-        val gameDir = corpusGameDir() ?: return
+        val (gameDir, profile) = corpusRoot()
         val load = EmueraConfigParser.loadChainFromDisk(gameDir, ConfigStore())
 
         assertEquals("_default.config", load.layer(ConfigChainRole.DEFAULT).name, "语料里是 CSV/_default.config（不是 default.config）")
         assertEquals("_fixed.config", load.layer(ConfigChainRole.FIXED).name)
         assertEquals("emuera.config", load.layer(ConfigChainRole.EMUERA).name)
-        assertEquals(17, load.defaultLineCount, "CSV/_default.config 17 行（末行无换行符）")
-        assertEquals(97, load.emueraLineCount, "语料 emuera.config 97 行，与 EmueraConfigGoldenTest 的外部读数一致")
-        assertEquals(8, load.fixedLineCount, "CSV/_fixed.config 8 行（末行无换行符）")
+        // 只有 emuera.config 那一层的读数随根变；default / fixed 两层两根逐字节同值（2026-11-05 两根实跑）。
+        assertEquals(17, load.defaultLineCount, "CSV/_default.config 17 行（末行无换行符，两根同值）")
+        assertEquals(
+            profile.emueraConfigLineCount,
+            load.emueraLineCount,
+            "$gameDir/emuera.config 的行数（ReadLine 口径、文件均以行尾符结束）：认到 $profile ⇒ 期望 ${profile.emueraConfigLineCount}",
+        )
+        assertEquals(8, load.fixedLineCount, "CSV/_fixed.config 8 行（末行无换行符，两根同值）")
 
-        assertEquals(listOf(17, 96, 8), load.perLayerKeys.map { it.size }, "三层各自落到条目上的键数")
-        assertEquals(96, load.touchedKeys.size, "并集 96：default 的 17 键与 fixed 的 8 键都包含在 emuera 的 96 键里")
-        assertEquals(1, load.result(ConfigChainRole.EMUERA)!!.unmatchedKeys.size, "只有 CLIPBOARD- ANYKEY WAIT TRIGGER 那行匹配不上")
+        // 落到条目上的键数两根同值：4.981 多出来的 6 行**全是**条目表里没有的未知键，
+        // 只加行数、不加落点数（103 − 7 = 97 − 1 = 96）。这笔交叉验证不是巧合。
+        assertEquals(listOf(17, 96, 8), load.perLayerKeys.map { it.size }, "三层各自落到条目上的键数（两根同值）")
+        assertEquals(96, load.touchedKeys.size, "并集 96：default 的 17 键与 fixed 的 8 键都包含在 emuera 的 96 键里（两根同值）")
+
+        // 匹配不上条目表的行 —— 逐根断言**数量 + 内容**。
+        // 旧注释把这里拆成「CLIPBOARD / ANYKEY / WAIT / TRIGGER」四枚再加 4.981 六枚 = 10，
+        // 与断言写的 7 自相矛盾。实读语料（2026-11-05 两根逐行打印）：
+        //   * 两根都有 1 枚 —— `CLIPBOARD- ANYKEY WAIT TRIGGER :NO` 整行是**一枚**键，
+        //     它的英文标签在 ConfigData.cs:140 注册时就带尾随空格（"Clipboard- AnyKey Wait Trigger "），
+        //     而 ConfigData.cs:539 查表前对读到的键做了 `array[0].Trim()` ⇒ 永远少一个空格、永远不命中，
+        //     值回落到注册默认 false。官方缺陷，原样复刻（ADR-005），不许「顺手修好」。
+        //   * 4.981 另有 6 枚 —— 该版 emuera.config 新增、而 configArray（ConfigData.cs:45-151）
+        //     还没注册的引擎键行。4.980 的语料里压根没有这 6 行。
+        val unmatched = load.result(ConfigChainRole.EMUERA)!!.unmatchedKeys.map { it.rawLine }
+        assertEquals(
+            profile.emueraConfigUnmatchedKeyCount,
+            unmatched.size,
+            "$gameDir/emuera.config 匹配不上条目表的行数：认到 $profile ⇒ 期望 ${profile.emueraConfigUnmatchedKeyCount}，实际匹配不上的行是 $unmatched",
+        )
+        val trailingSpaceKey = "CLIPBOARD- ANYKEY WAIT TRIGGER :NO"
+        assertTrue(
+            unmatched.contains(trailingSpaceKey),
+            "尾随空格标签那枚官方缺陷行必须在匹配不上之列（ConfigData.cs:140 + :539）；实际 = $unmatched",
+        )
+        val newKeys981 = setOf(
+            "SKIASHARP IMAGE QUALITY:High",
+            "SKIASHARP FONT HINTING:None",
+            "SKIASHARP FONT EDGING:SubpixelAntiAlias",
+            "RENDERING BACKEND:Auto",
+            "PLUGIN AVAILABLE WARNING:YES",
+            "DISABLE BEFORE_ERROR/THROW EVENTS:YES",
+        )
+        when (profile) {
+            // 穷尽枚举：将来给 CorpusProfile 加一根 ⇒ 这里编译不过，逼着重落读数而不是静默漏闸。
+            CorpusProfile.V4_980 -> assertEquals(
+                setOf(trailingSpaceKey),
+                unmatched.toSet(),
+                "4.980 语料只应有尾随空格那一枚未知键行；冒出别的就是语料被动过",
+            )
+            CorpusProfile.V4_981 -> assertEquals(
+                newKeys981 + trailingSpaceKey,
+                unmatched.toSet(),
+                "4.981 语料应恰好是 6 条新键行 + 尾随空格那枚；行内容以 emuera.config:68-71、:77-78、:92 实读为准",
+            )
+        }
+        // 上面两枚 4.981 新键行不许出现在 4.980 根，反向也钉一次（防止认根认错后仍绿）。
+        assertEquals(profile == CorpusProfile.V4_981, unmatched.contains("RENDERING BACKEND:Auto"), "RENDERING BACKEND 是 4.981 独有行")
+
         assertTrue(load.warnings.isEmpty(), "语料三层都没有解析错误")
         assertTrue(load.abortedLayers.isEmpty())
 
-        // 优先级读数（default 与 emuera 取值不同的键）
+        // 优先级读数（default 与 emuera 取值不同的键）—— 两根同值（2026-11-05 两根实跑）
         assertEquals(1800, load.store.itemOf(ConfigKey.WindowX).int(), "default 写 1000、emuera 写 1800 ⇒ 1800")
         assertEquals(973, load.store.itemOf(ConfigKey.WindowY).int(), "default 800 ⇒ emuera 973")
         assertEquals(18, load.store.itemOf(ConfigKey.FontSize).int(), "default 14 ⇒ emuera 18")
         assertEquals(18, load.store.itemOf(ConfigKey.LineHeight).int())
         assertEquals("黑体", load.store.itemOf(ConfigKey.FontName).string(), "default 的 ＭＳ ゴシック 被覆盖")
 
-        // fixed 的八个键：都被 emuera 写过一次、又被 fixed 重写并钉住
+        // fixed 的八个键：都被 emuera 写过一次、又被 fixed 重写并钉住（两根同值）
         val fixedExpected = setOf(
             ConfigKey.IgnoreCase, ConfigKey.UseRenameFile, ConfigKey.UseReplaceFile, ConfigKey.ButtonWrap,
             ConfigKey.SearchSubdirectory, ConfigKey.SortWithFilename, ConfigKey.SystemSaveInBinary, ConfigKey.UseERD,
@@ -408,7 +463,9 @@ class ConfigChainTest {
 
     @Test
     fun `语料装载链上的 GETCONFIG 读数`() {
-        val gameDir = corpusGameDir() ?: return
+        // 本用例的 7 个读数在两根完全一致（2026-11-05 两根实跑逐值对照），所以只认根、不取列；
+        // 认根仍然必须做 —— 它保证下面这些常量吃的是「在册的那一份语料」，不是任意目录。
+        val (gameDir, _) = corpusRoot()
         val load = EmueraConfigParser.loadChainFromDisk(gameDir, ConfigStore())
         val store = load.store
 
@@ -484,24 +541,34 @@ class ConfigChainTest {
     }
 
     /**
-     * 语料游戏根目录（含 `emuera.config` 与 `CSV/_default.config` 的那一层）。
-     * 只认 `ERATW_GAMEDIR`（本路判据指定的变量名）；没设就跳过，不猜路径。
+     * 语料游戏根（含 `emuera.config` 与 `CSV/_default.config`、`CSV/_fixed.config` 的那一层）
+     * 连同**认出来的根版本档**，供上面的语料用例按根取列。
+     *
+     * 口径（corpusroot 波 `64b5acb4` 立的、本路复用同一把尺）：
+     *   * 只认 `ERATW_GAMEDIR`，不猜路径 —— 但「没设」不再等于「跳过」，见下；
+     *   * 判根用 [CorpusProfile.detect]：就近读 `ERB/DIM.ERH` 的 `#DIM CONST NOW_VERSION`；
+     *   * 任一口径不通 ⇒ **AssertionError 判红**，并打印已经认到的证据。
+     *     旧实现这里是 `corpusGameDir() ?: return` 加两枚 `assumeTrue`：环境变量没设、
+     *     或指到的目录压根不是语料根时，用例**静默通过** —— 那是假闸（configroot 波，2026-11-05 拆掉）。
      */
-    private fun corpusGameDir(): Path? {
-        val env = System.getenv("ERATW_GAMEDIR") ?: return null
+    private fun corpusRoot(): Pair<Path, CorpusProfile> {
+        val env = System.getenv("ERATW_GAMEDIR")
+            ?: run {
+                // 公开仓无外部语料/样本：按公开适配口径跳过（上游为硬判红）。
+                org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_GAMEDIR：跳过语料三层链判据")
+                throw AssertionError("unreachable")
+            }
         val dir = Paths.get(env)
-        if (!Files.isRegularFile(dir.resolve(EMUERA_CONFIG_FILE_NAME))) return null
+        assertTrue(
+            Files.isRegularFile(dir.resolve(EMUERA_CONFIG_FILE_NAME)),
+            "ERATW_GAMEDIR=$env 下没有 $EMUERA_CONFIG_FILE_NAME：它不是语料游戏根",
+        )
         // csv 目录走装载链同一个定位器（语料实测拼写是 `CSV`，原版字面量是 `csv`）
         val csv = EmueraConfigParser.resolveCsvDir(dir)
-        assumeTrue(
-            Files.isRegularFile(csv.resolve("_default.config")),
-            "语料缺 CSV/_default.config：跳过三层链判据",
-        )
-        assumeTrue(
-            Files.isRegularFile(csv.resolve("_fixed.config")),
-            "语料缺 CSV/_fixed.config：跳过三层链判据",
-        )
-        return dir
+        assertTrue(Files.isRegularFile(csv.resolve("_default.config")), "语料缺 $csv/_default.config：三层链判据无根可对")
+        assertTrue(Files.isRegularFile(csv.resolve("_fixed.config")), "语料缺 $csv/_fixed.config：三层链判据无根可对")
+        // 判不出 / 不在册 ⇒ CorpusProfile.detect 自己抛 AssertionError（未登记版本必须撞红，不许降级）
+        return dir to CorpusProfile.detect(dir)
     }
 }
 

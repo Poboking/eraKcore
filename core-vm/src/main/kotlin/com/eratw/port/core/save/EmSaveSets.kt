@@ -1,5 +1,6 @@
 package com.eratw.port.core.save
 
+import com.eratw.port.core.data.text.DetectedTextDecoder
 import com.eratw.port.core.fn.EmDataNames
 import java.nio.file.Files
 import java.nio.file.Path
@@ -93,10 +94,10 @@ data class EmSaveSets(
          * 文件顺序按名字排序，只为让读档条目顺序确定（原版 `GetFiles` 是文件系统序，
          * 而**顺序不可观测**：读回按条目名整表替换，与先后无关）。
          *
-         * 编码：九条指令名都是 ASCII，故按 UTF-8 解码（BOM 剥掉）即可；
-         * 非 ASCII 字节即便解成替换字符也不影响指令匹配。CSV 内容本身不参与语义。
-         * （原版用 `EncodingHandler.DetectEncoding` 探测，EraStreamReader.cs:51；
-         * 指令名两侧的差别只在「非 UTF-8 CSV 里的非 ASCII 名字」这种本就不参与匹配的场合。）
+         * 编码：逐文件走 [DetectedTextDecoder]（= 原版 `EncodingHandler.DetectEncoding` 链：
+         * BOM → 严格 UTF-8 → 严格 CP932；EraStreamReader.cs:50-59），**解码失败即放弃全部剩余
+         * 文件**（原版 Open 返回 false 走 `break`，ConstantData.cs:1320-1326）——不是跳过这一个：
+         * 继续读会多收后续文件的容器名，SAVE/SAVEGLOBAL 随之写出原版不写的扩展段，破逐字节幂等。
          *
          * @param ignoreCase 指令名是否忽略大小写 = 原版 `Config.StringComparison`
          *   （由 `IgnoreCase` 决定，Config.cs:299-307；出厂默认 true，ConfigData.cs:45，
@@ -133,11 +134,16 @@ data class EmSaveSets(
             val staticXmls = LinkedHashSet<String>()
             val staticDts = LinkedHashSet<String>()
             for (f in files) {
+                // 打开/解码失败 ⇒ 放弃**全部剩余文件**（不是跳过这一个）：原版
+                // `if (!eraStreamReader.Open(path)) { PrintError; break; }`
+                // （spec: ConstantData.cs:1320-1326，`EraStreamReader.Open` 的 false 来自
+                // 严格解码失败，spec: EraStreamReader.cs:50-59）。继续读会在移植侧多收后续
+                // 文件的容器名 ⇒ SAVE/SAVEGLOBAL 写出原版不写的扩展段，破逐字节幂等。
                 val text = try {
-                    String(Files.readAllBytes(f), Charsets.UTF_8).removePrefix("\uFEFF")
+                    DetectedTextDecoder.decode(Files.readAllBytes(f))
                 } catch (_: Exception) {
-                    continue
-                }
+                    null
+                } ?: break
                 for (raw in splitLines(text)) {
                     val body = lineBody(raw) ?: continue
                     val parts = body.split(',')

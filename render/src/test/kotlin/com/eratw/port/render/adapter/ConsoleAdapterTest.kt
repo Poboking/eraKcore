@@ -91,7 +91,10 @@ class ConsoleAdapterTest {
      * 按钮 run 的 `back` 槽承载原版 `StringStyle.ButtonColor`，缺省 = `Config.FocusColor`
      * `0xFFFF00`（`StringStyle.cs:11,22`、`ConfigData.cs:70`）—— 绘制侧焦点命中时正是从
      * 这一槽取字色（`view/ScreenComposer.glyphFore` 对 `ConsoleStyledString.cs:105-111`）。
-     * 非按钮 run 的 `back` 仍是 SETBGCOLOR 的行快照，两种语义不能混成一个。
+     * 非按钮 run 的 `back` 恒 null（落在整屏底色上）：`SETBGCOLOR` 是控制台级活值
+     * `bgColor`（EmueraConsole.cs:200），每帧 `graph.Clear(bgColor)` 整张清（`:1816`），
+     * 经 `ConsoleFeed` 发布进 `ConsoleScreen.backgroundArgb`，不再按行快照
+     * （2026-11 玩家反馈「时停只有文字背景变色」的修复）。
      *
      * 未注入时用 [LineBufferConsoleSink.DEFAULT_FOCUS_COLOR]；真机可经 `focusColor` 注入
      * `emuera.config` 的 FOCUSCOLOR（同一段里顺带钉住注入口）。
@@ -105,10 +108,12 @@ class ConsoleAdapterTest {
         s.newLine()
 
         val line = s.snapshot().single()
-        assertEquals(0x102030, line.backColor, "夹具自检：SETBGCOLOR 落进行快照")
+        // 夹具自检：SETBGCOLOR 是控制台级活值，落在 sink.backgroundColor，不落行快照。
+        assertEquals(0x102030, s.backgroundColor, "夹具自检：SETBGCOLOR 落进控制台活值")
+        assertEquals(null, line.backColor, "行不再快照 SETBGCOLOR（整屏底色的活，不是行的）")
         val rl = ConsoleAdapter.adapt(line)
         assertEquals(listOf(RunKind.TEXT, RunKind.BUTTON), rl.runs.map { it.kind })
-        assertEquals(line.backColor, rl.runs[0].back, "非按钮 run 的 back 仍是行背景色")
+        assertEquals(null, rl.runs[0].back, "非按钮 run 无自有底色，落在整屏底色上")
         assertEquals(
             LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
             rl.runs[1].back,
@@ -119,7 +124,7 @@ class ConsoleAdapterTest {
         // 焦点色是配置项（原版 emuera.config 的 FOCUSCOLOR），适配层不把缺省写死在函数体。
         val injected = ConsoleAdapter.adapt(line, focusColor = 0x00FF00)
         assertEquals(0x00FF00, injected.runs[1].back, "注入的焦点色必须覆盖缺省")
-        assertEquals(line.backColor, injected.runs[0].back, "注入焦点色不影响非按钮段")
+        assertEquals(null, injected.runs[0].back, "注入焦点色不影响非按钮段")
     }
 
     @Test
@@ -147,8 +152,11 @@ class ConsoleAdapterTest {
         val adapted = ConsoleAdapter.adapt(lines)
         // 折行首段带 IsLogicalLine（PrintStringBuffer.cs:193,206），续行不带。
         assertEquals(listOf(true, false), adapted.map { it.isLogicalLine })
-        // PRINTN 的 lineEnd=false 只改写末段（PrintStringBuffer.cs:183），两段都未断行。
-        assertEquals(listOf(false, false), adapted.map { it.isLineEnd })
+        // 只有末段被改写：`Flush` 写的是 `array[^1].IsLineEnd = isLastLineEnd`（PrintStringBuffer.cs:183），
+        // 首段带的是构造缺省 `true`（ConsoleDisplayLine.cs:16 字段初值 / :32 形参缺省 / :47 赋值，
+        // m_buttonsToDisplayLine 三个建排点 :211/:242/:261 都不传 lineEnd）⇒ 形状是 [true, false]，
+        // 两段都 false 是移植侧自己写的（core 已在 main@38067bc8 照回原版）。
+        assertEquals(listOf(true, false), adapted.map { it.isLineEnd })
         assertEquals(listOf(false, false), adapted.map { it.temporary })
 
         val s2 = sink()

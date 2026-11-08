@@ -295,20 +295,111 @@ u32 word[instructionCount × 4]     顺序恒为 op, a, b, c
 定长 4×u32、无 tag 位、操作数语义由 opcode 决定（ADR-004；`Instruction.kt:1-49` 的模式表）。
 装载后 `code` 就是 `Program.code`，VM 按 `pc × 4` 直读，不复制、不解释（ADR-001 的零解析）。
 
-装载期逐条判界（`ErbcReader.validate`）：
+装载期逐条判界（`ErbcReader.validate`）。**分类面的唯一真源是 §5.6b 的机器表**，
+下表只是它按池分组的读数：
 
 | 操作数 | 检查 |
 |---|---|
-| `_SET_INT(2)` 的 b | `< constantCount` |
+| `_SET_INT(2)` 的 b、`_STK_PUSH_IMM(202)` 的 a | `< constantCount` |
 | `_SET_STR(3)` 的 b、`_PRINT_LITERAL(26)` 的 a | `< stringCount` |
-| `_EVAL_INT(27)` / `_EVAL_STR(28)` 的 a | 需 `HAS_EXPRESSIONS` 且 `< exprCount` |
-| `_CALL(22)` 的 a | `< funcCount` |
+| `_STK_PUSH_STR(203)` / `_STK_PUSH_VAR_I/S(207/208)` / `_STK_PLUS_VAR_I(209)` / `_STK_STORE_VAR_I/S(210/211)` 的 a | `< stringCount` |
+| `_EVAL_INT(27)` / `_EVAL_STR(28)` / `_EVAL_INT_JZ(246)` 的 a | 需 `HAS_EXPRESSIONS` 且 `< exprCount` |
+| `_RETF(244)` 的 a | `NONE_REF` 放行；否则需 `HAS_EXPRESSIONS` 且 `< exprCount` |
+| `_CALL(22)` 的 a | `< funcCount`（带基线时按 `functionBase` 折回） |
 | `op ∈ 29..197`（marker）的 a | 需 `HAS_STATEMENTS` 且 `< statementCount` |
 | `entryPc`、每个 `labelPc` | `< instructionCount` |
 
-区间外的编译器扩展操作码（198..201：`_CALL_BY_NAME` / `_JUMP_BY_NAME` / `_JUMP_DYN` / `_RETS`，
-`OpcodeTable.kt:518-540`）的 a 是槽号或标签下标，v1 不做跨函数归属检查（需要 pc→函数归属，
-归 ERBC-B 的 `FuncMeta` 侧）。
+区间外的编译器扩展操作码（198..201：`_CALL_BY_NAME` / `_JUMP_BY_NAME` / `_JUMP_DYN` / `_RETS`）
+与运行期字符串调用（245：`_CALL_STR`）的 a 是槽号或标签下标，不是池引用；跳转归属由
+`ErbcReader.requireJumpTargets` 单列一趟判（跨函数跳/越界跳即拒载）。
+
+### 5.6a `_CALL(22)` / `_CALL_BY_NAME(198)` 的 b 位域（M2 dispatch ISA 修订，2026-11-07）
+
+b 操作数位域单一真源 = `OpcodeTable.kt`（CMP-57）；本节是容器格式侧的位布局契约：
+
+| 位 | 语义 | 适指令 |
+|---|---|---|
+| bit31 | TRY 标志（查不到目标时跳过/吞错） | `_CALL_BY_NAME` / `_JUMP_BY_NAME` |
+| bit30 | JUMP 尾跳标志（目标帧替换当前帧） | 两者 |
+| bit29 | CALLF 家族（只认用户 `#FUNCTION` 方法） | `_CALL_BY_NAME` / `_JUMP_BY_NAME` |
+| bit28 | STR_RET 字符串返回标志 | 两者 |
+| **bit27** | **DIRECT 直调标志（M2 新增）** | `_CALL`（`_CALL_BY_NAME` 不用——名字通道返回的已是执行入口） |
+| bit26..0 | 实参数（`ARG_COUNT_MASK`） | 两者 |
+
+**bit27 DIRECT 语义**：置位 = `a` 是**最终执行入口**的物理下标，VM 不得再查
+functionDispatch 表。发射方 = 链接器回填 CALL_SUPER 目标（`CallSentinels` 的 super
+哨兵决议；查表会把被覆盖的前实现弹回链尾胜者，super 链即成环）。无 Mod 产物与
+链接器自产指令恒不置位。实装序：掩码先扩（`ARG_COUNT_MASK` 排除 bit27，否则旧 VM
+把 DIRECT 位当 2^24 个实参）→ 链接器发射 → VM 消费。历史字节码 bit27 恒 0，行为不变。
+
+### 5.6b 逐操作数重定位分类（M2-1 机器表，2026-11-08）
+
+**代码真源** = `core/code/OpcodeRelocation.kt`；本节是它的规约侧镜像，改一处必须改另一处
+（`OpcodeRelocationTest` 把两边钉在一起）。`isa.yaml` 只管**语句语义**（169 条语句的
+`arg_form`），不管指令槽的重定位类别 —— 类别是容器/链接侧的事实，归本文件。
+
+分类只回答一个问题：拼接（base + 补丁 / base + 模块）时这个槽要不要加基线。
+
+| 类别 | 含义 | 平移 | 判界 |
+|---|---|---|---|
+| `NONE` | 槽号 / 函数内跳转偏移 / 标签下标 / 标志位 / 维数 / 增量 / 立即数 | 不动 | 不判 |
+| `CONSTANT` | i64 常量池下标 | `+longBase` | `< constantCount` |
+| `STRING` | 字符串池下标 | `+stringBase` | `< stringCount` |
+| `EXPR` | 表达式池下标 | `+exprBase` | 需 `HAS_EXPRESSIONS` 且 `< exprCount` |
+| `EXPR_NULLABLE` | 同 `EXPR`，但 `NONE_REF(-1)` = 没有这一项 | 哨兵不动，其余 `+exprBase` | 哨兵不判，其余同 `EXPR` |
+| `STATEMENT` | 语句池下标 | `+stmtBase` | 需 `HAS_STATEMENTS` 且 `< statementCount` |
+| `FUNCTION` | 函数表下标 | **语义决议**（`CallRelocation`），不是机械平移 | 按 `functionBase` 折回 |
+
+逐操作码（**未列出的槽一律 `NONE`**；「槽」= `SlotAddr` 编码的帧槽/全局槽）：
+
+| 操作码 | a | b | c |
+|---|---|---|---|
+| `_NOP(0)` / `_HALT(1)` | — | — | — |
+| `_SET_INT(2)` | 槽 | **CONSTANT** | — |
+| `_SET_STR(3)` | 槽 | **STRING** | — |
+| `_MOV_INT(4)` / `_MOV_STR(5)` | 槽 | 槽 | — |
+| `_ADD(6)`..`_GE(17)`、`_NEG(11)`、`_NOT(18)` | 槽 | 槽 | 槽 |
+| `_JUMP(19)` | 偏移 | — | — |
+| `_JUMP_IF_FALSE(20)` / `_JUMP_IF_TRUE(21)` | 槽 | 偏移 | — |
+| `_CALL(22)` | **FUNCTION** | 位域（§5.6a） | 返回槽 |
+| `_RET(23)` | 返回槽 | — | — |
+| `_PRINT_INT(24)` / `_PRINT_STR(25)` | 槽 | 标志位 | — |
+| `_PRINT_LITERAL(26)` | **STRING** | 标志位 | — |
+| `_EVAL_INT(27)` / `_EVAL_STR(28)` | **EXPR** | 槽 | — |
+| 29..197（169 条 isa marker） | **STATEMENT** | 0 | `NONE` |
+| `_CALL_BY_NAME(198)` | 名字槽 | 位域（§5.6a） | 返回槽 |
+| `_JUMP_BY_NAME(199)` | 名字槽 | 位域 | 命中槽 |
+| `_JUMP_DYN(200)` | 函数内标签下标 | — | — |
+| `_RETS(201)` | 被调帧 str 槽 | — | — |
+| `_STK_PUSH_IMM(202)` | **CONSTANT** | — | — |
+| `_STK_PUSH_STR(203)` | **STRING** | — | — |
+| `_STK_DUP_I(204)` / `_STK_DROP(205)` / `_STK_DROP_S(206)` | — | — | — |
+| `_STK_PUSH_VAR_I(207)` / `_STK_PUSH_VAR_S(208)` | **STRING**（变量名） | 维数 | — |
+| `_STK_PLUS_VAR_I(209)` | **STRING**（变量名） | 维数 | ±1 增量 |
+| `_STK_STORE_VAR_I(210)` / `_STK_STORE_VAR_S(211)` | **STRING**（变量名） | 维数 | — |
+| `_STK_ADD(212)`..`_STK_I2S(238)` | — | — | — |
+| `_STK_JZ_POP(239)` / `_STK_JNZ_POP(240)` / `_STK_JZ_KEEP(241)` | 偏移 | — | — |
+| `_STK_POP_SLOT_I(242)` / `_STK_POP_SLOT_S(243)` | 帧槽 | — | — |
+| `_RETF(244)` | **EXPR_NULLABLE** | — | — |
+| `_CALL_STR(245)` | 帧内 str 槽 | 标志位（低位不解释为 argc） | 返回/命中槽 |
+| `_EVAL_INT_JZ(246)` | **EXPR** | 槽 | 跳转偏移（相对下一条指令） |
+
+**不变量**（`OpcodeRelocationTest` 逐条钉）：
+
+1. c 槽在 0..246 全域是 `NONE`。将来若有 c 是池引用，消费方已按三槽循环、不需改代码，
+   但这条钉会红 —— 有意的：这种变化必须过一次人工裁定。
+2. `FUNCTION` 只出现在 `_CALL.a`；`EXPR_NULLABLE` 只出现在 `_RETF.a`。
+3. 表按 `0..Opcode.MAX_OPCODE` 稠密建满，未登记的槽在 `OpcodeRelocation` **类初始化**时就抛
+   ⇒ 追加操作码必须同步登记四处（常量、`Opcode.NAMES`、本节、机器表），漏一步装载即红。
+4. 平移面 = 判据面：链接器（`ModuleLinker.rewriteModuleInstructions`）与拼接出口
+   （`checkPoolIndexBounds`）都只问这张表；两条装载路（`ErbcReader.Decoder.validate` /
+   `loader.ErbcStream`）共用同一分类，只各自保留处置策略（异常类型与文案）。
+
+**历史缺陷（本节的立项理由）**：`_RETF(244)` 追加时，四份手写 `when` 一起漏判 ——
+`isStackOp(244)` 为假、marker 区间只到 197，于是 a 既不平移也不判界。零基线模块带
+`_RETF` 链接后，运行期就地求值 **base 段**的表达式：返回别人的值，装载期零报错。
+根因层 = 装载/编译相位；修法 = 分类收进一张表，消费方只留策略。
+（同类前科：T2-21 加栈码组时 `ErbcFormat.OPCODE_MAX` 没扩，见该常量 KDoc。）
 
 ### 5.7 段 6：行号表
 
@@ -582,7 +673,7 @@ Kotlin（本仓，`core-vm/src/main/kotlin/com/eratw/port/`）：
 | `CallArg(position / bucket / isStr / name / present)` 与 `FunctionInfo.paramNames` | `core/code/Program.kt:24-30`、`:41-49` |
 | 逐位实参写回（REF 别名 / `ARG:n` 省略位） | `core/proc/ProcessRuntime.kt:596-649`；门禁 `:547-551`（缺元数据即退回类型桶） |
 
-C# 反编译（只读，路径相对 `D:/DSH/eratw-安卓移植计划/reference/emuera-cs/`）：
+C# 反编译（只读，路径相对 `<work-root>/eratw-安卓移植计划/reference/emuera-cs/`）：
 
 | 结论 | 出处 |
 |---|---|

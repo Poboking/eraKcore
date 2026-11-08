@@ -225,4 +225,118 @@ class ConsoleClearLineAccountingTest {
         assertEquals(listOf("l0", "l1"), s.lines().map { it.segments.single().text })
         assertEquals(2, s.lineNo)
     }
+
+    // ==================================================================
+    // 4. appendGroup 的两条弹出路径：临时行替换 / PRINTN 并入 —— 走 deleteLine(1) 本体
+    // ==================================================================
+
+    /**
+     * PRINTN 并入（EmueraConsole.cs:2947-2967）的删除吃满 `deleteLine(1)` 记账：
+     * 收尾 `deletedLines -= argNum`（:3050）**无条件**，未达满容时并入一次就把账扣负。
+     *
+     * 旧实现用裸 removeAt 摘末排，这一步读数是 0 —— 相对原版 +1 漂移。
+     */
+    @Test
+    fun `PRINTN 并入在非满容时 deletedLines 照原版扣负`() {
+        val s = sink(maxLines = 3)
+        s.print("a", lineEnd = false)
+        s.newLine() // 结出一条 isLineEnd=false 的未结行
+        assertEquals(1, s.lines().size)
+        assertEquals(0L, s.deletedLines)
+
+        s.printLine("b") // 并入：原版 :2954 deleteLine(1)
+        assertEquals(1, s.lines().size, "并成一条显示行")
+        assertEquals(listOf("a", "b"), s.lines().single().segments.map { it.text })
+        assertEquals(1, s.lineNo, "删一排 + 加一排，行号净额为零")
+        assertEquals(-1L, s.deletedLines, ":3022 不满足（size 0 ≠ MaxLog-1）+ :3050 扣 1")
+    }
+
+    /**
+     * MaxLog 边界上的连续「PRINTN 不带换行 + 带换行 PRINT」交替链：每一轮都撞一次并入口。
+     *
+     * 摘掉未结行后列表恰落 `MaxLog - 1` ⇒ :3022 加一、:3050 减一，**并入自身净额为零**；
+     * 淘汰只来自头部超容那一次（:2988-2996）。逐轮读数与原版逐值一致（消费面
+     * render/scroll/LogBuffer 的删除计数不允许被这种弹出虚增）。
+     */
+    @Test
+    fun `MaxLog 边界连续 PRINT 不带换行后 deletedLines 与原版逐值一致`() {
+        val s = sink(maxLines = 3)
+        s.printLine("l0")
+        s.printLine("l1")
+        // 第 3 排用未收尾的 PRINTN 结出 ⇒ 列表恰满 MaxLog，且末排 isLineEnd=false。
+        s.print("u", lineEnd = false)
+        s.newLine()
+        assertEquals(3, s.lines().size)
+        assertEquals(3, s.lineNo)
+        assertEquals(0L, s.deletedLines, ":2988 只在 Count > MaxLog 摘行，满而不超不淘汰")
+
+        // 轮 1：带换行 PRINT 并入未结行。pop 后 size 2 == MaxLog-1 ⇒ del +1（:3022）；
+        // 收尾 -1（:3050）⇒ 净额零；并进行补回 size 3。行号一减一加，仍 3。
+        s.printLine("m0")
+        assertEquals(3, s.lines().size)
+        assertEquals(3, s.lineNo)
+        assertEquals(0L, s.deletedLines, "并入口的 :3022/:3050 相抵")
+
+        // 轮 2：再走一次「PRINTN 不结 + 换行 PRINT 并入」。这一轮先追加未结行 ⇒
+        // size 4 > MaxLog ⇒ 头部淘汰 +1（:2995）；并入的 pop 又恰落 MaxLog-1 ⇒ +1-1。
+        s.print("u1", lineEnd = false)
+        s.newLine()
+        assertEquals(3, s.lines().size)
+        assertEquals(4, s.lineNo, "未结行入列 +1（淘汰不回退行号，:2970/:2988-2996）")
+        assertEquals(1L, s.deletedLines, "本轮唯一的一次淘汰（:2995）")
+
+        s.printLine("m1")
+        assertEquals(3, s.lines().size)
+        assertEquals(4, s.lineNo, "并入：删一排（:3013）+ 加一排（:2970），净额零")
+        assertEquals(1L, s.deletedLines, "pop 的 :3022 加一与 :3050 减一相抵")
+    }
+
+    /**
+     * 临时行替换（:2891-2893 `deleteLine(1)`）的记账与并入同口径：
+     * 摘掉临时排后恰落 MaxLog-1 时净额为零；**不**在边界时逐次扣负。
+     */
+    @Test
+    fun `临时行替换的 deletedLines 走完整 deleteLine 记账`() {
+        val s = sink(maxLines = 3)
+        // 未满容：REUSELASTLINE 连续替换两次 ⇒ 每次 deleteLine(1) 收尾 :3050 扣 1。
+        s.printTemporaryLine("t1")
+        assertEquals(0L, s.deletedLines)
+        s.printTemporaryLine("t2")
+        assertEquals(-1L, s.deletedLines, "size 0 ≠ MaxLog-1 ⇒ 只吃 :3050 的 -= 1")
+        s.printTemporaryLine("t3")
+        assertEquals(-2L, s.deletedLines, "再替换一次再扣 1")
+
+        // 满容边界：先用真实行把列表垫到 MaxLog，让替换落在 MaxLog-1 判据上。
+        val b = sink(maxLines = 3)
+        b.printLine("l0")
+        b.printLine("l1")
+        b.printTemporaryLine("t1") // size 3 == MaxLog，未超 ⇒ 不淘汰
+        assertEquals(0L, b.deletedLines)
+        b.printTemporaryLine("t2") // pop 后 size 2 == MaxLog-1 ⇒ +1 -1 净额零
+        assertEquals(0L, b.deletedLines, ":3022 与 :3050 相抵")
+        assertEquals(3, b.lines().size)
+        assertEquals(listOf("l0", "l1", "t2"), b.lines().map { it.segments.single().text })
+    }
+
+    /**
+     * 未结行**折过排**时的并入：原版 deleteLine(1) 从末排一路摘到本逻辑行首排
+     * （:3007-3031 的 `while (num < argNum …)`），并入只保留住的末排内容 ——
+     * 首排文本整体消失是原版行为（ADR-005 复刻，不许「顺手」留下它）。
+     */
+    @Test
+    fun `未结行折排后并入整条逻辑行出列首排内容消失`() {
+        val s = sink(maxLines = 3, clientWidth = 4)
+        s.print("abcdefg", lineEnd = false)
+        s.newLine() // 折成两排：abcd / efg，末排 isLineEnd=false
+        assertEquals(2, s.lines().size)
+        assertEquals(2, s.lineNo)
+        assertEquals(0L, s.deletedLines)
+
+        s.printLine("X")
+        // deleteLine(1) 摘 efg(续排) + abcd(首排)，并入行 = efg 的内容 + X。
+        assertEquals(1, s.lines().size, "首排不再存在（原版只把留住的末排按钮接进新行，:2956-2966）")
+        assertEquals(listOf("efg", "X"), s.lines().single().segments.map { it.text })
+        assertEquals(1, s.lineNo, "两排各退一号（:3013），再加回一排")
+        assertEquals(-1L, s.deletedLines, ":3050 无条件扣 1")
+    }
 }

@@ -359,6 +359,8 @@ private class Parser(
      * - `_JUMP_BY_NAME <名字槽>, <try 标志>[, <命中标志槽>]`（2..3 个；省略 = none）
      * - `_JUMP_DYN <标签下标>`（1 个）
      * - `_RETS [<字符串槽>]`（0..1 个；省略 = none）
+     * - `_EVAL_INT_JZ <$表达式>, <目标槽>, <跳转目标>`（3 个；246，MODERN-T1）
+     * - `_RETF [<$表达式>]`（0..1 个；省略 = none）
      */
     private fun emitExtension(op: Int, ops: List<Tok>) {
         when (op) {
@@ -366,6 +368,16 @@ private class Parser(
                 expectOps(ops, 3, "_CALL_BY_NAME")
                 b.emit(
                     op, slot(ops[0]), parseInt(ops[1].text, "实参数/标志位"), slot(ops[2]),
+                    currentLine,
+                )
+            }
+
+            // 运行期字符串调用（245，WIRE-1/WIRE-2）：形态与 [_CALL_BY_NAME] 逐字同构
+            //（3 操作数：整串槽、标志位、返回/命中槽），与 Disassembler.format 一一对应。
+            Opcode._CALL_STR -> {
+                expectOps(ops, 3, "_CALL_STR")
+                b.emit(
+                    op, slot(ops[0]), parseInt(ops[1].text, "标志位"), slot(ops[2]),
                     currentLine,
                 )
             }
@@ -385,6 +397,21 @@ private class Parser(
                 if (ops.size > 1) fail("_RETS 最多 1 个操作数")
                 val src = ops.firstOrNull()?.let { slot(it) } ?: SlotAddr.NONE
                 b.emit(op, src, 0, 0, currentLine)
+            }
+
+            // 条件位融合超指令（246，MODERN-T1）：形态 = 表达式、目标槽、跳转目标（标签或原始偏移），
+            // 与 Disassembler.format 的打印逐字对应；偏移写 c（同 `_JUMP_IF_FALSE` 的 b 口径）。
+            Opcode._EVAL_INT_JZ -> {
+                expectOps(ops, 3, "_EVAL_INT_JZ")
+                val pc = b.emit(op, exprIndex(ops[0]), slot(ops[1]), 0, currentLine)
+                jumpOperand(pc, 3, ops[2])
+            }
+
+            // 浮点返回追加段（244）：a = 表达式池下标，`none` = 无返回值（0.0）。
+            Opcode._RETF -> {
+                if (ops.size > 1) fail("_RETF 最多 1 个操作数")
+                val e = ops.firstOrNull()?.let { exprIndex(it) } ?: SlotAddr.NONE
+                b.emit(op, e, 0, 0, currentLine)
             }
 
             else -> fail("未支持的扩展指令: ${Opcode.nameOf(op)}")

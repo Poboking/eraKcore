@@ -167,17 +167,18 @@ class SemTestEnv(
     }
 
     /**
-     * 执行一条语句（**旧对象树入口**）。
+     * 执行一条语句（**对象树入口**，Android 真机生产默认路径）。
      *
-     * T2-64 波次 C 的生产路径是 `execute(source, index, ctx)`（扁平直读）；语义用例仍走这条树入口，
-     * 因为它是「直读复刻是否逐字一致」的参照系，且大量用例构造的是**编码器不会产出的合成形态**
-     * （例如 `InstructionStmt(PRINTDATA, ExpressionArgument)`）——直读侧对形态有严格校验，会拒。
-     * 生产路径的覆盖由 `StatementExecutorFlatTest`、`DualPathParityTest` 与 `dualPathAudit` 负责。
+     * 扁平通道 `execute(source, index, ctx)` 是归因/装置通道（`files/flat-statements.on` 打开）。
+     * 语义用例仍走这条树入口，因为它是「直读复刻是否逐字一致」的参照系，且大量用例构造的是
+     * **编码器不会产出的合成形态**（例如 `InstructionStmt(PRINTDATA, ExpressionArgument)`）——
+     * 直读侧对形态有严格校验，会拒。扁平通道的覆盖由 `StatementExecutorFlatTest`、
+     * `DualPathParityTest` 与 `dualPathAudit` 负责。
      */
     @Suppress("DEPRECATION")
     fun run(stmt: com.eratw.port.core.stmt.Statement): ExecResult = executor.execute(stmt, ctx)
 
-    /** 扁平直读入口（生产路径；需要真语句形态时用）。 */
+    /** 扁平直读入口（归因/装置通道；需要真语句形态时用）。 */
     fun runFlat(stmt: com.eratw.port.core.stmt.Statement): ExecResult = executor.execute(singleSource(stmt), 0, ctx)
 
     private fun singleSource(stmt: com.eratw.port.core.stmt.Statement): FlatStmtSource {
@@ -195,12 +196,13 @@ class SemTestEnv(
 }
 
 /**
- * 数据节**双键**供给（T2-64 波次 C 的测试辅助）：语句池下标键（生产/扁平路径）与语句实例键
- * （旧树入口）都返回同一份组。
+ * 数据节**双键**供给（T2-64 波次 C 的测试辅助）：语句池下标键（扁平通道）与语句实例键
+ * （对象树通道的读面）都返回同一份组。
  *
- * 为什么需要它：波次 C 把 `DataSections` 的唯一抽象方法换成 `groupsOf(stmtIndex)`，实例键
- * 变成「显式失败」的过渡重载。语义用例仍走旧树入口（见 [SemTestEnv.run] 的 KDoc），所以必须
- * 同时覆写两键，否则 PRINTDATA 一族会撞上过渡重载的 UnsupportedOperationException。
+ * 为什么需要它：`DataSections` 的主读面是 `groupsOf(stmtIndex)`（扁平通道），实例键
+ * `groupsOf(stmt)` 是对象树通道的读面、缺省「显式失败」。语义用例走对象树入口
+ * （见 [SemTestEnv.run] 的 KDoc），所以必须同时覆写两键，否则 PRINTDATA 一族在树入口上
+ * 会撞上实例键的 UnsupportedOperationException。
  */
 @Suppress("DEPRECATION")
 fun dualKeySections(block: (Int) -> List<List<Expr>>?): DataSections = object : DataSections {

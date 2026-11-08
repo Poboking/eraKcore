@@ -1,0 +1,6 @@
+; 探针语料 A（变体 p1_comment：只改注释正文，语句/函数/池一个都不动）
+@IFA_ONE(ARG, ARG:1, ARGS)
+	PRINTFORML A1-STR {ARG} {ARG:1} %ARGS%
+@IFA_TWO
+	PRINTFORML A2-STR
+	CALL IFA_ONE, 1, 2, "A-CALL-LIT"

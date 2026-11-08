@@ -1,6 +1,45 @@
 package com.eratw.port.core.lexer
 
 /**
+ * C# `(long)(double)` 在 x64 上的**越界口径**，供三处「数字 × 底^指数 → Long」的读入器共用
+ * （本文件的 [ErbLexer.readInt64]、`data/csv/CharaCsvLoader`、`host/ButtonStringCreator`）。
+ *
+ * 为什么单列一个函数：JVM 的 `Double.toLong()` 按 JLS 5.1.3 **饱和**（正溢出给 `MAX_VALUE`），
+ * 而 .NET x64 的 `(long)` 走 `cvttsd2si`，越界一律给「整数不定值」`0x8000000000000000`
+ * = `Long.MIN_VALUE`。三处读入器前面的范围闸都写作 `d > 2^63` 才报错（与 C# 逐字同口径），
+ * 于是 **`d == 2^63` 恰好能过闸** —— 这一支两侧不同，而它不是边角料：
+ * `DIM.ERH:662` 的 `#DIM CONST 場所_入口 = 1p63` 与 `ResourceManager.ERH:4-13` 的
+ * `BIT:64 = 1p63` 全走这里。按饱和口径它们会变成 `MAX_VALUE`（bit 0..62 全 1），
+ * 于是「测最高位」变成「测低 63 位任意一位」、`array |= BIT:64` 变成把整元素除最高位外置脏；
+ * 语料那张 6400 位的图像池位图（`ResourceManager.ERH:23`）与场所位掩码成片错。
+ * 本仓在 TIMES 那条路上已经按同一口径钉死（`sem/StatementExecutor.kt:2014-2016`，
+ * 2026-10-26 fixcore 审查 B4），这里只是把同一条规则收到一处、别让字面量侧掉队。
+ */
+internal fun longFromScaledDouble(d: Double): Long =
+    // NaN 也要落「整数不定值」：C# x64 上 `(long)double.NaN` 与越界同给
+    // 0x8000000000000000 = Long.MIN_VALUE（spec: Term.cs:121-124，cvttsd2si 口径），
+    // 而 JVM `Double.toLong()` 对 NaN 恒给 0。病态下标（如 `YOGORE:NaN`）两侧才会一致。
+    if (d.isNaN() || d >= 9.223372036854776E18) Long.MIN_VALUE else d.toLong()
+
+/**
+ * 标识符终止字符全集 —— spec: LexicalAnalyzer.cs:28 `identifierTerminators`
+ * " \u3000.+-[SLASH]*%=!<>|&^~?#)}],:({[$\\'\"@;\t"（[SLASH] 即 '/'，此处避免注释提前闭合）。
+ *
+ * 注意：'\r' '\n' 不在集合内；标识符可含全角字符（不在终止集内的任意字符）。
+ *
+ * 2026-10-31 R7-B/L6：本表在仓里曾经有**三份**字面量副本（本词法器、`core.frontend`
+ * 的预处理状态机、`:tools:erbcc` 的 `Symbols`），三处都在拿它切同一批语料里的标识符 ——
+ * 任一处漂移，`[IF 宏]` 的宏名截断口径就会分叉（`[IF A,B]` 是读成 `A` 还是 `A,B`），
+ * 且分叉只体现为「宏没命中」，不会报错。此处定为**唯一**声明处，另两处一律引用：
+ *  - `com.eratw.port.core.frontend`（设备端前端，同模块 ⇒ 直接可见）；
+ *  - `:tools:erbcc` 的 `Symbols.IDENT_TERMINATORS`（跨模块 ⇒ 故本声明为 `public`，
+ *    不能像原先那样留在 `internal`/`private` 里）。
+ * 表内容由 `ErbPreprocessorTest.identifierTerminatorsMatchLexerTable` 逐字符行为化钉死。
+ */
+val IDENT_TERMINATORS: Set<Char> =
+    " \u3000.+-*/%=!<>|&^~?#)}],:({[\$\\'\"@;\t".toSet()
+
+/**
  * LexicalAnalyzer —— 移植自 MinorShift.Emuera.Runtime.Script.Parser/LexicalAnalyzer.cs
  *
  * 只做词法分析（单逻辑行内 Token 切分），不做表达式求值与 ERB 语义。
@@ -31,12 +70,10 @@ class ErbLexer(private val config: LexerConfig = LexerConfig()) {
     // ------------------------------------------------------------------
 
     /**
-     * 标识符终止字符全集 —— spec: LexicalAnalyzer.cs:28
-     * " \u3000.+-[SLASH]*%=!<>|&^~?#)}],:({[$\\'\"@;\t"（[SLASH] 即 '/'，此处避免注释提前闭合）
-     * 注意：'\r' '\n' 不在集合内；标识符可含全角字符（不在终止集内的任意字符）。
+     * 标识符终止字符全集 —— 声明见文件头 [IDENT_TERMINATORS]（spec: LexicalAnalyzer.cs:28）。
+     * 这里只保留实例内的短名，免得把 40 处调用点全改成大写。
      */
-    private val identifierTerminators =
-        " \u3000.+-*/%=!<>|&^~?#)}],:({[\$\\'\"@;\t".toSet()
+    private val identifierTerminators = IDENT_TERMINATORS
 
     /**
      * spec: LexicalAnalyzer.cs:315-328 ReadSingleIdentifierROS
@@ -119,7 +156,7 @@ class ErbLexer(private val config: LexerConfig = LexerConfig()) {
                     lineNo = lineNo, column = startPos,
                 )
             }
-            result = d.toLong()
+            result = longFromScaledDouble(d)
         }
         return result
     }
@@ -206,6 +243,49 @@ class ErbLexer(private val config: LexerConfig = LexerConfig()) {
                 "\"$s\"は64ビット符号付き整数の範囲を超えています", lineNo = lineNo, column = startPos,
             )
         }
+    }
+
+    /**
+     * 数字字面量入口：小数/科学计数形态产出 [Token.Float]，其余一律回落 [readInt64]。
+     *
+     * 判据（4.981 升版的浮点字面量形态；语料实测只出现 `0.7` 这种「十进制整数 + '.' + 十进制整数」）：
+     * 1. 当前位起是一串 **ASCII** 十进制数字；
+     * 2. 其后紧跟 `.`、且 `.` 之后还有一位 ASCII 十进制数字 —— 才算浮点。
+     *    于是 `1.修改了…`（`.` 后是非数字）、`0x1F`、`0b101`、`1e5`（整数指数）仍走 [readInt64]，
+     *    与既有整数语料逐字同口径；
+     * 3. 小数部分之后可带 `e`/`E` 指数（后接可选符号 + 至少一位数字）；否则 `e`/`E` 留给标识符。
+     *
+     * TODO(verify): 1.824 参考实现没有浮点字面量（`ReadDouble` 只服务 TIMES 与 STR_DOUBLE 两个
+     * 语句参数，spec: LexicalAnalyzer.cs:232-266），故形态判据与报错文案无 C# 证据；数值本身按
+     * IEEE-754 双精度解析（.NET `double.Parse` 与 JVM `toDouble` 在十进制串上逐位一致）。
+     */
+    private fun readNumberToken(st: CharStream, lineNo: Int): Token {
+        val start = st.currentPosition
+        val row = st.rowString
+        var i = start
+        while (i < row.length && row[i] in '0'..'9') i++
+        val isFloat = i < row.length && row[i] == '.' && i + 1 < row.length && row[i + 1] in '0'..'9'
+        if (!isFloat) return Token.Integer(readInt64(st, retZero = false, lineNo = lineNo), lineNo, start)
+        st.jump(i - start)      // 整数部分
+        st.shiftNext()          // '.'
+        while (!st.eos && st.current in '0'..'9') st.shiftNext()
+        if (!st.eos && (st.current == 'e' || st.current == 'E')) {
+            val afterE = st.next
+            val expOk = afterE in '0'..'9' ||
+                ((afterE == '+' || afterE == '-') &&
+                    st.pointer + 2 < row.length && row[st.pointer + 2] in '0'..'9')
+            if (expOk) {
+                st.shiftNext()  // 'e' / 'E'
+                if (st.current == '+' || st.current == '-') st.shiftNext()
+                while (!st.eos && st.current in '0'..'9') st.shiftNext()
+            }
+        }
+        val raw = st.substring(start, st.currentPosition - start)
+        val v = raw.toDoubleOrNull()
+        if (v == null || v.isInfinite() || v.isNaN()) {
+            throw LexError("\"$raw\"を数値に変換できません", lineNo = lineNo, column = start)
+        }
+        return Token.Float(v, raw, lineNo, start)
     }
 
     // ------------------------------------------------------------------
@@ -440,11 +520,7 @@ class ErbLexer(private val config: LexerConfig = LexerConfig()) {
                     }
                     st.shiftNext()
                 }
-                in '0'..'9' -> {
-                    val col = st.currentPosition
-                    val v = readInt64(st, retZero = false, lineNo = lineNo)
-                    ret.add(Token.Integer(v, lineNo, col))
-                }
+                in '0'..'9' -> ret.add(readNumberToken(st, lineNo))
                 '>', '!', '#', '%', '&', '*', '+', '-', '/', '<', '=', '?', '^', '|', '~' -> {
                     // spec: LexicalAnalyzer.cs:767-792
                     if (st.current == '>' && endWith == LexEndWith.GreaterThan) break@loop
@@ -849,8 +925,12 @@ class ErbLexer(private val config: LexerConfig = LexerConfig()) {
 
     /**
      * '#' 行分析 —— spec: LogicalLineParser.cs:20-307 ParseSharpLine 的词法部分。
-     * 返回（关键字, 其余 Token）。LOCALSIZE/LOCALSSIZE/DIM/DIMS 会带 Token，
+     * 返回（关键字, 其余 Token）。LOCALSIZE/LOCALSSIZE/LOCALFSIZE/DIM/DIMS 会带 Token，
      * SINGLE/LATER/PRI/ONLY/FUNCTION/FUNCTIONS 只有关键字（其余为语义校验，不在此实现）。
+     *
+     * `LOCALFSIZE` 是 4.981 fork 新增（与 `LOCALSIZE` 同形，spec: LogicalLineParser.cs:257-266；
+     * 消费点见 `LineParser.parseSharpLine`）；`DIMF` 刻意**不**在此分词 —— 它的声明体
+     * 由 `DimParser` 自行词法（见 `LineParser.parseSharpLine` 的 DIMF 分支）。
      */
     fun parseSharpLine(content: String, lineNo: Int, filename: String): Pair<String, List<Token>> {
         val st = CharStream(content)
@@ -862,6 +942,7 @@ class ErbLexer(private val config: LexerConfig = LexerConfig()) {
         return when {
             keyword.equals("LOCALSIZE", ignoreCase = true) ||
                 keyword.equals("LOCALSSIZE", ignoreCase = true) ||
+                keyword.equals("LOCALFSIZE", ignoreCase = true) ||
                 keyword.equals("DIM", ignoreCase = true) ||
                 keyword.equals("DIMS", ignoreCase = true) ->
                 // spec: LogicalLineParser.cs:220 / 281 —— Analyse(EoL, AllowAssignment)

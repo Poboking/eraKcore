@@ -29,7 +29,7 @@ object CmdCall {
      */
     fun run(a: Args, out: PrintStream, err: PrintStream): Int {
         val name = a.positional.getOrNull(1) ?: throw CliError("用法: call <函数名> [--args 0,1,...] [--steps N]")
-        val assembled = Assembler.assemble(a)
+        val assembled = Assembler.assemble(a, out = out)
         val (intArgs, strArgs) = parseArgs(a.value("--args"))
         return invokeAndReport(assembled, name, intArgs, strArgs, a, out = out)
     }
@@ -186,7 +186,7 @@ object CmdVar {
 
     fun run(a: Args, out: PrintStream, err: PrintStream): Int {
         val spec = a.positional.getOrNull(1) ?: throw CliError("用法: var <名字>[i,j]")
-        val assembled = Assembler.assemble(a)
+        val assembled = Assembler.assemble(a, out = out)
         val store = assembled.session.store
         // 名字[下标表]：下标为逗号分隔整数；缺省 [0]（CONTRACT-DBG1 路2：值取 [0] 或指定下标）
         val open = spec.indexOf('[')
@@ -229,7 +229,7 @@ object CmdVars {
 
     fun run(a: Args, out: PrintStream, err: PrintStream): Int {
         val glob = a.positional.getOrNull(1) ?: "*"
-        val assembled = Assembler.assemble(a)
+        val assembled = Assembler.assemble(a, out = out)
         val store = assembled.session.store
         val rx = globToRegex(glob)
         val names = LinkedHashSet<String>()
@@ -261,7 +261,7 @@ object CmdDisasm {
         val pc = pcRaw.toIntOrNull() ?: throw CliError("pc 不是整数: $pcRaw")
         val count = a.longOr("-n", 16L).toInt()
         if (count <= 0) throw CliError("-n 必须为正整数")
-        val assembled = Assembler.assemble(a)
+        val assembled = Assembler.assemble(a, out = out)
         val program = assembled.program
         if (pc < 0 || pc >= program.instructionCount) {
             throw CliError("pc 越界: $pc（指令总数 ${program.instructionCount}）")

@@ -124,7 +124,7 @@ class GraphicsSinkInjectionTest {
         val sink = RecordingGraphicsSink()
         val env = envWith(sink)
         // spec: FunctionIdentifier.cs:427-439 —— Param[0]→width、Param[1]→height、Param[2]→ypos
-        env.run(stmt("PRINT_IMG \"立绘.webp\", 300px, 200px, 40px"))
+        env.run(stmt("PRINT_IMG \"立绘.webp\", 300 px, 200 px, 40 px"))
         assertEquals(listOf("img:立绘.webp|b=-|m=-|300px,200px,40px"), sink.events)
     }
 
@@ -132,14 +132,14 @@ class GraphicsSinkInjectionTest {
     fun `PRINT_IMG 的 nameb 与 namem 按位置取且空串原样交出`() {
         val sink = RecordingGraphicsSink()
         val env = envWith(sink)
-        env.run(stmt("PRINT_IMG \"a.webp\", \"b.webp\", \"m.webp\", 10px"))
+        env.run(stmt("PRINT_IMG \"a.webp\", \"b.webp\", \"m.webp\", 10 px"))
         assertEquals(listOf("img:a.webp|b=b.webp|m=m.webp|10px"), sink.events)
 
         // FunctionIdentifier.cs:423-426 的「空串置 null」在宿主侧做（AndroidGraphicsSink
         // 的 nameb?.takeIf { it.isNotEmpty() }），语句层这里必须**原样**交出空串，
         // 否则 sink 侧的复刻点就失去判据。
         sink.events.clear()
-        env.run(stmt("PRINT_IMG \"a.webp\", \"\", \"m.webp\", 10px"))
+        env.run(stmt("PRINT_IMG \"a.webp\", \"\", \"m.webp\", 10 px"))
         assertEquals(listOf("img:a.webp|b=|m=m.webp|10px"), sink.events)
     }
 
@@ -205,7 +205,7 @@ class GraphicsSinkInjectionTest {
         env.run(instr(FunctionCode.SKIPDISP, intArg(1)))
         assertTrue(env.ctx.skipPrint, "SKIPDISP 1 应置位 skipPrint")
 
-        env.run(stmt("PRINT_IMG \"a.webp\", 10px"))
+        env.run(stmt("PRINT_IMG \"a.webp\", 10 px"))
         env.run(stmt("PRINT_RECT 100"))
         env.run(stmt("PRINT_SPACE 50"))
         assertEquals(emptyList(), sink.events, "三条内联段在 SKIPDISP 下整条不投递（spec: FunctionIdentifier.cs:414、:454、:485 三处守卫）")
@@ -222,18 +222,18 @@ class GraphicsSinkInjectionTest {
         val sink = RecordingGraphicsSink()
         val env = envWith(sink)
         env.run(instr(FunctionCode.SKIPDISP, intArg(1)))
-        env.run(stmt("PRINT_IMG \"a.webp\", 10px"))
+        env.run(stmt("PRINT_IMG \"a.webp\", 10 px"))
         assertTrue(sink.events.isEmpty())
         env.run(instr(FunctionCode.SKIPDISP, intArg(0)))
-        env.run(stmt("PRINT_IMG \"a.webp\", 10px"))
+        env.run(stmt("PRINT_IMG \"a.webp\", 10 px"))
         assertEquals(listOf("img:a.webp|b=-|m=-|10px"), sink.events)
     }
 
     private companion object {
         /** 六条图形语句各取一种真实形态（与 [GRAPHICS_LINES] 逐条对应到 C# 的六个入口）。 */
         val GRAPHICS_LINES = listOf(
-            "PRINT_IMG \"a.webp\", 300px, 200px, 40px",
-            "PRINT_RECT 10px, 20px, 300px, 40px",
+            "PRINT_IMG \"a.webp\", 300 px, 200 px, 40 px",
+            "PRINT_RECT 10 px, 20 px, 300 px, 40 px",
             "PRINT_SPACE 50",
             "SETBGIMAGE bg.webp, 5, 200",
             "REMOVEBGIMAGE bg.webp",

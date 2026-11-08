@@ -50,6 +50,14 @@ fun evalStr(expr: Expr, ctx: EvalContext = TestContext()): String = expr.getStrV
 class FakeVariables : VariableReader {
     val ints = mutableMapOf<String, Long>()
     val strs = mutableMapOf<String, String>()
+
+    /**
+     * 浮点列（4.981 第三型）。与 ints/strs 同一份 [key] 口径（带下标时名字后接 `:i:j`）。
+     * 路次 g5 的 `{浮点}` 内插值与浮点下标用例要在**表达式层**读浮点变量，故这里补上
+     * [readFloat]；未登记的键按 0.0 返回，与 [readInt] 的 `?: 0L` 同一条假体口径
+     * （真实存储层的「未声明即报错」由 `core/vars/FloatVarRuntimeTest` 那一路钉）。
+     */
+    val floats = mutableMapOf<String, Double>()
     val keywords = mutableMapOf<Triple<String, Int, String>, Long>()
     val plusCalls = mutableListOf<String>()
     val constNames = mutableSetOf<String>()
@@ -64,6 +72,9 @@ class FakeVariables : VariableReader {
 
     override fun readStr(name: String, indices: LongArray): String =
         strs[key(name, indices)] ?: ""
+
+    override fun readFloat(name: String, indices: LongArray): Double =
+        floats[key(name, indices)] ?: 0.0
 
     override fun plusInt(name: String, indices: LongArray, delta: Long): Long {
         val k = key(name, indices)

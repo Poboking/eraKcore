@@ -1,6 +1,9 @@
 package com.eratw.port.core.compile
 
 import com.eratw.port.core.code.Opcode
+import com.eratw.port.core.err.CodeEE
+import com.eratw.port.core.err.erbDisplayLine
+import com.eratw.port.core.expr.ExprParseException
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.lexer.LexError
 import com.eratw.port.core.lexer.LogicalLineReader
@@ -8,6 +11,7 @@ import com.eratw.port.core.stmt.CorpusValidator
 import com.eratw.port.core.stmt.FuncLabelStmt
 import com.eratw.port.core.stmt.LineParser
 import com.eratw.port.core.stmt.SharpStmt
+import com.eratw.port.core.stmt.StmtParseException
 import com.eratw.port.core.stmt.Statement
 import java.nio.file.Files
 import java.nio.file.Path
@@ -32,6 +36,23 @@ import java.nio.file.Path
  * 一律计为新增回归**；报告按「降级规则拒绝 / 实现崩溃 / 事件入口 / 读取失败」分栏，
  * 并给出失败语句的 FunctionCode 分布与最小复现（文件:行 + 语句原文）。
  * 禁止为绿灯跳过失败切片或缩小语料集。
+ *
+ * **A14（2026-11-05 lane compreadout）失败归因的判据来源换成结构化字段**：
+ * 旧 `toFailure` 用 `Regex("行:(-?\\d+)")` 从异常 message 里**刮回**行号，再去等
+ * `Statement.line`。这是把「给人看的文案」当「机器读的键」用，三处会断：
+ * ① 文案族前缀（`编译错误(函数:…, 行:…)`，出处 specs/error-texts.yaml 一路的改动面）形状一改，
+ *    正则静默返回 -1，归因当场全丢、闸读数照旧绿；
+ * ② 消息**基**一改（lane errtext5 把 `CompileError.kt:24` 接上唯一 1 基出口 `erbDisplayLine`，
+ *    本波合流头 `b44a4d91` 已含）后，刮到的是 1 基数、等的是 0 基 `Statement.line`，
+ *    **同一条失败指到下一条语句**（差一）；
+ * ③ 非 `CompileException` 的崩溃消息里只要碰巧含「行:N」，就会**假归因**。
+ * 现在判据 = [structuredLineOf]（`CompileException.line` / `CodeEE.line` / `LexError.lineNo` /
+ * `StmtParseException.line` / `ExprParseException.line`，全部 0 基）；负行号一律按「拿不到」处理
+ * （唯一例外是 `CompileException.line = -1` 的函数级语义 [LineSource.FUNCTION_LEVEL]），
+ * 拿不到位置字段就如实记 [LineSource.NO_STRUCTURED_LINE]（`line` 为 -1 或如实回落的当前逻辑行，
+ * 由 [Failure.lineSource] 说明来源），**不**再回退成 `@函数` 头行冒充归因。
+ * 坐标系：[Failure.line] = 内部 0 基，[Failure.displayLine] = 对外 1 基（唯一出口 [erbDisplayLine]），
+ * 报告与 `failures.tsv` 两列并存并**标注几基**；归因可信度本身也进读数（报告 §4A）。
  */
 object CorpusCompileValidator {
 
@@ -69,23 +90,161 @@ object CorpusCompileValidator {
     const val CAT_EVENT = "事件入口合成"
     const val CAT_READ = "文件读取失败"
 
+    /**
+     * 失败/解析失败行号的**来源**（读数口径；A14 归因改造，2026-11-05 lane compreadout）。
+     *
+     * 立这一列的原因：`-1` 原先同时表示三件事 —— ①异常自己声明「函数级错误、无源行」；
+     * ②该臂**根本拿不到**结构化行号（非 CompileException 的崩溃、文件读取失败、事件入口）；
+     * ③曾经用正则从 message 里刮行号、刮不到才落 -1。三者读数一样、归因可信度完全不同，
+     * 表格上看不出哪一条是「查无」哪一条是「根本没查」。
+     *
+     * [structured] = true 表示行号取自异常对象自带的字段**且字段非负**；唯一例外是
+     * [FUNCTION_LEVEL]（`CompileException.line = -1`）—— 那是异常自己声明「函数级错误、
+     * 无源行」的**语义**，不是缺读数，故仍算已声明。
+     * 其余异常（`CodeEE` / `LexError` / `StmtParseException` / `ExprParseException`）的
+     * **负行号一律按「无结构化行号」处理**（[structuredLineOf] 返回 null 或
+     * [NO_STRUCTURED_LINE]）：不许把 -1 记成「有结构化行号」，否则 §4A 的
+     * 「有结构化行号 / 无结构化行号」两栏会被 -1 掺假。
+     * false 表示**该臂没有任何结构化行号**，此时 [Failure.line] 不取自异常字段
+     * （-1，或调用点如实回落的「当前逻辑行」），绝不再回退成切片头行 —— 伪装成归因成功。
+     *
+     * 坐标系：所有结构化字段（`CompileException.line` / `CodeEE.line` / `Statement.line` /
+     * `LexError.lineNo` / `StmtParseException.line` / `ExprParseException.line`）都是**内部 0 基**，
+     * 给人读的 1 基只走 [erbDisplayLine]（口径出处 `core/err/CodeEE.kt` 的 displayLine 说明）。
+     */
+    enum class LineSource(val label: String, val structured: Boolean) {
+        /** `CompileException.line >= 0`（0 基，指向切片里的语句）。 */
+        COMPILE_EXCEPTION("CompileException.line(0基)", true),
+
+        /** `CompileException.line == -1`：异常自己声明的函数级错误（重名 / GOTO 目标缺失），无源行是**语义**而非缺读数。 */
+        FUNCTION_LEVEL("CompileException.line=-1(函数级)", true),
+
+        /** `CodeEE.line`（0 基，运行期错误穿过编译面时）。 */
+        CODEEE("CodeEE.line(0基)", true),
+
+        /** `LexError.lineNo`（0 基）。 */
+        LEX_ERROR("LexError.lineNo(0基)", true),
+
+        /** `StmtParseException.line`（0 基；其 message 里的「行:N」是 1 基，两者差一）。 */
+        STMT_PARSE("StmtParseException.line(0基)", true),
+
+        /** `ExprParseException.line`（0 基）。 */
+        EXPR_PARSE("ExprParseException.line(0基)", true),
+
+        /** 非上述类型（实现崩溃的裸异常 / 任何不带位置的异常）：**无结构化行号**。 */
+        NO_STRUCTURED_LINE("无结构化行号", false),
+
+        /** 事件入口合成失败：合成体没有源行，-1 是口径而不是漏读。 */
+        EVENT_ENTRY("事件入口(无源行)", false),
+
+        /** 文件读取失败：IO 异常没有行概念。 */
+        FILE_READ("读取失败(无源行)", false),
+    }
+
+    /**
+     * 取异常自带的**结构化**行号（A14 归因改造的核心判据来源）。
+     *
+     * 只认字段、不刮 message：文案通道（`specs/error-texts.yaml` 一族前缀串）与行号**基**都在动
+     * （`CompileException` 的消息基已由 lane errtext 改成 1 基 `erbDisplayLine(line)`，
+     * 而 `Statement.line` 恒 0 基 —— 旧实现按 message 里的「行:N」反查 `Statement.line`，
+     * 那一笔合进来就整体指错一行）。返回 null = 这个异常根本没有位置字段可读。
+     *
+     * **负行号口径**（各臂统一，不许各自一套）：`LexError.lineNo` = -1（无位置）按「拿不到」处理、
+     * 返回 null，不进 [LineSource.LEX_ERROR]；`StmtParseException.line` / `ExprParseException.line`
+     * 的 -1 同此（返回 null，调用点随即回落到当前逻辑行并标 [LineSource.NO_STRUCTURED_LINE]）；
+     * `CodeEE.line` = -1 折叠到同一语义，返回 `-1 to NO_STRUCTURED_LINE`（与 null 在调用点等价）。
+     * **唯一**把 -1 当「有结构化行号」的是 `CompileException.line = -1` → [LineSource.FUNCTION_LEVEL]：
+     * 那是异常**自己声明**的函数级语义（重名 / GOTO 目标缺失），不是缺读数。
+     * 把 -1 记成 STMT_PARSE/EXPR_PARSE 会让 §4A 的「有结构化行号」栏被 -1 掺假。
+     */
+    fun structuredLineOf(e: Throwable): Pair<Int, LineSource>? = when (e) {
+        is CompileException ->
+            if (e.line >= 0) e.line to LineSource.COMPILE_EXCEPTION else e.line to LineSource.FUNCTION_LEVEL
+        is CodeEE -> if (e.line >= 0) e.line to LineSource.CODEEE else e.line to LineSource.NO_STRUCTURED_LINE
+        is LexError -> if (e.lineNo >= 0) e.lineNo to LineSource.LEX_ERROR else null
+        is StmtParseException -> if (e.line >= 0) e.line to LineSource.STMT_PARSE else null
+        is ExprParseException -> if (e.line >= 0) e.line to LineSource.EXPR_PARSE else null
+        else -> null
+    }
+
+    /**
+     * **旧实现**的判据来源（正则刮 message），只保留给「改前 vs 改后」对账与防假闸用例复现差一。
+     * 生产路径（[toFailure]）一律不再调用它。
+     */
+    fun legacyScrapedLine(message: String): Int =
+        Regex("行:(-?\\d+)").find(message)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+
     class Failure(
         val file: String,
+        /**
+         * **内部 0 基**行下标（[lineSource] 说明它的来源与可信度）；-1 = 无源行。
+         *
+         * 给人读的那一列走 [displayLine]（1 基，唯一出口 [erbDisplayLine]）——
+         * 直接把本字段打在报告上会让读者数错一行（0 基下标 N = 物理第 N+1 行）。
+         */
         val line: Int,
         val function: String,
         val message: String,
-        /** 归因语句的 FunctionCode（按 CompileException 行号在切片语句里反查；查不到为 null）。 */
+        /**
+         * 归因语句的 FunctionCode（按**异常自带的结构化行号** [line] 在切片语句里反查；
+         * 查不到 / 无结构化行号 = null，进报告的 `(未知)` 桶）。
+         */
         val stmtCode: String? = null,
         /** 归因语句原文（Statement.raw，含前导标记，报告里截断展示）。 */
         val stmtRaw: String? = null,
         /** 归因分栏，见 CAT_* 常量。 */
         val category: String = CAT_RULE,
+        /** 行号来源与可信度（[LineSource]）；无结构化行号时 [line] 恒 -1，不再伪装成切片头行。 */
+        val lineSource: LineSource = LineSource.NO_STRUCTURED_LINE,
+        /** 所在 `@函数` 头行的 0 基下标：仅作上下文定位列，**不参与**归因，也不填进 [line]。 */
+        val sliceLine: Int = -1,
+        /** 切片里与 [line] 同步行号的语句条数（>1 = 归因有歧义，读数单列暴露）。 */
+        val stmtHitCount: Int = 0,
     ) {
-        /** 分组签名：剥掉 CompileException 前缀里的函数名/行号，数字归一，防止签名爆炸。 */
-        val signature: String by lazy {
-            val stripped = message.replace(Regex("^编译错误\\([^)]*\\):\\s*"), "")
-                .replace(Regex("^事件入口:\\s*"), "")
-            stripped.replace(Regex("\\d+"), "#").take(120)
+        /** 1 基展示行号（[line] < 0 时原样返回负数，判据同 [com.eratw.port.core.err.CodeEE.displayLine]）。 */
+        val displayLine: Int get() = erbDisplayLine(line)
+
+        /** 本条读数是否有结构化行号可背书（false = 「无结构化行号」，不是「第 -1 行」）。 */
+        val hasStructuredLine: Boolean get() = lineSource.structured
+
+        /** 归因成功 = 结构化行号在切片语句里命中了具体语句。 */
+        val attributed: Boolean get() = stmtCode != null
+
+        /**
+         * 分组签名：剥掉异常消息的前缀（函数名/行号所在），数字归一，防止签名爆炸。
+         *
+         * [signaturePrefixStripped] 把「前缀到底认没认出来」变成读数：文案族一改、前缀形状一变，
+         * 旧实现是**静默**把整条带函数名与行号的消息当签名（签名当场碎成一条一份），
+         * 现在报告 §4A 的「签名前缀未剥离」条数会直接跳出来。
+         */
+        private val sigPair: Pair<String, Boolean> by lazy { stripPrefix(message) }
+
+        val signature: String get() = sigPair.first
+
+        /** message 是否命中已知前缀族并被剥掉（false = 前缀认不出来，签名里可能混着函数名/行号）。 */
+        val signaturePrefixStripped: Boolean get() = sigPair.second
+
+        private companion object {
+            /** 已知前缀族（编译错误 / 事件入口）；顺序即尝试顺序。 */
+            val PREFIXES = listOf(
+                Regex("^编译错误\\([^)]*\\):\\s*"),
+                Regex("^事件入口:\\s*"),
+            )
+
+            fun stripPrefix(msg: String): Pair<String, Boolean> {
+                var body = msg
+                var stripped = false
+                for (p in PREFIXES) {
+                    val m = p.find(body)
+                    if (m != null) {
+                        body = body.removeRange(m.range)
+                        stripped = true
+                        break
+                    }
+                }
+                val norm = body.replace(Regex("\\d+"), "#")
+                return norm.take(120) to stripped
+            }
         }
     }
 
@@ -100,6 +259,12 @@ object CorpusCompileValidator {
         /** 含解析失败行而被跳过的函数切片数（结构不可信，不计入编译成功率分母）。 */
         var parseFailures = 0
         var parseFailureLines = 0
+
+        /** A14：解析失败行里行号取自**结构化字段**（LexError.lineNo / 异常自带 line）的条数。 */
+        var parseFailureLinesStructured = 0
+
+        /** A14：行号只是「当前逻辑行的行号」（异常没带位置字段）的条数 —— 与上一条互补，和 [parseFailureLines] 恒等。 */
+        var parseFailureLinesUnstructured = 0
         val successes = mutableListOf<String>()
         val failures = mutableListOf<Failure>()
         var elapsedMs = 0L
@@ -132,6 +297,38 @@ object CorpusCompileValidator {
         /** 编译尝试切片总数 = 成功 + 失败（基线分母口径）。 */
         val slicesTotal: Int get() = functions + failures.size
 
+        // ---- A14 归因读数（全部**派生**自 failures 本体，不与明细表对不上账）----
+        /** 有结构化行号可读的失败条数。 */
+        val structuredLineFailures: Int get() = failures.count { it.hasStructuredLine }
+
+        /** 无结构化行号的失败条数（如实记，不伪装成切片头行）。 */
+        val unstructuredLineFailures: Int get() = failures.size - structuredLineFailures
+
+        /** 归因成功（结构化行号在切片语句里命中）的条数。 */
+        val attributedFailures: Int get() = failures.count { it.attributed }
+
+        /** 有结构化行号、但切片语句里查无此行的条数（旧口径也归 `(未知)`，两者要能分开）。 */
+        val lineMissFailures: Int get() = failures.count { it.line >= 0 && it.stmtHitCount == 0 }
+
+        /** 同一行号命中 ≥2 条语句（归因有歧义）的条数。 */
+        val multiHitFailures: Int get() = failures.count { it.stmtHitCount > 1 }
+
+        /** `(未知)` 桶条数 = stmtCode 为空的失败数（与 [failureByCode] 的 `(未知)` 恒等）。 */
+        val unknownCodeFailures: Long get() = failureByCode["(未知)"] ?: 0L
+
+        /** 签名前缀认不出来（消息形状换了文案族）的条数 —— 文案漂移的响亮读数。 */
+        val unstrippedSignatures: Int get() = failures.count { !it.signaturePrefixStripped }
+
+        /** 归因成功率（分母 = 失败条数；0 条失败时按 100% 报，同时在报告里标注分母 0）。 */
+        val attributionRatePercent: Double get() =
+            if (failures.isEmpty()) 100.0 else attributedFailures * 100.0 / failures.size
+
+        /** 行号来源分布（来源标签 → 条数，保持首见序）。 */
+        val failureByLineSource: LinkedHashMap<String, Long>
+            get() = LinkedHashMap<String, Long>().also { m ->
+                failures.forEach { m.merge(it.lineSource.label, 1L, Long::plus) }
+            }
+
         /**
          * 契约 R8（CONTRACT-M2-E2E §5，必修）：**解析失败必须参与判闸**。
          * 旧实现只查 `failures`，解析失败走 `parseFailures++` 毒化切片后直接不进分母，
@@ -145,17 +342,37 @@ object CorpusCompileValidator {
         fun ok(): Boolean = failures.isEmpty() && parseFailures == 0 && parseFailureLines == 0 &&
             parseGroups.values.none { it.verdict == CorpusCompileValidator.VERDICT_UNCLASSIFIED }
 
-        /** 记录一条解析失败行（全量计数 + 归因签名 + R9 分栏）。[newSlice]=true 时该组切片数 +1。 */
-        fun recordParseFailure(message: String, file: String, line: Int, text: String, newSlice: Boolean) {
+        /**
+         * 记录一条解析失败行（全量计数 + 归因签名 + R9 分栏）。[newSlice]=true 时该组切片数 +1。
+         *
+         * A14：[errorType] 与 [lineSource] 是**结构化**读数（异常类名 / 行号来源字段），
+         * 不再只靠消息串里的「词法错误」前缀区分形态 —— 文案族一改，类型列与来源列仍然把
+         * 「这是 LexError 还是解析异常」「行号取自哪个字段」摆在报告里。
+         */
+        fun recordParseFailure(
+            message: String,
+            file: String,
+            line: Int,
+            text: String,
+            newSlice: Boolean,
+            errorType: String = "",
+            lineSource: LineSource = LineSource.NO_STRUCTURED_LINE,
+        ) {
             parseFailureLines++
+            if (lineSource.structured) parseFailureLinesStructured++ else parseFailureLinesUnstructured++
             val base = CorpusCompileValidator.parseSignature(message)
             val ident = CorpusCompileValidator.undefIdentifier(message)
-            val (verdict, reason) = classify(base, ident)
+            val (verdict, reason) = classify(base, ident, text)
             val sig = if (reason.isEmpty()) base else "$base [$reason]"
             val g = parseGroups.getOrPut(sig) { ParseGroup(sig, verdict, reason) }
             g.lines++
             if (newSlice) g.slices++
-            if (g.sample.isEmpty()) g.sample = "$file:$line | ${text.take(160)}"
+            if (errorType.isNotEmpty()) g.types.merge(errorType, 1, Int::plus)
+            g.lineSources.merge(lineSource.label, 1, Int::plus)
+            // 样本行号给 1 基（人读的那一列），括号里留 0 基内部下标，读者不会数错行
+            if (g.sample.isEmpty()) {
+                g.sample = "$file:${erbDisplayLine(line)}(1基; 0基=$line) | ${text.take(160)}"
+            }
             if (ident != null) {
                 g.identifierCount++
                 if (g.identifiers.size < CorpusCompileValidator.ID_CAP) g.identifiers.add(ident)
@@ -166,8 +383,8 @@ object CorpusCompileValidator {
          * 由 [compile] 注入（需要 prescan 的声明名册才能证明「原版也拒」）；
          * 未注入时退回到 [verdictOf] 的保守分栏。返回 (R9 分栏, 子类标签)。
          */
-        var classify: (signature: String, identifier: String?) -> Pair<String, String> =
-            { sig, _ -> CorpusCompileValidator.verdictOf(sig) to "" }
+        var classify: (signature: String, identifier: String?, text: String) -> Pair<String, String> =
+            { sig, _, _ -> CorpusCompileValidator.verdictOf(sig) to "" }
     }
 
     /** 解析失败残值组：一类根因（×一个子类）一行表。 */
@@ -179,6 +396,19 @@ object CorpusCompileValidator {
         /** 组内不同标识符（只留前 [ID_CAP] 个做审计线索，计数为全量）。 */
         val identifiers = LinkedHashSet<String>()
         var identifierCount = 0
+
+        /** A14：**异常类名** → 条数（结构化读数，不靠 message 里的「词法错误」前缀串分辨形态）。 */
+        val types = LinkedHashMap<String, Int>()
+
+        /** A14：行号来源标签 → 条数（见 [LineSource]）。 */
+        val lineSources = LinkedHashMap<String, Int>()
+
+        /** 类型分布的展示串（报告列用；空 = 该臂没带异常类型，读数如实留空）。 */
+        val typeSummary: String get() = if (types.isEmpty()) "-" else types.entries.joinToString(", ") { "${it.key}=${it.value}" }
+
+        /** 行号来源分布的展示串。 */
+        val lineSourceSummary: String get() =
+            if (lineSources.isEmpty()) "-" else lineSources.entries.joinToString(", ") { "${it.key}=${it.value}" }
     }
 
     // ---------------------------------------------------------------------
@@ -240,7 +470,17 @@ object CorpusCompileValidator {
         pre: CorpusValidator.Prescan,
         signature: String,
         identifier: String?,
+        text: String = "",
     ): Pair<String, String> {
+        // `[[…]]` = rename 键：原版在**装载期的文本替换**阶段处理（`UseRenameFile` 且文本里
+        // 同时有 `[[`/`]]` 才做，`EmueraConsole.cs:2174`），键对不上字典时词法层直接抛
+        // （`LexicalAnalyzer.cs:808-826`：`RenameDic == null` ⇒ `UnexpectedCharacter("[[")`；
+        // 有字典但 `Find("]]")` 异常 ⇒ `EmptyTwoSBrackets`/`MissingTwoSBrackets`/`CanNotRenameKey`）
+        // ⇒ 该行原版同样装载失败，不是我们侧的缺口。4.981 的第三方口上包正是引用了
+        // 4.981 `CSV/_Rename.csv` 里已不存在的键（4.980 的同一份 CSV 有 `351,油炸跳蛋`）。
+        if (text.contains("[[") && signature.contains("字句解析中に予期しない文字")) {
+            return VERDICT_ORIGINAL_REJECTS to "未映射 rename 键 [[...]](原版 LexicalAnalyzer.cs:808-826 同拒)"
+        }
         if (identifier == null || !signature.contains("未定义的标识符")) return verdictOf(signature) to ""
         val up = identifier.uppercase()
         val privateElsewhere = pre.funcVars.values.any { it.containsKey(up) }
@@ -257,8 +497,14 @@ object CorpusCompileValidator {
 
     private const val SAMPLE_CAP = 200
 
-    /** @函数 切片（内部）。 */
-    private class Slice(
+    /**
+     * @函数 切片。
+     *
+     * internal 而非 private：归因判据（[toFailure]）要能被语料/编译面用例**逐条直喂**，
+     * 不必靠造一份 mini 语料去间接触发某条文案（A14 防假闸要求）。
+     * [line] = `@函数` 头行的 **0 基**下标（`FuncLabelStmt.line` ← `LogicalLine.lineNo`）。
+     */
+    internal class Slice(
         val key: String,
         val params: Int,
         val isMethod: Boolean,
@@ -279,7 +525,7 @@ object CorpusCompileValidator {
         val pre = CorpusValidator.prescan(files)
         val isMethod = pre.funcTypes.keys.mapTo(HashSet()) { it.uppercase() }
         // 残值归因需要 prescan 的声明名册（判断"别处做过私有 #DIM" vs "哪里都没声明"）
-        result.classify = { sig, id -> classifyWithPrescan(pre, sig, id) }
+        result.classify = { sig, id, text -> classifyWithPrescan(pre, sig, id, text) }
 
         // **与语句层 CorpusValidator.run 同一装置、同一实例拓扑**：整轮共用一个 LineParser
         // + 一个 ScopedResolver。私有变量作用域由 LineParser 解析 `@` 行时回调
@@ -298,7 +544,21 @@ object CorpusCompileValidator {
             val bytes = try {
                 Files.readAllBytes(path)
             } catch (e: Exception) {
-                addFailure(result, Failure(rel, -1, "", "读取失败: ${e.message}", category = CAT_READ))
+                // A14：IO 异常没有行概念 ⇒ 行号如实记「无结构化行号」（-1），不再让它和
+                // 「函数级错误 -1」「刮不到行号 -1」共用同一个不可分辨的读数。
+                // 旧实现只取 e.message（异常为 null message 时整条读数退化成「读取失败: null」），
+                // 现在把异常类名也留下。
+                addFailure(
+                    result,
+                    Failure(
+                        file = rel,
+                        line = -1,
+                        function = "",
+                        message = "读取失败: ${e::class.simpleName}: ${e.message}",
+                        category = CAT_READ,
+                        lineSource = LineSource.FILE_READ,
+                    ),
+                )
                 continue
             }
             if (bytes.indexOf(0.toByte()) in 0 until minOf(bytes.size, 8192)) continue
@@ -311,15 +571,35 @@ object CorpusCompileValidator {
             var poisoned = false                 // 本切片含解析失败行 → 结构不可信，不编译
             var poisonSampled = false
 
-            /** 记一条解析失败；@ 之前的散行同样计入（旧实现只在 curKey!=null 时计数，会漏报）。 */
-            fun fail(lineNo: Int, msg: String, text: String) {
+            /**
+             * 记一条解析失败；@ 之前的散行同样计入（旧实现只在 curKey!=null 时计数，会漏报）。
+             *
+             * A14：[errorType] / [lineSource] 把「这条失败是什么异常、行号从哪个字段来」变成结构化读数，
+             * 不再只有 message 前缀串里的「词法错误」四个字能分辨形态（文案一改就串栏）。
+             * [line] 口径 = **0 基**内部下标（`LexError.lineNo` / `LogicalLine.lineNo` 同基）；
+             * 样本串里给人看的那一列走 [erbDisplayLine]（1 基）。
+             */
+            fun fail(
+                lineNo: Int,
+                msg: String,
+                text: String,
+                errorType: String = "",
+                lineSource: LineSource = LineSource.NO_STRUCTURED_LINE,
+            ) {
                 val firstOfSlice = !poisoned
                 if (!poisonSampled && result.parseFailureSamples.size < SAMPLE_CAP) {
                     val where = if (curKey != null) "[$curKey] " else "[@前散行] "
-                    result.parseFailureSamples.add("$rel:$lineNo $where$msg | ${text.take(120)}")
+                    result.parseFailureSamples.add(
+                        "$rel:${erbDisplayLine(lineNo)}(1基; 0基=$lineNo) $where${if (errorType.isEmpty()) "" else "$errorType "}$msg | ${text.take(120)}",
+                    )
                     poisonSampled = true
                 }
-                result.recordParseFailure(msg, rel, lineNo, text, newSlice = firstOfSlice && curKey != null)
+                result.recordParseFailure(
+                    msg, rel, lineNo, text,
+                    newSlice = firstOfSlice && curKey != null,
+                    errorType = errorType,
+                    lineSource = lineSource,
+                )
                 poisoned = true
             }
 
@@ -346,7 +626,16 @@ object CorpusCompileValidator {
                     reader.readLogicalLine() ?: break
                 } catch (e: LexError) {
                     // 词法错误在语句层同样是 failures 一条（CorpusValidator.run），此处必须同计数口径
-                    fail(e.lineNo, "词法错误 ${e.message}", "")
+                    // A14：行号取 `e.lineNo`（0 基字段，本来就对）；异常类型与行号来源并进结构化读数。
+                    // LexError 的 filename/column/LangKey 三个字段本装置不读（口径见交付报告），
+                    // 这里至少把「它是 LexError、行号来自 lineNo」写进表里，不再靠「词法错误」四个字。
+                    fail(
+                        e.lineNo,
+                        "词法错误 ${e.message}",
+                        "",
+                        errorType = e::class.simpleName ?: "LexError",
+                        lineSource = if (e.lineNo >= 0) LineSource.LEX_ERROR else LineSource.NO_STRUCTURED_LINE,
+                    )
                     continue
                 }
                 if (pp.process(line.content, pre.macroNames)) continue
@@ -355,7 +644,17 @@ object CorpusCompileValidator {
                     parser.parseLogicalLine(line)
                 } catch (e: Exception) {
                     // 解析失败行若静默丢弃，块语句会错位并连锁误报——毒化整个切片
-                    fail(line.lineNo, e.message ?: "解析失败", line.content)
+                    // A14：行号优先取异常自带的结构化字段（StmtParseException.line /
+                    // ExprParseException.line，均 0 基）；异常不带位置时才回落到当前逻辑行的
+                    // lineNo，并把来源如实记成 NO_STRUCTURED_LINE（两者的可信度不是一回事）。
+                    val structured = structuredLineOf(e)
+                    fail(
+                        structured?.first ?: line.lineNo,
+                        e.message ?: "解析失败",
+                        line.content,
+                        errorType = e::class.simpleName ?: "",
+                        lineSource = structured?.second ?: LineSource.NO_STRUCTURED_LINE,
+                    )
                     continue
                 } ?: continue
                 if (stmt is SharpStmt) continue           // # 行不产生指令（#FUNCTION 已在预扫描）
@@ -400,18 +699,45 @@ object CorpusCompileValidator {
             if (!done.add(key)) continue
             try {
                 // A7：#FUNCTIONS（str 方法）RETURNF 走 `_RETS`；类型来源 = prescan funcTypes。
-                val returnsStr = pre.funcTypes[s.key.uppercase()] == OperandType.STR
-                val fb = c.compileFunction(FuncSig(key, s.params, s.isMethod, returnsStr), s.stmts, known)
+                // 4.981 #FUNCTIONF（浮点方法）走 `_RETF`，同一来源。
+                val funcType = pre.funcTypes[s.key.uppercase()]
+                val returnsStr = funcType == OperandType.STR
+                val returnsFloat = funcType == OperandType.FLOAT
+                val fb = c.compileFunction(
+                    FuncSig(key, s.params, s.isMethod, returnsStr, returnsFloat = returnsFloat),
+                    s.stmts, known,
+                )
                 result.functions++
                 result.instructions += fb.instructionCount
                 result.slotTotal += fb.slotCount
                 result.successes.add("${s.file}:${s.line} $key")
             } catch (e: CompileException) {
-                addFailure(result, toFailure(s, key, e.message ?: "编译失败", CAT_RULE))
-            } catch (e: Exception) {
+                // A14：归因判据 = `e.line`（0 基**结构化字段**），不再从 message 里刮「行:N」。
                 addFailure(
                     result,
-                    toFailure(s, key, "内部错误: ${e::class.simpleName}: ${e.message}", CAT_CRASH),
+                    toFailure(
+                        s,
+                        key,
+                        e.message ?: "编译失败",
+                        CAT_RULE,
+                        structuredLine = e.line,
+                        lineSource = if (e.line >= 0) LineSource.COMPILE_EXCEPTION else LineSource.FUNCTION_LEVEL,
+                    ),
+                )
+            } catch (e: Exception) {
+                // 非 CompileException 的崩溃：能拿到结构化行号就拿（CodeEE / LexError / 解析异常
+                // 都可能穿过编译面），拿不到就**如实**记 -1 + NO_STRUCTURED_LINE。
+                val st = structuredLineOf(e)
+                addFailure(
+                    result,
+                    toFailure(
+                        s,
+                        key,
+                        "内部错误: ${e::class.simpleName}: ${e.message}",
+                        CAT_CRASH,
+                        structuredLine = st?.first,
+                        lineSource = st?.second ?: LineSource.NO_STRUCTURED_LINE,
+                    ),
                 )
             }
         }
@@ -426,7 +752,19 @@ object CorpusCompileValidator {
                 result.eventEntries++
                 result.instructions += fb.instructionCount
             } catch (e: CompileException) {
-                addFailure(result, Failure("*", -1, key, "事件入口: ${e.message}", category = CAT_EVENT))
+                // 合成入口没有源行：-1 属口径而非漏读，用 lineSource 说清楚。
+                // （A14 旧实现同样给 -1，但它和「刮不到行号」共用同一个读数，无法区分。）
+                addFailure(
+                    result,
+                    Failure(
+                        file = "*",
+                        line = -1,
+                        function = key,
+                        message = "事件入口: ${e.message}",
+                        category = CAT_EVENT,
+                        lineSource = LineSource.EVENT_ENTRY,
+                    ),
+                )
             }
         }
         result.globalSlots = layout.intSlots.size + layout.strSlots.size
@@ -440,18 +778,47 @@ object CorpusCompileValidator {
         return result
     }
 
-    /** 按 CompileException 内嵌行号在切片语句里反查归因语句（Statement.raw 提供原文）。 */
-    private fun toFailure(slice: Slice, key: String, message: String, category: String): Failure {
-        val ln = Regex("行:(-?\\d+)").find(message)?.groupValues?.get(1)?.toIntOrNull() ?: -1
+    /**
+     * 归因一条编译面失败：**判据来源 = 异常自带的结构化行号**（[structuredLine]），
+     * 按它在切片语句里反查归因语句（`Statement.raw` 给原文）。
+     *
+     * **不再**从 message 里正则刮「行:N」。旧写法（[legacyScrapedLine] 保留作对账用）的坑：
+     * 1. 坐标系会漂 —— `CompileException.line` 恒 0 基，而它的 message 在 lane errtext 那笔
+     *    接了唯一 1 基出口 [erbDisplayLine] 之后变成 1 基；拿 1 基的数去等 0 基的
+     *    `Statement.line`，中间那条语句一存在就**指到下一条**（差一），不存在就整条掉进 `(未知)`。
+     * 2. 文案一改（`specs/error-texts.yaml` 那一族前缀串）正则静默失效，归因当场全丢，
+     *    而闸读数照旧绿 —— 读数失真不报警。
+     * 3. 假归因 —— 非 CompileException 的崩溃消息里只要**碰巧**出现「行:N」（嵌套异常转述、
+     *    语句原文自带这几个字），旧写法会把那个数字当行号查下去。
+     *
+     * [structuredLine] = null（该臂没有位置字段）时：[Failure.line] 如实记 -1、
+     * [LineSource.NO_STRUCTURED_LINE]，**不**回退成切片头行 [Slice.line]；
+     * 切片头行另存 [Failure.sliceLine] 供定位上下文，两列在报告里分开标注。
+     *
+     * internal 而非 private：语料/编译面用例要能直喂各种消息形状（防假闸那枚用例）。
+     */
+    internal fun toFailure(
+        slice: Slice,
+        key: String,
+        message: String,
+        category: String,
+        structuredLine: Int?,
+        lineSource: LineSource,
+    ): Failure {
+        val ln = structuredLine ?: -1
+        val hits = if (ln >= 0) slice.stmts.count { it.line == ln } else 0
         val stmt: Statement? = if (ln >= 0) slice.stmts.firstOrNull { it.line == ln } else null
         return Failure(
             file = slice.file,
-            line = if (ln >= 0) ln else slice.line,
+            line = ln,
             function = key,
             message = message,
             stmtCode = stmt?.code?.name,
             stmtRaw = stmt?.raw?.take(160),
             category = category,
+            lineSource = lineSource,
+            sliceLine = slice.line,
+            stmtHitCount = hits,
         )
     }
 
@@ -534,6 +901,7 @@ object CorpusCompileValidator {
         appendGate(sb, result)
         appendCategory(sb, result)
         appendCodeDist(sb, result)
+        appendAttribution(sb, result)
         appendSignatures(sb, result, corpusRoot)
         appendPoolMarker(sb, result)
         appendParseFailures(sb, result)
@@ -541,24 +909,39 @@ object CorpusCompileValidator {
         Files.writeString(abs.resolve("summary.md"), sb.toString())
 
         // failures.tsv 全量明细（复现/二次分析用）
+        // A14：line 拆成 **line0（内部 0 基）+ line1（给人读 1 基）** 两列，再带行号来源
+        // lineSource、归因命中数 stmtHits 与上下文列 sliceLine0（`@函数` 头行，不参与归因）。
+        // 旧的单一 `line` 列同时混装过「0 基真值」「切片头行」「-1」三种语义，读表人分不出来。
         val tsv = StringBuilder()
-        tsv.appendLine("file\tline\tfunction\tcategory\tstmtCode\tsignature\tmessage\tstmtRaw")
+        tsv.appendLine(
+            "file\tline0\tline1\tlineSource\tattributed\tstmtHits\tsliceLine0\tsliceLine1\t" +
+                "function\tcategory\tstmtCode\tsignature\tprefixStripped\tmessage\tstmtRaw",
+        )
         for (f in result.failures) {
             tsv.appendLine(
-                listOf(f.file, f.line, f.function, f.category, f.stmtCode ?: "", f.signature, f.message, f.stmtRaw ?: "")
-                    .joinToString("\t") { it.toString().replace('\t', ' ').replace('\n', ' ') },
+                listOf(
+                    f.file, f.line, f.displayLine, f.lineSource.label,
+                    if (f.attributed) "yes" else "no", f.stmtHitCount,
+                    f.sliceLine, erbDisplayLine(f.sliceLine),
+                    f.function, f.category, f.stmtCode ?: "", f.signature,
+                    if (f.signaturePrefixStripped) "yes" else "no",
+                    f.message, f.stmtRaw ?: "",
+                ).joinToString("\t") { it.toString().replace('\t', ' ').replace('\n', ' ') },
             )
         }
         Files.writeString(abs.resolve("failures.tsv"), tsv.toString())
 
         // parse-failures.tsv 解析失败全量签名明细（残值归因审计用；每组一行）
         val psv = StringBuilder()
-        psv.appendLine("signature\tverdict\treason\tslices\tlines\tidentifierTotal\tidentifierSamples\tsample")
+        psv.appendLine(
+            "signature\tverdict\treason\tslices\tlines\texceptionTypes\tlineSources\t" +
+                "identifierTotal\tidentifierSamples\tsample",
+        )
         for (g in result.parseGroups.values.sortedByDescending { it.lines }) {
             psv.appendLine(
                 listOf(
-                    g.signature, g.verdict, g.reason, g.slices, g.lines, g.identifierCount,
-                    g.identifiers.joinToString(","), g.sample,
+                    g.signature, g.verdict, g.reason, g.slices, g.lines, g.typeSummary, g.lineSourceSummary,
+                    g.identifierCount, g.identifiers.joinToString(","), g.sample,
                 ).joinToString("\t") { it.toString().replace('\t', ' ').replace('\n', ' ') },
             )
         }
@@ -676,17 +1059,82 @@ object CorpusCompileValidator {
             sb.appendLine()
             return
         }
-        sb.appendLine("| FunctionCode | 失败切片数 | 首个复现 |")
+        sb.appendLine("| FunctionCode | 失败切片数 | 首个复现（1 基行号） |")
         sb.appendLine("|---|---:|---|")
         val firstByCode = HashMap<String, Failure>()
         for (f in r.failures) firstByCode.putIfAbsent(f.stmtCode ?: "(未知)", f)
         for ((code, n) in r.failureByCode.entries.sortedByDescending { it.value }.take(topN)) {
             val f = firstByCode[code]
-            sb.appendLine("| $code | $n | ${f?.let { "${it.file}:${it.line}" } ?: "-"} |")
+            sb.appendLine("| $code | $n | ${f?.let { "${it.file}:${it.displayLine}(1基)" } ?: "-"} |")
         }
         sb.appendLine()
-        sb.appendLine("（\"(未知)\"= 函数级错误无法定位到具体语句行，或 CompileException 行号与切片语句不匹配）")
+        sb.appendLine("（\"(未知)\"= 该条失败没能归因到具体语句；A14 起这条桶要再拆两类，见 §4A：")
+        sb.appendLine("**无结构化行号**（异常压根不带位置字段，读数如实留 -1，不再拿 `@函数` 头行冒充）**vs** 有行号但切片语句里查无此行）")
         sb.appendLine()
+    }
+
+    /**
+     * §4A 归因读数（A14：判据从「正则刮 message」换成「读异常结构化字段」之后，
+     * 把归因本身的可信度也变成读数）。
+     *
+     * 坐标系声明写死在表头：[Failure.line] 一列 = **内部 0 基下标**（`CompileException.line` /
+     * `Statement.line` / `LexError.lineNo` 同基），给人数的 1 基那一列由唯一出口
+     * [erbDisplayLine] 换算，两列并排写在 `failures.tsv`（`line0` / `line1`）。
+     */
+    private fun appendAttribution(sb: StringBuilder, r: Result) {
+        sb.appendLine("## 4A. 归因读数（行号来源 / 坐标系 / 归因成功率）")
+        sb.appendLine()
+        sb.appendLine("- **坐标系**：`line0` = 内部 **0 基**行下标（异常字段原值，与 `Statement.line`、产物行号表同基）；")
+        sb.appendLine("  `line1` = **1 基**展示行号 = `erbDisplayLine(line0)`（全工程唯一一处 +1，见 `core/err/CodeEE.kt`）。")
+        sb.appendLine("  报告里**给人定位**的行（§4/§5/样本/复现）一律给 1 基并标注；`failures.tsv` 两列并存。")
+        sb.appendLine("- **判据来源**：异常自带的结构化行号字段（`CompileException.line` 等），**不**再从 message 里刮「行:N」。")
+        sb.appendLine("  旧写法在同一条失败上的读数见最后一行「旧口径对照」。")
+        sb.appendLine()
+        if (r.failures.isEmpty()) {
+            sb.appendLine("| 读数 | 值 |")
+            sb.appendLine("|---|---:|")
+            sb.appendLine("| 编译失败条数 | 0（分母 0：以下读数全部空集，不参与判闸，只证明本表口径已接上） |")
+            sb.appendLine("| 归因成功率 | 100.0%（0/0，空集） |")
+            sb.appendLine("| `(未知)` 条数 | ${r.unknownCodeFailures} |")
+            sb.appendLine("| 无结构化行号条数 | ${r.unstructuredLineFailures} |")
+            sb.appendLine("| 签名前缀未剥离条数 | ${r.unstrippedSignatures} |")
+            sb.appendLine()
+            sb.appendLine("> 全语料绿态失败 0 条时，旧的正则刮取路径**根本不进**（`toFailure` 无人调用），")
+            sb.appendLine("> 所以文案/行号基一改，本装置的归因能力是**当场静默失效**还是**下次红时才发现**，")
+            sb.appendLine("> 老读数看不出来。防假闸用例 = `CorpusCompileAttributionTest`（直喂消息形状，逐条读数级断言）。")
+            sb.appendLine()
+            return
+        }
+        sb.appendLine("| 读数 | 条数 | 说明 |")
+        sb.appendLine("|---|---:|---|")
+        sb.appendLine("| 编译失败条数 | ${r.failures.size} | 分母 |")
+        sb.appendLine("| 有结构化行号 | ${r.structuredLineFailures} | 行号取自异常字段（含函数级显式 -1） |")
+        sb.appendLine("| 无结构化行号 | ${r.unstructuredLineFailures} | 如实记 -1；**不**回退成 `@函数` 头行 |")
+        sb.appendLine("| 归因成功（命中切片语句） | ${r.attributedFailures} | stmtCode 非空 |")
+        sb.appendLine("| 归因成功率 | %.1f%% | 命中/失败条数 |".format(r.attributionRatePercent))
+        sb.appendLine("| 有行号但切片里查无此行 | ${r.lineMissFailures} | 合成语句 / 行号越界 |")
+        sb.appendLine("| 同一行号命中 ≥2 条语句 | ${r.multiHitFailures} | 归因有歧义（取首条，读数单列） |")
+        sb.appendLine("| (未知) 桶 | ${r.unknownCodeFailures} | 与 §4 分布表的 (未知) 行恒等 |")
+        sb.appendLine("| 签名前缀未剥离 | ${r.unstrippedSignatures} | >0 说明消息前缀文案族换了形状（§5 分组会碎） |")
+        // 旧口径对照：同一条失败、同一份 message，旧的正则刮取会得出什么读数
+        val legacyUnknown = r.failures.count { legacyScrapedLine(it.message) < 0 }
+        val legacyWrongTarget = r.failures.count { f ->
+            val ln = legacyScrapedLine(f.message)
+            ln >= 0 && (f.line < 0 || ln != f.line)
+        }
+        sb.appendLine("| 旧口径（正则刮 message）会掉进 (未知) | $legacyUnknown | 与上一行「无结构化行号」不一定相等 |")
+        sb.appendLine("| 旧口径会**刮到与结构化字段不同的行号** | $legacyWrongTarget | 差一/假归因的条数（见 §4A 末注） |")
+        sb.appendLine()
+        sb.appendLine("| 行号来源 | 条数 |")
+        sb.appendLine("|---|---:|")
+        for ((k, v) in r.failureByLineSource) sb.appendLine("| $k | $v |")
+        sb.appendLine()
+        if (r.unstructuredLineFailures > 0 || r.unstrippedSignatures > 0 || legacyWrongTarget > 0) {
+            sb.appendLine("> 末注：这三类读数**都不是**为了让表好看而合并过的 ——")
+            sb.appendLine("> 无结构化行号说明该臂压根拿不到位置；前缀未剥离说明文案形状变了（分组会碎）；")
+            sb.appendLine("> 旧口径刮到不同行号说明 message 基与字段基已经不一致（差一风险）。")
+            sb.appendLine()
+        }
     }
 
     private fun appendSignatures(sb: StringBuilder, r: Result, corpusRoot: Path?) {
@@ -702,7 +1150,13 @@ object CorpusCompileValidator {
             sb.appendLine("### ${list.size} × `${sig}`")
             sb.appendLine()
             sb.appendLine("- 分栏: ${sample.category}")
-            sb.appendLine("- 复现(最小样本): `${sample.file}:${sample.line}` 函数 `${sample.function}` 语句码 `${sample.stmtCode ?: "-"}`")
+            sb.appendLine(
+                "- 复现(最小样本): `${sample.file}:${sample.displayLine}`（**1 基**；内部 0 基下标 ${sample.line}，" +
+                    "行号来源 ${sample.lineSource.label}）函数 `${sample.function}` 语句码 `${sample.stmtCode ?: "-"}`",
+            )
+            if (sample.sliceLine >= 0) {
+                sb.appendLine("- 所在 @函数 头行: 第 ${erbDisplayLine(sample.sliceLine)} 行（1 基；上下文列，不参与归因）")
+            }
             if (sample.stmtRaw != null) sb.appendLine("- 语句原文: `${sample.stmtRaw}`")
             sb.appendLine("- 完整消息: `${sample.message}`")
             val absFile = if (sample.file == "*") sample.file
@@ -714,7 +1168,7 @@ object CorpusCompileValidator {
                 sb.appendLine("  ```")
             }
             if (list.size > 1) {
-                sb.appendLine("- 其余样本: " + list.filter { it !== sample }.take(3).joinToString("; ") { "${it.file}:${it.line}" })
+                sb.appendLine("- 其余样本: " + list.filter { it !== sample }.take(3).joinToString("; ") { "${it.file}:${it.displayLine}(1基)" })
             }
             sb.appendLine()
         }
@@ -761,17 +1215,19 @@ object CorpusCompileValidator {
         if (r.parseGroups.isEmpty()) {
             sb.appendLine("无残值（0 组 / 0 切片 / 0 行）。")
         } else {
-            sb.appendLine("| 归因分栏 | 子类 | 签名 | 切片 | 行 | 不同标识符 | 首个复现 |")
-            sb.appendLine("|---|---|---|---:|---:|---:|---|")
+            sb.appendLine("| 归因分栏 | 子类 | 签名 | 切片 | 行 | 异常类型(结构化) | 行号来源(0 基字段) | 不同标识符 | 首个复现（1 基行号） |")
+            sb.appendLine("|---|---|---|---:|---:|---|---|---:|---|")
             for (g in r.parseGroups.values.sortedByDescending { it.lines }) {
                 val ids = if (g.identifiers.isEmpty()) "-" else g.identifiers.joinToString(", ")
-                sb.appendLine("| ${g.verdict} | ${g.reason} | `${g.signature}` | ${g.slices} | ${g.lines} | ${g.identifierCount} | ${g.sample} <br>标识符样本: $ids |")
+                sb.appendLine("| ${g.verdict} | ${g.reason} | `${g.signature}` | ${g.slices} | ${g.lines} | ${g.typeSummary} | ${g.lineSourceSummary} | ${g.identifierCount} | ${g.sample} <br>标识符样本: $ids |")
             }
             sb.appendLine()
             val byVerdict = r.parseGroups.values.groupBy { it.verdict }.mapValues { e -> e.value.sumOf { it.lines } }
             sb.appendLine("| 分栏合计 | 行 |")
             sb.appendLine("|---|---:|")
             for ((k, v) in byVerdict) sb.appendLine("| $k | $v |")
+            sb.appendLine()
+            sb.appendLine("- 解析失败行的行号来源：结构化字段 ${r.parseFailureLinesStructured} 行 / 当前逻辑行回落 ${r.parseFailureLinesUnstructured} 行（两者相加 = 失败行 ${r.parseFailureLines}）")
         }
         sb.appendLine()
         if (r.parseFailureSamples.isNotEmpty()) {

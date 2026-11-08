@@ -1,0 +1,38 @@
+# rust-meta-parity 代价读数（2026-11-01，Haruki 机实测；下面是两批读数的原始输出行，数字未手写）
+#
+# 为什么要这份读数：`program.meta` 的深判据是**委托 JVM 真跑** `BootMetadata.read`
+# （freshness::meta_leg_via_jvm），于是 Rust 的 `check` 每次多一条子进程 + 一次全文侧车解析。
+# 这条腿没有任何产品开关：关掉它就是把 60 档「打包期放行、装机首启才暴露」放回盘上
+# （账见 tests/data/rust-sidecar-fuzz/kotlin-vs-rust.tsv 的清档说明）；能换掉腿的只有闸用的注入位
+# freshness::check_with_meta_leg ⇒ 所以下面「恒放行替身」那一列只能由测试量到，不是产品档位。
+#
+# A）库层三向对照（同一次跑里的墙钟；rc 是各腿自己的退出码）
+#   产出：cargo test --test meta_deep_parity dump_cost_readings -- --ignored --nocapture
+#   语料：小语料档 = tests/data/rust-sidecar-fuzz/corpus/ERB + seed 产物；
+#         全量语料档 = build/baseline/full（本机 gitignore 面，manifest 登记的 corpus-root 为真语料）
+
+A) 小语料档	Kotlin 腿 rc=0 WALL_MS=1919	Rust 腿（含委托 JVM 的深判据）rc=0 WALL_MS=951	Rust 腿（恒放行替身）rc=0 WALL_MS=334	委托净增 617 ms
+A) 小语料档·深判据拒档 mp-count-functions-minus1	Kotlin 腿 rc=1 WALL_MS=832	Rust 腿（含委托 JVM 的深判据）rc=1 WALL_MS=1863	Rust 腿（恒放行替身）rc=0 WALL_MS=368	委托净增 1495 ms
+A) 小语料档·深判据拒档 mp-trunc-head-only	Kotlin 腿 rc=1 WALL_MS=934	Rust 腿（含委托 JVM 的深判据）rc=1 WALL_MS=1474	Rust 腿（恒放行替身）rc=0 WALL_MS=643	委托净增 831 ms
+A) 全量语料档	Kotlin 腿 rc=0 WALL_MS=13742	Rust 腿（含委托 JVM 的深判据）rc=0 WALL_MS=25763	Rust 腿（恒放行替身）rc=0 WALL_MS=14068	委托净增 11695 ms
+#
+# B）CLI 两腿对照（能测到峰值内存的那一层）
+#   产出：bash tests/data/rust-meta-parity/run-cost.sh all（内部调 measure.ps1）
+#   口径警告：A) 的委托腿是**孙进程**，std::process 读不到它的 PeakWorkingSet64 ⇒ B) 里 Rust 的峰值
+#   是「不含孙 JVM」的下界，同形状的 Kotlin 进程峰值当上界。measure.ps1 必须在进程运行中轮询
+#   PeakWorkingSet64：WaitForExit 之后读回来是 0（本机 2026-11-01 实测）。
+
+B) small-kotlin  TOKENS=11  RC=0  WALL_MS=726  PEAK_WS_MB=56.8  PEAK_PRIV_MB=351
+B) small-rust  TOKENS=5  RC=0  WALL_MS=632  PEAK_WS_MB=5  PEAK_PRIV_MB=0.7
+B) full-kotlin  TOKENS=11  RC=0  WALL_MS=6832  PEAK_WS_MB=341  PEAK_PRIV_MB=533.9
+B) full-rust  TOKENS=5  RC=0  WALL_MS=10425  PEAK_WS_MB=65.9  PEAK_PRIV_MB=4.5
+#
+# 读数结论（不做跨批比较，只报同批差值）：
+#   A) 小语料档 0.334 s → 0.951 s（委托净增 617 ms）；全量语料档 14.068 s → 25.763 s
+#      （净增 11.695 s，同一批里 Kotlin 自己那一趟 13.742 s）⇒ 深判据的成本≈「把 Kotlin 的 check
+#      再跑一遍」，Rust 侧没长出额外的算法开销；拒档（腿要读到抛错）净增 0.83~1.5 s。
+#   B) 全量档 Kotlin 6.832 s / Rust 10.425 s，Rust 进程峰值 65.9 MiB（不含孙 JVM）
+#      vs Kotlin 341 MiB ⇒ Rust 侧常驻仍是小一个数量级，但**总账**要按 A) 那一列看。
+#   A/B 两批墙钟不可直接互比：A) 的 Rust 腿在同一进程里还要算 compiler-digest 与逐源 sha，
+#   两批的 JVM 冷启动状态也不同。
+

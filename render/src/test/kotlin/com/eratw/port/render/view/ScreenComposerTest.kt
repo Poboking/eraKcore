@@ -283,6 +283,9 @@ class ScreenComposerTest {
      * 画的是文字前景，与背景无关）。合并后的绘制侧已改读每段 `DrawCmd.focusFore`
      * （见下一条用例），本条仍然成立：适配层给按钮段填的 `back` 与 focusFore 缺省值同为
      * `0xFFFF00`（`StringStyle.cs:11,22`、`ConfigData.cs:70`）。
+     * 非按钮 run 的 `back` 恒 null：`SETBGCOLOR` 是控制台级活值（EmueraConsole.cs:200 /
+     * `graph.Clear` :1816 整张清），经 [ConsoleFeed] 发布进 `ConsoleScreen.backgroundArgb`
+     * 整幅铺底（2026-11 玩家反馈「时停只有文字背景变色」的修复）。
      */
     @Test
     fun `sink 快照里的按钮经适配与装配后焦点命中取焦点色`() {
@@ -301,15 +304,18 @@ class ScreenComposerTest {
         val rows = screen.visibleRows()
         assertEquals(2, rows.size)
         assertEquals(7L, screen.hit(0, 2)?.value, "夹具自检：第 0 行第 2 格是 PRINTBUTTON 的命中区")
-        // 适配层：按钮 run 的 back 槽承载焦点色，非按钮 run 的 back 仍是行背景色。
+        // 夹具自检：SETBGCOLOR 是控制台级活值，已由 feed 发布成整屏底色，不落行快照。
+        assertEquals(0x102030, sink.backgroundColor, "夹具自检：SETBGCOLOR 落进控制台活值")
+        assertEquals(0xFF102030.toInt(), screen.backgroundArgb, "feed 把活值发布成整屏底色 ARGB")
+        // 适配层：按钮 run 的 back 槽承载焦点色，非按钮 run 的 back 恒 null（整屏底色兜底）。
         assertEquals(listOf(RunKind.TEXT, RunKind.BUTTON), rows[0].runs.map { it.kind })
-        assertEquals(0x102030, rows[0].runs[0].back, "非按钮 run 的 back = SETBGCOLOR 行快照")
+        assertEquals(null, rows[0].runs[0].back, "非按钮 run 无自有底色")
         assertEquals(
             LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
             rows[0].runs[1].back,
             "按钮 run 的 back = Config.FocusColor（StringStyle.cs:22、ConfigData.cs:70）",
         )
-        assertEquals(0x102030, rows[1].runs[0].back)
+        assertEquals(null, rows[1].runs[0].back)
 
         // TODO(verify)：上面这条钉的是**适配层把焦点色塞进按钮段 back 槽**的搬运口径
         // （origin/main 侧 ConsoleAdapter）。审计侧改为每段 `TextRun.focusFore` 承载（下一条

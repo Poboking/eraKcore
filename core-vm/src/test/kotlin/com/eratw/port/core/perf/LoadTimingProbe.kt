@@ -4,6 +4,7 @@ import com.eratw.port.core.loader.BootMetadata
 import com.eratw.port.core.loader.LoadStageMark
 import com.eratw.port.core.loader.ProgramLoader
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import java.nio.file.Files
 import java.nio.file.Path
@@ -25,6 +26,8 @@ import java.nio.file.Path
  *
  * 产物查找与 `PoolDecompAuditTest` 同源；缺产物时跳过。
  */
+// realArtifacts 家标记（realarttag 路 2026-11-06）：产物门控钉，供 gateRealArtifacts 圈定；判定逻辑一字不动。
+@Tag("realArtifacts")
 class LoadTimingProbe {
 
     @Test

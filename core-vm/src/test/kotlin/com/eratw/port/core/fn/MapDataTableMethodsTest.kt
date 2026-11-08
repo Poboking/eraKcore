@@ -149,6 +149,26 @@ class MapDataTableMethodsTest {
         assertEquals("A", c.store.readStr("RESULTS", longArrayOf(0L)))
     }
 
+    /**
+     * 3 参形态的第 2 槽不是变量引用 ⇒ CodeEE，不静默返回空串。
+     *
+     * 判据：原版 `arguments[1] as VariableTerm` 之后直接 `.Identifier.GetArray()`
+     * （spec: FunctionMethodCreator.cs:2968-2973），非变量实参在 C# 侧是裸 NRE。
+     * 折成空串会把「一个键都没写」伪装成「表里没有键」，与 DT_ROW_ADD 的折码口径不一致。
+     */
+    @Test
+    fun `MAP_GETKEYS 目标槽非变量引用报 CodeEE`() {
+        val c = mdCtx()
+        mdInt(c, "MAP_CREATE", mdS("M"))
+        mdInt(c, "MAP_SET", mdS("M"), mdS("A"), mdS("1"))
+        val e = assertFailsWith<CodeEE> {
+            c.callFunctionRef("MAP_GETKEYS", listOf(StrLiteral("M"), IntLiteral(1), IntLiteral(1)))
+        }
+        assertTrue(e.message!!.contains("第 2 个参数必须是字符串一维数组变量"), "实际：${e.message}")
+        // 省略第 2 槽的 2 参/1 参形态不受影响（各自走 RESULTS 与逗号串分支）
+        assertEquals("A", mdStr(c, "MAP_GETKEYS", mdS("M"), mdI(1)))
+    }
+
     @Test
     fun `MAP_FROMXML 坏 XML 抛 CodeEE 且值取 InnerXml`() {
         val c = mdCtx()
@@ -177,10 +197,11 @@ class MapDataTableMethodsTest {
         assertFailsWith<CodeEE> {
             mdInt(c, "MAP_FROMXML", mdS("M"), mdS("<map><p><k>a&b</k><v>1</v></p></map>"))
         }
-        // 数字字符引用码位不是 XML 1.0 Char（#x0）与解析不出（#xZZ）
-        assertFailsWith<CodeEE> {
-            mdInt(c, "MAP_FROMXML", mdS("M"), mdS("<map><p><k>&#0;</k><v>1</v></p></map>"))
-        }
+        // 数字字符引用低位控制符（#x0）：dotnet 8.0.425 LoadXml 实测**放行**、InnerText 即该
+        // 码位（XML-FIVE X1 翻案；旧钉按拒绝，方向与 .NET 相反，已翻）——键就是 U+0000。
+        assertEquals(1L, mdInt(c, "MAP_FROMXML", mdS("M"), mdS("<map><p><k>&#0;</k><v>1</v></p></map>")))
+        assertEquals("1", mdStr(c, "MAP_GET", mdS("M"), mdS("\u0000")))
+        // 解析不出（#xZZ）照旧报错
         assertFailsWith<CodeEE> {
             mdInt(c, "MAP_FROMXML", mdS("M"), mdS("<map><p><k>&#xZZ;</k><v>1</v></p></map>"))
         }
@@ -437,6 +458,38 @@ class MapDataTableMethodsTest {
         assertEquals(0L, mdInt(c, "DT_ROW_LENGTH", mdS("T")))
     }
 
+    /**
+     * 4 参 DT_SELECT 的第 4 槽留空 / 写成非变量 ⇒ CodeEE。
+     *
+     * 判据：原版 `(arguments[3] as VariableTerm).Identifier`（spec: FunctionMethodCreator.cs:2656-2657）
+     * 在 C# 侧是裸 NRE。移植侧此前静默回落到 RESULT，得到「不写计数头、却从 RESULT:0 起裸写 id」
+     * 的混合形态；3 参形态（不写第 4 槽）才是合法的 RESULT 落点。
+     */
+    @Test
+    fun `DT_SELECT 目标槽留空或非变量报 CodeEE`() {
+        val c = mdCtx()
+        mdInt(c, "DT_CREATE", mdS("T"))
+        mdInt(c, "DT_COLUMN_ADD", mdS("T"), mdS("S"))
+        mdInt(c, "DT_ROW_ADD", mdS("T"), mdS("S"), mdS("a"))
+        // 显式写了第 4 槽却留空
+        assertFailsWith<CodeEE> {
+            c.callFunctionRef(
+                "DT_SELECT",
+                listOf(StrLiteral("T"), StrLiteral(""), StrLiteral(""), null),
+            )
+        }
+        // 第 4 槽写成非变量（整数常量）
+        val e = assertFailsWith<CodeEE> {
+            c.callFunctionRef(
+                "DT_SELECT",
+                listOf(StrLiteral("T"), StrLiteral(""), StrLiteral(""), IntLiteral(0)),
+            )
+        }
+        assertTrue(e.message!!.contains("第 4 个参数必须是数组变量"), "实际：${e.message}")
+        // 3 参形态照常：命中数写 RESULT:0，返回 id 串
+        assertEquals(1L, mdInt(c, "DT_SELECT", mdS("T"), mdS(""), mdS("")))
+    }
+
     @Test
     fun `DT_SELECT 单参形态命中数与 RESULT 总数`() {
         val c = mdCtx()
@@ -526,6 +579,9 @@ class MapDataTableMethodsTest {
      * 原版 `new DataTable(name)` + `ReadXmlSchema`（FunctionMethodCreator.cs:2741-2745）按
      * **表元素名**匹配。语料 plugins/schema.xml:3 是 `MainDataTable="db"`、表元素
      * `bbas_dataset`、数据行也叫 `bbas_dataset`（BBAS_DATASET.ERB:11）。
+     * DT-FRAME 波补探针证据（dotnet 8，netcoreapp8.0 与游戏运行时同源）：J1/J6 ——
+     * `ReadXmlSchema` 不消费 MainDataTable（指向不存在的 ghost 也静默无视、不改名不抛）；
+     * J3/J4/J7 —— ERB 名匹配不到表元素名时抛 ArgumentException → :2749-2752 catch → 0。
      */
     @Test
     fun `DT_FROMXML 不卡 MainDataTable 表元素名匹配即装载`() {
@@ -599,6 +655,9 @@ class MapDataTableMethodsTest {
     /**
      * P2 回归：`DT_COLUMN_ADD` 是表级操作，老行同步扩到新列宽（`Columns.Add` 的框架语义，
      * FunctionMethodCreator.cs:2118）。旧实现只 `columns.add`，CELL 族直接越界。
+     * DT-FRAME 波补钉分歧 D 的提交边界：第 4 参 0（AllowDBNull=false）在表内已有行时
+     * .NET 的 setter（:2119）抛 DataException（dotnet 8 探针 A2），异常后**列已在表内**、
+     * AllowDBNull 仍 true、老行新格 DBNull（探针 A2b 部分状态，一并复刻）。
      */
     @Test
     fun `DT_COLUMN_ADD 给老行补新列初值`() {
@@ -613,10 +672,18 @@ class MapDataTableMethodsTest {
         assertEquals(0L, mdInt(c, "DT_CELL_GET", mdS("T"), mdI(0), mdS("n")))
         assertEquals(1L, mdInt(c, "DT_CELL_SET", mdS("T"), mdI(0), mdS("n"), mdI(9)))
         assertEquals(9L, mdInt(c, "DT_CELL_GET", mdS("T"), mdI(0), mdS("n")))
-        // 不可空字符串列（第 4 参 0）：老行新格 = 类型零值 ""，ISNULL=0。
-        mdInt(c, "DT_COLUMN_ADD", mdS("T"), mdS("s2"), mdI(5), mdI(0))
-        assertEquals(0L, mdInt(c, "DT_CELL_ISNULL", mdS("T"), mdI(0), mdS("s2")))
+        // 原断言（现状钉桩）：不可空字符串列老行新格 = 类型零值 ""，ISNULL=0。
+        // 新断言：.NET AllowDBNull setter 在有行时抛 DataException（探针 A2），
+        // 列已入表（EXIST=5）、保持可空（ISNULL=1、GETS=""）——探针 A2b 部分状态。
+        assertFailsWith<IllegalStateException> {
+            mdInt(c, "DT_COLUMN_ADD", mdS("T"), mdS("s2"), mdI(5), mdI(0))
+        }
+        assertEquals(5L, mdInt(c, "DT_COLUMN_EXIST", mdS("T"), mdS("s2")))
+        assertEquals(1L, mdInt(c, "DT_CELL_ISNULL", mdS("T"), mdI(0), mdS("s2")))
         assertEquals("", mdStr(c, "DT_CELL_GETS", mdS("T"), mdI(0), mdS("s2")))
+        // 空表上加不可空列不抛（探针 B4）。
+        mdInt(c, "DT_CREATE", mdS("T9"))
+        assertEquals(1L, mdInt(c, "DT_COLUMN_ADD", mdS("T9"), mdS("s3"), mdI(5), mdI(0)))
         // 既有单元格不受影响。
         assertEquals("v", mdStr(c, "DT_CELL_GETS", mdS("T"), mdI(0), mdS("s")))
     }
@@ -656,5 +723,266 @@ class MapDataTableMethodsTest {
         assertFailsWith<CodeEE> { mdInt(c, "DT_ROW_ADD", mdS("T"), mdS("id"), mdI(1)) }
         // 列名, 值 不成对
         assertFailsWith<CodeEE> { mdInt(c, "DT_ROW_ADD", mdS("T"), mdS("NAME")) }
+    }
+
+    // ==================================================================
+
+    // 4.981 上游新增 MAP 增强集（reference / 基准均无对应读数，断言按自改说明 :34-41）
+    // ==================================================================
+
+    @Test
+    fun `MAP_MERGE 覆盖同 key 并保留目标表原有键序`() {
+        val c = mdCtx()
+        mdInt(c, "MAP_CREATE", mdS("A"))
+        mdInt(c, "MAP_SET", mdS("A"), mdS("k1"), mdS("1"))
+        mdInt(c, "MAP_CREATE", mdS("B"))
+        mdInt(c, "MAP_SET", mdS("B"), mdS("k1"), mdS("2"))
+        mdInt(c, "MAP_SET", mdS("B"), mdS("k2"), mdS("3"))
+
+        assertEquals(1L, mdInt(c, "MAP_MERGE", mdS("A"), mdS("B")))
+        // 同 key 覆盖（自改说明 :36），插入序里 k1 仍在前
+        assertEquals("2", mdStr(c, "MAP_GET", mdS("A"), mdS("k1")))
+        assertEquals("3", mdStr(c, "MAP_GET", mdS("A"), mdS("k2")))
+        assertEquals(2L, mdInt(c, "MAP_SIZE", mdS("A")))
+        assertEquals("k1,k2", mdStr(c, "MAP_GETKEYS", mdS("A")))
+        // 任一侧缺表 → 0（不抛错；spec builtin-functions.yaml:2246；fork-src Creator.Method.cs:2434-2452）
+        assertEquals(0L, mdInt(c, "MAP_MERGE", mdS("NOPE"), mdS("B")))
+        assertEquals(0L, mdInt(c, "MAP_MERGE", mdS("A"), mdS("NOPE")))
+    }
+
+    @Test
+    fun `MAP_FINDKEY 按条件收集 key 且缺表返回空串`() {
+        val c = mdCtx()
+        mdInt(c, "MAP_CREATE", mdS("M"))
+        mdInt(c, "MAP_SET", mdS("M"), mdS("k1"), mdS("1"))
+        mdInt(c, "MAP_SET", mdS("M"), mdS("k2"), mdS("1"))
+        mdInt(c, "MAP_SET", mdS("M"), mdS("k3"), mdS("2"))
+
+        // 三参必填（fork Creator.Method.cs:2505-2510 无 OmitStart）；匹配条数写入 RESULT（spec:2261）。
+        assertEquals("k1,k2", mdStr(c, "MAP_FINDKEY", mdS("M"), mdS("1"), mdS("VAL_EQ")))
+        assertEquals(2L, c.store.readInt("RESULT", longArrayOf(0L)), "RESULT = 匹配条数")
+        // VAL_NE **不受支持**：fork 的 switch 无该分支，落到 switch 之外 ⇒ "" 且 RESULT=0（spec:2262）
+        assertEquals("", mdStr(c, "MAP_FINDKEY", mdS("M"), mdS("1"), mdS("VAL_NE")))
+        assertEquals(0L, c.store.readInt("RESULT", longArrayOf(0L)))
+        // KEY_PREFIX
+        assertEquals("k1,k2,k3", mdStr(c, "MAP_FINDKEY", mdS("M"), mdS("k"), mdS("KEY_PREFIX")))
+        assertEquals(3L, c.store.readInt("RESULT", longArrayOf(0L)))
+        // 缺表 → ""（早退不写 RESULT，与 MAP_GETKEYS 缺表口径一致）
+        assertEquals("", mdStr(c, "MAP_FINDKEY", mdS("NOPE"), mdS("1"), mdS("VAL_EQ")))
+        // 其它未知条件同 VAL_NE 口径：不抛错、返回 ""（fork 落到 switch 之外）
+        assertEquals("", mdStr(c, "MAP_FINDKEY", mdS("M"), mdS("1"), mdS("BOGUS")))
+    }
+
+    @Test
+    fun `MAP_REMOVEIF 返回删除条数且缺表为零非法条件为负一`() {
+        val c = mdCtx()
+        mdInt(c, "MAP_CREATE", mdS("M"))
+        mdInt(c, "MAP_SET", mdS("M"), mdS("k1"), mdS("1"))
+        mdInt(c, "MAP_SET", mdS("M"), mdS("k2"), mdS("1"))
+        mdInt(c, "MAP_SET", mdS("M"), mdS("k3"), mdS("2"))
+
+        // 成功 → 删除条数（spec:2254「返回删除条数」；fork-src Creator.Method.cs:2454-2503）
+        assertEquals(2L, mdInt(c, "MAP_REMOVEIF", mdS("M"), mdS("1"), mdS("VAL_EQ")))
+        assertEquals(1L, mdInt(c, "MAP_SIZE", mdS("M")))
+        assertEquals(1L, mdInt(c, "MAP_HAS", mdS("M"), mdS("k3")))
+        assertEquals(0L, mdInt(c, "MAP_HAS", mdS("M"), mdS("k1")))
+        // 缺表 → 0（不抛错）
+        assertEquals(0L, mdInt(c, "MAP_REMOVEIF", mdS("NOPE"), mdS("1"), mdS("VAL_EQ")))
+        // mode 非法 → -1（不抛错）
+        assertEquals(-1L, mdInt(c, "MAP_REMOVEIF", mdS("M"), mdS("1"), mdS("BOGUS")))
+    }
+
+    /**
+     * 小写条件名 + 土耳其语宿主：条件必须照常命中，而不是被判「无法解释的条件」。
+     *
+     * 条件名是与**源码字面量**比对的单侧折叠，因此 `mapMatch` 钉 `Locale.ROOT`。
+     * 实测记录（Kotlin 2.0.20 + Temurin 17，本闸环境）：默认文化设为 `tr_TR` 时
+     * `"key_prefix".uppercase()` 得 `KEY_PREFIX`，而 `"key_prefix".uppercase(tr)` 与
+     * Java 的 `toUpperCase(tr)` 都得 `KEY_PREFİX`（U+0130）⇒ 无参版当前靠 ASCII 快路径
+     * 侥幸安全，标准库换版本/换平台（Android libcore）就不再保证；显式传 ROOT 是把这条
+     * 保证写死。本用例钉的是**可观测行为**：任何宿主默认文化下，小写条件名照常命中。
+     * 同类口径见 `specs/verify-notes.md` §16 第 20 条与 `vars/FloatDeclFaceTest` 的 `#DIMF`。
+     */
+    @Test
+    fun `MAP 条件名小写在土耳其语宿主下仍命中`() {
+        val saved = java.util.Locale.getDefault()
+        java.util.Locale.setDefault(java.util.Locale.forLanguageTag("tr-TR"))
+        try {
+            val c = mdCtx()
+            mdInt(c, "MAP_CREATE", mdS("M"))
+            mdInt(c, "MAP_SET", mdS("M"), mdS("k1"), mdS("1"))
+            mdInt(c, "MAP_SET", mdS("M"), mdS("k2"), mdS("2"))
+
+            assertEquals(1L, mdInt(c, "MAP_REMOVEIF", mdS("M"), mdS("k1"), mdS("key_prefix")))
+            assertEquals(0L, mdInt(c, "MAP_HAS", mdS("M"), mdS("k1")), "小写条件名必须真的删掉命中格")
+            assertEquals(1L, mdInt(c, "MAP_HAS", mdS("M"), mdS("k2")))
+
+            // 同族的 `val_contains`（也含 i）同样不许掉进 else
+            assertEquals(1L, mdInt(c, "MAP_SIZE", mdS("M")))
+            assertEquals(1L, mdInt(c, "MAP_REMOVEIF", mdS("M"), mdS("2"), mdS("val_contains")))
+            assertEquals(0L, mdInt(c, "MAP_SIZE", mdS("M")))
+        } finally {
+            java.util.Locale.setDefault(saved)
+        }
+    }
+
+    @Test
+    fun `MAP_TOSTRING 缺省与自定义分隔符`() {
+        val c = mdCtx()
+        mdInt(c, "MAP_CREATE", mdS("M"))
+        mdInt(c, "MAP_SET", mdS("M"), mdS("k1"), mdS("1"))
+        mdInt(c, "MAP_SET", mdS("M"), mdS("k2"), mdS("2"))
+
+        assertEquals("k1=1,k2=2", mdStr(c, "MAP_TOSTRING", mdS("M")))
+        assertEquals("k1:1;k2:2", mdStr(c, "MAP_TOSTRING", mdS("M"), mdS(";"), mdS(":")))
+        // 缺表 → ""（与 MAP_TOXML 同口径）
+        assertEquals("", mdStr(c, "MAP_TOSTRING", mdS("NOPE")))
+    }
+
+    // ==================================================================
+    // mapPoolDiagnostics —— 壳层错误报告的「图像簿记」读数口（2026-11-01 报告收编）
+    // ==================================================================
+
+    @Test
+    fun `mapPoolDiagnostics 报各 map 尺寸且按插入序`() {
+        val c = mdCtx()
+        // 键就是传给 MAP_SET 的整串：语料 RM_GMAP 的值是带 `map:` 前缀的
+        // 「map:グラフィックス」（ResourceManager.ERH:18），壳层对账时用同一整串。
+        mdInt(c, "MAP_CREATE", mdS("map:グラフィックス"))
+        mdInt(c, "MAP_SET", mdS("map:グラフィックス"), mdS("path/a.webp"), mdI(200001L))
+        mdInt(c, "MAP_SET", mdS("map:グラフィックス"), mdS("path/b.webp"), mdI(200002L))
+        mdInt(c, "MAP_CREATE", mdS("リソース"))
+        assertEquals(
+            listOf("map:グラフィックス" to 2, "リソース" to 0),
+            mapPoolDiagnostics(c.store),
+            "只报（名字, 元素数）：键值内容（画像路径）一概不外泄",
+        )
+    }
+
+    @Test
+    fun `mapPoolDiagnostics 键区分大小写与前后缀（裸名不等于带前缀键）`() {
+        val c = mdCtx()
+        mdInt(c, "MAP_CREATE", mdS("map:グラフィックス"))
+        assertEquals(
+            listOf("map:グラフィックス" to 0),
+            mapPoolDiagnostics(c.store),
+            "裸「グラフィックス」不产生独立条目，池里只有带前缀键",
+        )
+    }
+
+    @Test
+    fun `mapPoolDiagnostics 空池给空表`() {
+        val c = mdCtx()
+        assertEquals(emptyList(), mapPoolDiagnostics(c.store))
+    }
+
+    @Test
+    fun `mapPoolDiagnostics 对 MAP_RELEASE 后的池如实缩减`() {
+        val c = mdCtx()
+        mdInt(c, "MAP_CREATE", mdS("グラフィックス"))
+        mdInt(c, "MAP_SET", mdS("グラフィックス"), mdS("k"), mdI(1L))
+        mdInt(c, "MAP_RELEASE", mdS("グラフィックス"))
+        assertEquals(emptyList(), mapPoolDiagnostics(c.store))
+    }
+
+    // ==================================================================
+    // RESIDUE-BX2（2026-11-06）：R3 主键唯一约束 + R4 成对形态空位实参
+    // ==================================================================
+
+    /**
+     * RESIDUE-BX2 R3：`Rows.Add` 的主键唯一约束（FunctionMethodCreator.cs:2001
+     * `PrimaryKey = {id}`、:1999 `Unique = true`）。dotnet 8.0.425 探针
+     * （`<work-root>/residue-probe/probe-output.txt` R3a/R3b）：对撞抛 ConstraintException
+     * "Column 'id' is constrained to be unique.  Value '1' is already present."
+     * （unique 后双空格，原样），异常后行不落表。:2749-2752 的 `catch { return 0L; }`
+     * 只在 DataTableFromXmlMethod 内，**不**覆盖 DataTableRowSetMethod ⇒ 按分歧 C 的
+     * 裸 CLR→裸 JVM 映射抛 [IllegalStateException]，不是折 0。
+     *
+     * 对撞构造：[nextRowId] 的严格递增只管本池自产 id，故用 DT_FROMXML 载入
+     * id = 「下一自产 id」的行（固定时钟下第二次 DT_ROW_ADD 落 lastRowId+1），
+     * 再 DT_ROW_ADD 即对撞。
+     */
+    @Test
+    fun `DT_ROW_ADD 主键对撞按 ConstraintException 复刻且行不落表`() {
+        val c = mdCtx()
+        mdInt(c, "DT_CREATE", mdS("A"))
+        val taken = mdInt(c, "DT_ROW_ADD", mdS("A"))
+        val schema = "<xs:schema id=\"NewDataSet\" xmlns=\"\" " +
+            "xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" " +
+            "xmlns:msdata=\"urn:schemas-microsoft-com:xml-msdata\">" +
+            "<xs:element name=\"NewDataSet\" msdata:IsDataSet=\"true\" msdata:MainDataTable=\"db\">" +
+            "<xs:complexType><xs:choice minOccurs=\"0\" maxOccurs=\"unbounded\">" +
+            "<xs:element name=\"B\"><xs:complexType><xs:sequence>" +
+            "<xs:element name=\"id\" type=\"xs:long\" />" +
+            "</xs:sequence></xs:complexType></xs:element>" +
+            "</xs:choice></xs:complexType>" +
+            "<xs:unique name=\"Constraint1\" msdata:PrimaryKey=\"true\">" +
+            "<xs:selector xpath=\".//B\" /><xs:field xpath=\"id\" /></xs:unique>" +
+            "</xs:element></xs:schema>"
+        val data = "<DocumentElement><B><id>${taken + 1}</id></B></DocumentElement>"
+        assertEquals(1L, mdInt(c, "DT_FROMXML", mdS("B"), mdS(schema), mdS(data)))
+        assertEquals(1L, mdInt(c, "DT_ROW_LENGTH", mdS("B")))
+        val err = assertFailsWith<IllegalStateException> { mdInt(c, "DT_ROW_ADD", mdS("B")) }
+        assertTrue(
+            err.message!!.contains("is constrained to be unique") &&
+                err.message!!.contains("Value '${taken + 1}' is already present"),
+            "应带 .NET ConstraintException 指纹，实际：${err.message}",
+        )
+        assertEquals(1L, mdInt(c, "DT_ROW_LENGTH", mdS("B")), "异常后行不落表（探针 R3b）")
+    }
+
+    /**
+     * 探针 R3c 基准：schema 未声明 msdata:PrimaryKey ⇒ 表无 UniqueConstraint，
+     * 重复 id 的行照常装载、Rows.Add 也不设唯一闸（DT_ROW_ADD 自产 id 与既有行
+     * 不同值即可正常加行）。
+     */
+    @Test
+    fun `无主键表不设 RowsAdd 唯一闸`() {
+        val c = mdCtx()
+        val schema = "<xs:schema id=\"NewDataSet\" xmlns=\"\" " +
+            "xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" " +
+            "xmlns:msdata=\"urn:schemas-microsoft-com:xml-msdata\">" +
+            "<xs:element name=\"NewDataSet\" msdata:IsDataSet=\"true\" msdata:MainDataTable=\"db\">" +
+            "<xs:complexType><xs:choice minOccurs=\"0\" maxOccurs=\"unbounded\">" +
+            "<xs:element name=\"B\"><xs:complexType><xs:sequence>" +
+            "<xs:element name=\"id\" type=\"xs:long\" />" +
+            "</xs:sequence></xs:complexType></xs:element>" +
+            "</xs:choice></xs:complexType></xs:element></xs:schema>"
+        val data = "<DocumentElement><B><id>7</id></B><B><id>7</id></B></DocumentElement>"
+        assertEquals(1L, mdInt(c, "DT_FROMXML", mdS("B"), mdS(schema), mdS(data)))
+        assertEquals(2L, mdInt(c, "DT_ROW_LENGTH", mdS("B")), "无主键时重复 id 照常装载")
+        assertTrue(mdInt(c, "DT_ROW_ADD", mdS("B")) > 0L, "自产 id 与 7 无对撞 ⇒ 正常加行")
+        assertEquals(3L, mdInt(c, "DT_ROW_LENGTH", mdS("B")))
+    }
+
+    /**
+     * RESIDUE-BX2 R4：成对形态的**空位**实参（尾随逗号）在原版解析期就被
+     * CheckArgumentTypeEx 拒绝——DT_ROW_ADD/DT_ROW_SET 的 ArgTypeList 无 OmitStart
+     * （缺省 -1，FunctionMethodCreator.cs:2140-2155 / :2168-2187；
+     * FunctionMethod.cs:198-205 ⇒ ArgCanNotBeNull，Lang.cs:3734，zhs 文案
+     * `{0}函数: 第{1}个参数不能省略`）⇒ :2215 的 `v == null → DBNull` 对成对形态不可达。
+     * 旧实现把空位静默写成 DBNull（DT_ROW_ADD 侧靠 Rows.Add 边界兜底、
+     * DT_ROW_SET 侧直接污染附加行的不可空列）——翻案为同文案 CodeEE。
+     * 数组形态走 string/long 重载（:2228-2248）无空位，不可达性同判。
+     */
+    @Test
+    fun `DT_ROW_ADD 成对形态空位实参按 ArgCanNotBeNull 拒绝`() {
+        val c = mdCtx()
+        mdInt(c, "DT_CREATE", mdS("T"))
+        mdInt(c, "DT_COLUMN_ADD", mdS("T"), mdS("C"))
+        val err = assertFailsWith<CodeEE> { mdInt(c, "DT_ROW_ADD", mdS("T"), mdS("C"), null) }
+        assertEquals("DT_ROW_ADD函数: 第3个参数不能省略", err.message)
+        assertEquals(0L, mdInt(c, "DT_ROW_LENGTH", mdS("T")), "拒绝后行不落表")
+    }
+
+    @Test
+    fun `DT_ROW_SET 成对形态空位实参按 ArgCanNotBeNull 拒绝且行不被污染`() {
+        val c = mdCtx()
+        mdInt(c, "DT_CREATE", mdS("T"))
+        mdInt(c, "DT_COLUMN_ADD", mdS("T"), mdS("C"))
+        val id = mdInt(c, "DT_ROW_ADD", mdS("T"), mdS("C"), mdS("v"))
+        val err = assertFailsWith<CodeEE> { mdInt(c, "DT_ROW_SET", mdS("T"), mdI(id), mdS("C"), null) }
+        assertEquals("DT_ROW_SET函数: 第4个参数不能省略", err.message)
+        assertEquals("v", mdStr(c, "DT_CELL_GETS", mdS("T"), mdI(id), mdS("C"), mdI(1)), "拒绝后原值不动")
     }
 }

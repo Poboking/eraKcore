@@ -110,10 +110,12 @@ object CharaFileIO {
      * 「不是二进制容器」这一条 M10-SAVE 已按 :2300 收口：`CreateReader` 返回 null
      * （文本档、魔数不符、容器版本非 1808、文件短于 16 字节 `EraBinaryDataReader.cs:790-794`）
      * 时原版**不抛**，移植侧此前直接调 [SaveFormat.read] 会多抛一层 [SaveFormatException]
-     * （经 `LOADCHARA` 冒成 `CodeEE`）。容器判定用 [SaveFormat.isBinaryContainer]，
-     * 与 [com.eratw.port.core.save.SaveCodec.isBinary] 同一个口径。
+     * （经 `LOADCHARA` 冒成 `CodeEE`）。容器判定用 [SaveFormat.isBinaryContainer]（壳 +
+     * **解压全文**都过）；[com.eratw.port.core.save.SaveCodec.isBinary] 2026-10-31 起只看壳，
+     * 两者不再是同一个口径 —— 这里要的是「解压失败也当不存在」，读档分派要的只是
+     * 「按二进制还是文本读」。
      * `CHKCHARADATA` 侧的类别/游戏码/版本比对已同步走 [GameBaseGate]（组长接线），两侧不再各写一份近似；
-     * 它按 [SaveFormat.peek] 判容器，文本档由 peek 的双格式解析承担，与本条回落同口径。
+     * 它按 [SaveFormat.peek] 判容器（只看头字段，不校验正文尾部），文本档由 peek 的双格式解析承担。
      */
     fun load(bytes: ByteArray, store: VariableStore, scriptVersionDefined: Boolean? = null): Boolean {
         if (!SaveFormat.isBinaryContainer(bytes)) return false // :2300（CreateReader == null）

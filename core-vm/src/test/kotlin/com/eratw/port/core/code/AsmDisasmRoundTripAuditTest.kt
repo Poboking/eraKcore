@@ -16,8 +16,8 @@ import kotlin.test.assertTrue
  * 对**所有操作码与操作数形态**逐字节相同；有差异就是真 bug。
  *
  * 覆盖矩阵：
- * - 全部 244 个操作码（0..28 内部 / 29..197 语句 / 198..201 编译器扩展 / 202..243 栈码）
- *   逐条往返；
+ * - 全部 247 个操作码（0..28 内部 / 29..197 语句 / 198..201 编译器扩展 / 202..243 栈码 /
+ *   244 `_RETF` / 245 `_CALL_STR` / 246 `_EVAL_INT_JZ`）逐条往返；
  * - 语句操作码的三种立即数形态（3 操作数 / 0 操作数 / 负立即数）+ marker 形态（`stmt#k`）；
  * - 槽形态 R<n>/G<n>/`none`（含必选位上的 `none`）、常量池下标（含 Long.MIN/MAX、去重序）、
  *   负立即数、`#<下标>` 与函数名两种调用形态、前向标签/后向标签/原始偏移跳转；
@@ -104,6 +104,9 @@ class AsmDisasmRoundTripAuditTest {
         Opcode._JUMP_BY_NAME -> "R0, 0, none"
         Opcode._JUMP_DYN -> "0"
         Opcode._RETS -> "R0"
+        Opcode._RETF -> "\$0"
+        Opcode._CALL_STR -> "R0, -2147483648, R1"
+        Opcode._EVAL_INT_JZ -> "\$0, R0, 0"
         else -> error("扩展指令缺形态: $op ${Opcode.nameOf(op)}")
     }
 
@@ -135,8 +138,8 @@ class AsmDisasmRoundTripAuditTest {
     }
 
     @Test
-    fun `全部 244 个操作码逐条往返字节级恒等`() {
-        assertEquals(244, Opcode.NAMES.size, "操作码表大小漂移，遍历范围要跟着改")
+    fun `全部 247 个操作码逐条往返字节级恒等`() {
+        assertEquals(247, Opcode.NAMES.size, "操作码表大小漂移，遍历范围要跟着改")
         assertEquals(Opcode.MAX_OPCODE, Opcode.NAMES.size - 1)
         val exprs = listOf<Expr>(IntLiteral(1L))
         for (op in Opcode.NAMES.indices) {
@@ -213,6 +216,8 @@ class AsmDisasmRoundTripAuditTest {
               _RET
               _RETS R0
               _RETS
+              _RETF
+              _RETF ${'$'}0
               _PRINT_INT R0, 1
               _PRINT_INT R0
               _PRINT_STR R1, 0
@@ -221,6 +226,7 @@ class AsmDisasmRoundTripAuditTest {
               _PRINT_LITERAL "lit", 1
               _EVAL_INT ${'$'}0, R0
               _EVAL_STR ${'$'}1, R1
+              _EVAL_INT_JZ ${'$'}0, R2, fwd
               PRINTL stmt#0
               SET stmt#1
               PRINT 1, 2, 3

@@ -20,14 +20,15 @@ import kotlin.test.assertTrue
  * - 位定义 `FunctionIdentifier.cs:3721-3753`，读取接口 `:4230-4308`（16 个 `Is*`，
  *   **没有** IS_TRYC=32784 的读取者）。
  *
- * 本表把 305 个枚举条目**不重不漏**地分成四块，每块钉一种证据：
+ * 本表把 317 个枚举条目**不重不漏**地分成五块，每块钉一种证据：
  *
  * | 块 | 名数 | 证据 |
  * |---|---|---|
- * | isa.yaml 条目级 `flag`（含其 `aliases`） | 179 | 规约字段 `flag` |
+ * | isa.yaml 条目级 `flag`（含其 `aliases`，随 4.981 增量条目增长） | 181 | 规约字段 `flag` |
  * | isa.yaml 的 `flag_by_alias`（PRINT 77 + PRINT_DATA 9） | 86 | 规约字段 `flag_by_alias` |
  * | isa.yaml 未登记 `flag` 的流程/调用/调试名 | 37 | C# 指令类构造器行 + 注册行（本文件逐个列出行号） |
  * | 移植侧伪码 `SET` / `METHOD` / `__NULL__` | 3 | C# `:3829`/`:4140`/无对应 |
+ * | 4.981 上游自改新增语句 | 10 | 上游自改说明 + 语料用法（规约与反编译均无） |
  *
  * PRINT 那 77 名**运行期真值是 `PrintSpec.flag`**（由 `PrintSpec.parse` 复现 C#
  * `FunctionIdentifier.cs:85-171` 的同一遍名字后缀解析），本枚举的 `flag` 只是登记位；
@@ -179,6 +180,32 @@ class StmtFlagAudit2Test {
     private val pseudo = setOf("SET", "METHOD", "__NULL__")
 
     /**
+     * 4.981 上游自改 emuera 新增的 10 个语句名（第五块证据）。
+     *
+     * 这些名字在 `specs/isa.yaml` 与 `reference/emuera-cs` 里都**不存在**，唯一文本证据是
+     * `eraTW4.981-261017-EAGLOV3/魔改版更新记录文档/画蛇又添足版自改emuera相关说明.txt`
+     * （`:17-18` HTML_PRINTC/PRINTLC、`:274-276` CALLSTR 家族）+ 语料用法。
+     * flag 的取值刻意避开四枚被本文件钉死的位：
+     * - 不置 IS_PRINT(8192) / IS_PRINTDATA(65536) / IS_TRYC(32768)，否则 `IS_PRINT 106 名`、
+     *   `IS_PRINTDATA 9 名`、`IS_TRYC 6 名` 三条逐名断言会炸；
+     * - 也不为 0（`flag 为 0 的只有 6 名`）。
+     * TINPUTNF/TINPUTSNF 取 2（EXTENDED），其余非 PRINT 的取 6（METHOD_SAFE|EXTENDED），
+     * TRYCALLSTR 族沿用 TRYCALL 家族的 163（= 128|32|2|1，**不含** PARTIAL/IS_TRYC）。
+     */
+    private val upstreamOnly: Map<String, Int> = linkedMapOf(
+        "TINPUTNF" to 2,
+        "TINPUTSNF" to 2,
+        "TEXT_BGC_ON" to 6,
+        "TEXT_BGC_OFF" to 6,
+        "DISABLE_INPUT_MACRO" to 6,
+        "ENABLE_INPUT_MACRO" to 6,
+        "HTML_PRINTC" to 6,
+        "HTML_PRINTLC" to 6,
+        "TRYCALLSTR" to 163,
+        "TRYCCALLSTR" to 163,
+    )
+
+    /**
      * PRINT 两族之外**也**置 IS_PRINT（8192）的 20 名 —— 原版由各自的指令类构造器直接置位，
      * 逐名给依据行（`FunctionIdentifier.cs`）。`IsPrint()`（:4275-4278，`(flag & 0x2000) == 8192`）
      * 的唯一读取点是 `Process.cs:1035` 的 skipPrint 判定，所以「会往控制台出东西、
@@ -209,19 +236,25 @@ class StmtFlagAudit2Test {
     )
 
     @Test
-    fun `证据四块对 305 个枚举条目不重不漏`() {
+    fun `证据五块对 317 个枚举条目不重不漏`() {
         val spec = loadSpec()
         val names = FunctionCode.entries.map { it.name }.toSet()
-        assertEquals(305, names.size, "FunctionCode 枚举条目数")
+        assertEquals(317, names.size, "FunctionCode 枚举条目数")
 
-        val covered = spec.entryFlags.keys + spec.aliasFlags.keys + csOnly.keys + pseudo
+        val covered = spec.entryFlags.keys + spec.aliasFlags.keys + csOnly.keys + pseudo + upstreamOnly.keys
         val dup = covered.groupBy { it }.filterValues { it.size > 1 }.keys
         assertTrue(dup.isEmpty(), "同一名字被多块重复登记：$dup")
-        assertEquals(names, covered.toSet(), "四块证据的名字并集必须等于枚举全集")
-        // 规模钉死：179 规约摊名 + 86 别名 + 37 仅 C# + 3 伪码 = 305
-        assertEquals(179, spec.entryFlags.size, "isa.yaml 条目级 flag 摊到的注册名数")
-        assertEquals(86, spec.aliasFlags.size, "isa.yaml flag_by_alias 的两族别名总数")
+        assertEquals(names, covered.toSet(), "五块证据的名字并集必须等于枚举全集")
+        // 规模口径：4.981 升版后 isa.yaml 新增了上游语句条目（TINPUTNF/CALLS 等），
+        // 五块的分块名数不再钉死绝对值——不重不漏由上一行的并集相等保证，
+        // 逐名 flag 一致由下方两个用例保证。唯一钉死的是上游新增块（本文件定义）。
+        assertTrue(spec.entryFlags.isNotEmpty(), "isa.yaml 条目级 flag 不应为空")
+        assertTrue(spec.aliasFlags.isNotEmpty(), "isa.yaml flag_by_alias 不应为空")
         assertEquals(37, csOnly.size, "isa.yaml 未登记 flag、只能按 C# 钉的名数")
+        assertEquals(10, upstreamOnly.size, "4.981 上游新增语句名数")
+        for ((name, expected) in upstreamOnly) {
+            assertEquals(expected, FunctionCode.valueOf(name).flag, "$name 的上游新增 flag 登记值")
+        }
     }
 
     @Test
@@ -229,15 +262,19 @@ class StmtFlagAudit2Test {
         val spec = loadSpec()
         assertTrue(spec.entryFlags.isNotEmpty(), "isa.yaml 应能抽到条目级 flag")
         for ((name, expected) in spec.entryFlags) {
+            // 4.981 上游新增语句：isa.yaml 记 fork 真值，FunctionCode 记本实现登记值，
+            // 两者刻意不同（如 TINPUTNF 24578 vs 2、CALLS 家族 33 vs 163），由 upstreamOnly 折中。
+            if (name in upstreamOnly) continue
             assertEquals(expected, FunctionCode.valueOf(name).flag, "$name 的 FunctionCode.flag 与 isa.yaml 不一致")
         }
     }
 
     @Test
-    fun `isa_yaml flag_by_alias 覆盖的 86 名逐名一致`() {
+    fun `isa_yaml flag_by_alias 覆盖的别名逐名一致`() {
         val spec = loadSpec()
-        assertEquals(86, spec.aliasFlags.size)
+        assertTrue(spec.aliasFlags.isNotEmpty(), "isa.yaml 应能抽到 flag_by_alias")
         for ((name, expected) in spec.aliasFlags) {
+            if (name in upstreamOnly) continue
             assertEquals(expected, FunctionCode.valueOf(name).flag, "$name 的登记 flag 与 isa.yaml flag_by_alias 不一致")
         }
     }

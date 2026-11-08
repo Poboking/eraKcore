@@ -66,7 +66,14 @@ object CmdSnap {
 
     /** snapshot：CLI 入口（[Args] 已解析；`--out` 缺省 `<work>/snapshot.dbg`）。 */
     fun run(a: Args, out: PrintStream, err: PrintStream): Int {
-        val assembled = Assembler.assemble(a)
+        // MODERN-T3 R1：`snapshot validate|expand|diff` 是离线分析器（不装配会话、不读游戏根）；
+        // 其余形态维持既有「抓取快照」语义逐字不变。
+        when (a.positional.getOrNull(1)) {
+            "validate" -> return CmdSnapAnalyze.runValidate(a, out)
+            "expand" -> return CmdSnapAnalyze.runExpand(a, out)
+            "diff" -> return CmdSnapAnalyze.runDiff(a, out)
+        }
+        val assembled = Assembler.assemble(a, out = out)
         val main = Path.of(a.valueOr("--out", defaultSnapPath(a))).toAbsolutePath().normalize()
         return snapshot(assembled, main, out)
     }
@@ -75,7 +82,7 @@ object CmdSnap {
     fun runRestore(a: Args, out: PrintStream, err: PrintStream): Int {
         val raw = a.positional.getOrNull(1) ?: defaultSnapPath(a)
         val main = Path.of(raw).toAbsolutePath().normalize()
-        val assembled = Assembler.assemble(a)
+        val assembled = Assembler.assemble(a, out = out)
         return restore(assembled, main, out)
     }
 
@@ -262,8 +269,8 @@ object CmdSnap {
         return line.substring(from - 1, end + 1)
     }
 
-    /** 快照缺省落点：`<work>/snapshot.dbg`（与 last-error.json 同一 --work 口径）。 */
-    private fun defaultSnapPath(a: Args): String =
+    /** 快照缺省落点：`<work>/snapshot.dbg`（与 last-error.json 同一 --work 口径）；分析器共用。 */
+    internal fun defaultSnapPath(a: Args): String =
         Path.of(a.valueOr("--work", defaultWorkDir())).resolve("snapshot.dbg").toString()
 
     private fun defaultWorkDir(): String =

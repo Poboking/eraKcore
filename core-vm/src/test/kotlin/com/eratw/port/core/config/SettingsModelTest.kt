@@ -76,6 +76,26 @@ class SettingsModelTest {
     }
 
     @Test
+    fun `平坦全表顺序 = 条目表拼接序 GAME→REPLACE→DEBUG 不是 setDefault 注册序`() {
+        // B9 文档刀的配套钉：entries 的出数顺序 = ConfigStore.items = ConfigSpecTable.all 的拼接序
+        // （GetItem(string) 三级查找序，spec: ConfigData.cs:236-248）；
+        // C# setDefault 的注册序是 config→debug→replace（spec: ConfigData.cs:45-151 → :152-158 → :159-174），
+        // 它只决定 groups 视图的**组间**序（GAME→DEBUG→REPLACE），不决定平坦全表序。
+        val model = SettingsModel()
+        assertEquals(ConfigSpecTable.all.map { it.name }, model.entries.map { it.id }, "全表读数顺序与条目表同序")
+        // 三段边界逐钉：GAME 末位（ConfigData.cs:151）、REPLACE 首位/末位（:159/:174）、DEBUG 首位（:152）
+        assertEquals("Ctrl_Z_Enabled", model.entries[99].id) // GAME 段末
+        assertEquals("MoneyLabel", model.entries[100].id) // REPLACE 段首
+        assertEquals("RelationDef", model.entries[115].id) // REPLACE 段末
+        assertEquals("DebugShowWindow", model.entries[116].id) // DEBUG 段首（setDefault 里它是 :152）
+        assertEquals(
+            listOf(ConfigGroup.GAME, ConfigGroup.DEBUG, ConfigGroup.REPLACE),
+            model.groups.map { it.group },
+            "分组视图的组间序才是 setDefault 注册序",
+        )
+    }
+
+    @Test
     fun `稳定 id 与英日标签以及页面文案的两套来源`() {
         val model = SettingsModel()
         val font = model.entry("FontSize")!!
@@ -291,6 +311,43 @@ class SettingsModelTest {
             applied(model.set("StainDefault", "0/0/2/1/8")).value,
         )
         assertEquals("数字でない文字が含まれています", rejected(model.set("StainDefault", "0/x")).message)
+    }
+
+    @Test
+    fun `LONG_LIST 空串与纯空白在设置页通道都按 EMPTY_TEXT 拒 值不动`() {
+        // B7 的钉（判性 = 台账方向反了）：`ConfigItem.cs:92-95` 的 null/空串判定在**类型分派之前**——
+        // 空串永远到不了 `:147` 的 `Value.Clear()`；`List<string>` 分支（`:165-171`）同理被前置空判拦住，
+        // 「同型 STRING_LIST 空串是清空」不成立。本层因此与 STRING_LIST 同形：空串/纯空白显式 EMPTY_TEXT 拒
+        // （挖虫波二 b6f58a37 的裁定，此前误报 INVALID_TEXT 的理由错位已修）。
+        val model = SettingsModel()
+        val before = model.store.itemOf(ConfigKey.StainDefault).value
+        val empty = rejected(model.set("StainDefault", ""))
+        assertEquals(SettingsRejectReason.EMPTY_TEXT, empty.reason)
+        assertEquals("StainDefault", empty.id, "拒绝回执给规范 id")
+        assertEquals(before, model.store.itemOf(ConfigKey.StainDefault).value, "拒了就是一个字没动")
+        val blank = rejected(model.set("StainDefault", "   "))
+        assertEquals(SettingsRejectReason.EMPTY_TEXT, blank.reason)
+        assertEquals(before, model.store.itemOf(ConfigKey.StainDefault).value)
+        // 对照坏段：非空逐段严格十进制，失败报非数字文案（ConfigItem.cs:149-158）
+        val bad = rejected(model.set("StainDefault", "0/x"))
+        assertEquals(SettingsRejectReason.INVALID_TEXT, bad.reason)
+        assertEquals("数字でない文字が含まれています", bad.message)
+        assertEquals(before, model.store.itemOf(ConfigKey.StainDefault).value, "set 通道失败不落副作用")
+    }
+
+    @Test
+    fun `LONG_LIST 读文件通道的纯空白是官方的先清空再抛`() {
+        // 与上一条相对：tryParse 是文件通道，空判吃的是**原串**（`ConfigItem.cs:92` 的 param.Length==0），
+        // 「" "」长度 1 过判 → `:100` Trim 成空 → `:147` 先 `Value.Clear()` → `"".Split('/')`=[""] →
+        // `:151-157` 解析失败抛 CodeEE —— 旧值已没、只剩空前缀（官方形状，ADR-005 原样复刻）。
+        val item = ConfigItem(ConfigSpecTable.specOf(ConfigKey.StainDefault)!!)
+        val outcome = item.tryParse(" ", 1)
+        assertTrue(outcome is TryParseOutcome.Failed && outcome.partial, "纯空白 = partial 失败（ConfigItem.cs:147-158）")
+        assertEquals(ConfigValue.LongList(emptyList()), item.value, "Clear() 在前，值只剩解析成功的前缀（这里前缀为空）")
+        // 真·空串才走 :92-95 的前置空判：什么都不发生
+        val untouched = ConfigItem(ConfigSpecTable.specOf(ConfigKey.StainDefault)!!)
+        assertEquals(TryParseOutcome.NotParsedEmptyValue, untouched.tryParse("", 2))
+        assertEquals(ConfigValue.LongList(listOf(0L, 0L, 2L, 1L, 8L)), untouched.value)
     }
 
     @Test

@@ -170,4 +170,30 @@ class BeginTrainResetTest {
             )
         }
     }
+
+    // ------------------------------------------------------------------
+    // 5) 四个面板折叠开关跨 BEGIN TRAIN 保留（移植侧有意偏差，verify-notes §28）
+    //    TFLAG:170/171/173/174 = PALAM/Status/USERCOM/LOOK 非表示
+    //    （AutoConst_TFLAG.ERH:147-150）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `BEGIN TRAIN 保留 Palam Status USERCOM LOOK 四个折叠开关`() {
+        val store = oneCharaStore()
+        val n = elemCount(store, "TFLAG")
+        val toggles = longArrayOf(170L, 171L, 173L, 174L)
+        for (i in toggles) store.writeInt("TFLAG", longArrayOf(i), 1L)
+        // 相邻与远端位置必须照 C# 清 0，证明保留只覆盖这四个下标。
+        val cleared = longArrayOf(0L, 169L, 172L, 175L, (n - 1).toLong())
+        for (i in cleared) store.writeInt("TFLAG", longArrayOf(i), 1L)
+
+        runtime(store).beginStep(BeginType.TRAIN)
+
+        for (i in toggles) {
+            assertEquals(1L, store.readInt("TFLAG", longArrayOf(i)), "折叠开关 TFLAG:$i 跨复位保留")
+        }
+        for (i in cleared) {
+            assertEquals(0L, store.readInt("TFLAG", longArrayOf(i)), "非折叠开关的 TFLAG:$i 仍清 0")
+        }
+    }
 }

@@ -165,7 +165,7 @@ class BootParserConfigTest {
         // spec: VariableParser.cs:163-165（关：OmittedRandArg）；开时省略下标补 0 合法
         //（VariableParser.cs:160-166 的 ZeroTerm 分支）。口径同 CompatiRandKeyTest §解析面。
         val off = assertFailsWith<StmtParseException> { parse(seam(ParserConfig()), "A = RAND") }
-        assertTrue(off.message!!.contains("RAND 不能省略下标"), off.message ?: "(无消息)")
+        assertTrue(off.message!!.contains("RAND省略了一个参数"), off.message ?: "(无消息)")
         assertIs<AssignStmt>(
             parse(seam(RealCorpusCompile.parserConfigFromOverrides(mapOf(enCompatiRAND to "YES"))), "A = RAND"),
         )

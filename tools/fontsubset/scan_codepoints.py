@@ -63,7 +63,7 @@ import os
 import sys
 from collections import Counter
 
-DEFAULT_GAMEDIR = r"D:/DSH/eratw-安卓移植计划/eratw-画蛇添足版eratw4.980"
+DEFAULT_GAMEDIR = os.environ.get("ERATW_GAMEDIR")
 
 # 原版预加载认可的扩展名集合（Preload.cs:59 逐字节对照：csv/erb/erh/erd/als，忽略大小写）
 IN_SCOPE_EXTS = {".csv", ".erb", ".erh", ".erd", ".als"}

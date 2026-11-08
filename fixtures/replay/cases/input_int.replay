@@ -1,0 +1,15 @@
+# INPUT（无限定整数输入）：提交 123 ⇒ long.TryParse 成功 ⇒ process.InputInteger(123)
+# ⇒ RESULT:0 = 123（Process.cs:404-408），脚本打 INPUT=123。
+case: input_int
+target: REPLAY_INPUT_INT
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:827-869
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1119-1137
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc/Process.cs:404-408
+--- inputs
+submit 123
+--- expect-console
+START-INPUT-INT
+INPUT=123
+END-INPUT-INT
+--- expect-vars
+RESULT:0 = 123

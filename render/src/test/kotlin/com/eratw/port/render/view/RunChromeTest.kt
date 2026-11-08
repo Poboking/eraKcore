@@ -13,10 +13,15 @@ import kotlin.test.assertNull
  * （`Print_&_Input.ERB:172-200`）只做 `SETCOLOR 0x70C070` + `PRINTFORML`，原版**没有底色**；
  * 而按钮段的 `DrawCmd.back` 装的是 `ButtonColor`（焦点字色），Android 渲染器把它当底色铺满
  * ⇒ 整行黄底/粉底。本用例把这条口径钉在纯 JVM 层，两个渲染器都必须走 [RunChrome]。
+ *
+ * 2026-11 时停背景修复后的口径：`back` 非 null **只**剩 HTML `<div color>` 的染整行矩形；
+ * `SETBGCOLOR` 是控制台级活值（EmueraConsole.cs:200），每帧 `graph.Clear(bgColor)` 整张清
+ * （`:1816`），经 `ConsoleFeed` 发布进 `ConsoleScreen.backgroundArgb` 整幅铺底——
+ * run 不再承载它，普通文本段 null back 一律不铺。
  */
 class RunChromeTest {
 
-    private fun cmd(kind: RunKind, back: Int, fore: Int = 0xC0C0C0): DrawCmd = DrawCmd(
+    private fun cmd(kind: RunKind, back: Int?, fore: Int = 0xC0C0C0): DrawCmd = DrawCmd(
         row = 0,
         colStart = 0,
         colEnd = 1,
@@ -45,7 +50,7 @@ class RunChromeTest {
     }
 
     @Test
-    fun `普通文本段照铺 SETBGCOLOR 的行背景色`() {
+    fun `非按钮段带自有底色才铺（HTML div 染整行矩形）`() {
         assertEquals(
             0xFF102030.toInt(),
             RunChrome.backgroundFill(cmd(RunKind.TEXT, back = 0x102030), pressed = false),
@@ -53,10 +58,10 @@ class RunChromeTest {
     }
 
     @Test
-    fun `普通文本段缺省背景色是黑的`() {
-        assertEquals(
-            0xFF000000.toInt(),
-            RunChrome.backgroundFill(cmd(RunKind.TEXT, back = 0x000000), pressed = false),
+    fun `非按钮段无自有底色不铺（落在整屏底色上）`() {
+        assertNull(
+            RunChrome.backgroundFill(cmd(RunKind.TEXT, back = null), pressed = false),
+            "SETBGCOLOR 走整屏底色（graph.Clear 整张清），run 不再按行快照背色",
         )
     }
 }

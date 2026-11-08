@@ -358,28 +358,28 @@ class ExprAuditTest {
             ctx.funcs["F"] = { Value.IntV(6L) }
             val tokens = listOf(id("F"), lp(), rp(), op(o), i(0))
             assertFailsWith<ExprEvalException>(o) { evalInt(parseOrThrow(tokens), ctx) }
-            assertEquals(0, ctx.funcCalls.size, "$o 除数为 0 时左操作数不应被求值")
+            assertEquals(0, ctx.funcCalls.size, "$o 除零（Error.DivideByZero）时左操作数不应被求值")
         }
     }
 
     // ------------------------------------------------------------------
-    // 6. 字符串比较的官方 bug
+    // 6. 字符串比较（4.981 判据）
     // ------------------------------------------------------------------
 
     @Test
-    fun `字符串比较-GreaterEqual与LessEqual都是小于`() {
-        // spec: OperatorMethodManager.cs:331（GreaterEqualStrStr 实为 Compare<0）
-        //       OperatorMethodManager.cs:367（LessEqualStrStr 实为 Compare<0，相等泄漏）
+    fun `字符串比较-GreaterEqual与LessEqual按序数`() {
+        // spec: OperatorMethod.cs:547（GreaterEqualStrStr 为 c >= 0）
+        //       OperatorMethod.cs:578（LessEqualStrStr 为 c <= 0）
         // c<0
-        assertEquals(1L, evalInt(parseOrThrow(listOf(s("a"), op(">="), s("b")))))
+        assertEquals(0L, evalInt(parseOrThrow(listOf(s("a"), op(">="), s("b")))))
         assertEquals(1L, evalInt(parseOrThrow(listOf(s("a"), op("<="), s("b")))))
-        // c==0：两个都返回 0（>= 与 <= 同时为假）
-        assertEquals(0L, evalInt(parseOrThrow(listOf(s("a"), op(">="), s("a")))))
-        assertEquals(0L, evalInt(parseOrThrow(listOf(s("a"), op("<="), s("a")))))
-        // c>0：两个都返回 0（>= 应为 1）
-        assertEquals(0L, evalInt(parseOrThrow(listOf(s("b"), op(">="), s("a")))))
+        // c==0：两个都为真
+        assertEquals(1L, evalInt(parseOrThrow(listOf(s("a"), op(">="), s("a")))))
+        assertEquals(1L, evalInt(parseOrThrow(listOf(s("a"), op("<="), s("a")))))
+        // c>0
+        assertEquals(1L, evalInt(parseOrThrow(listOf(s("b"), op(">="), s("a")))))
         assertEquals(0L, evalInt(parseOrThrow(listOf(s("b"), op("<="), s("a")))))
-        // 其余四个比较按 Ordinal 正常：spec: OperatorMethodManager.cs:177-301
+        // 其余四个比较按 Ordinal 正常：spec: OperatorMethod.cs:484/:514 等
         assertEquals(1L, evalInt(parseOrThrow(listOf(s("b"), op(">"), s("a")))))
         assertEquals(0L, evalInt(parseOrThrow(listOf(s("a"), op(">"), s("a")))))
         assertEquals(0L, evalInt(parseOrThrow(listOf(s("a"), op(">"), s("b")))))
@@ -428,14 +428,15 @@ class ExprAuditTest {
         // ExprParseException（带行/列，Parser.kt:6-10）与 ExprEvalException（无位置，Eval.kt:4）。
         // 注意：ReduceXxxTerm 的类型错误发生在**解析期**，C# 是 CodeEE（用户脚本错误），
         // Kotlin 抛的是 ExprEvalException —— 这一分层差异按现状钉桩。
-        // TODO(verify): 以下消息都是硬编码中文，未接 lang 表；C# 走 Lang.Error 文本，
-        //   权威文案见 lang.emuera-zhs.xml 的 Error 段，逐条比对如下：
-        //   除数为 0 ↔ Error.DivideByZero「除数为0的除法运算」（zhs.xml:286）
+        // TODO(verify): 除「除数为0的除法运算」外，以下消息仍是硬编码中文，未接 lang 表；
+        //   C# 走 Lang.Error 文本，权威文案见 lang.emuera-zhs.xml 的 Error 段，逐条比对如下：
+        //   除数为0的除法运算 ↔ Error.DivideByZero（Lang.cs:1326 / 语料根 emuera.zhs.xml:236 /
+        //     reference 表 :286）—— 2026-11-04 lane errtext 已按官方逐字收口，见 OperatorErrorText.kt
         //   数值型 + 字符串型：不合法的组合 ↔ Error.CanNotAppliedBinaryOp（zhs.xml:282，{0}整数型/{1}字符串型）
         //   ++/-- 只能作用于变量 ↔ Error.IncrementNonVar（zhs.xml:273）
         //   一元运算符 ! 不能作用于字符串型 ↔ Error.CanNotAppliedUnaryOp（zhs.xml:281）
         val div = assertFailsWith<ExprEvalException> { evalInt(parseOrThrow(listOf(i(1), op("/"), i(0)))) }
-        assertEquals("除数为 0", div.message)
+        assertEquals("除数为0的除法运算", div.message)
 
         val mix = assertFailsWith<ExprEvalException> { parseOrThrow(listOf(i(1), op("+"), s("a"))) }
         assertEquals("数值型 + 字符串型：不合法的组合", mix.message)
@@ -470,7 +471,10 @@ class ExprAuditTest {
         val ex = assertFailsWith<ExprParseException> { parseOrThrow(listOf(i(1), bad, i(2))) }
         assertEquals(7, ex.line)
         assertEquals(3, ex.col)
-        assertEquals("解析错误(行:7,列:3): 表达式中不允许 '='", ex.message)
+        // 消息里给人读的行号是 **1 基**（lane errtext4 2026-11-05 接上全工程唯一出口
+        // `err/CodeEE.kt` 的 `erbDisplayLine`，与 `stmt/ParseSupport.kt` 的 StmtParseException 同口径）；
+        // 上面的 `ex.line` 字段仍是内部 0 基下标（键面不许改基）。
+        assertEquals("解析错误(行:8,列:3): 表达式中不允许 '='", ex.message)
 
         // 未闭合括号 / 多余符号 / 缺 # 都是解析族。
         assertFailsWith<ExprParseException> { parseOrThrow(listOf(lp(), i(1))) }

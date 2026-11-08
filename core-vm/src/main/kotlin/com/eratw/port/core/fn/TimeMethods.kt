@@ -80,7 +80,7 @@ import java.time.ZoneId
  * ------------------------------------------------------------------
  * 四、JVM 侧内存计数器的选型（合同 §2 i-time 判据 2 的实测对照）
  * ------------------------------------------------------------------
- * 闸机实测（主机 Haruki，`C:/DSH/eratw-安卓移植计划/.tooling/jdk-17.0.20.1+1`，
+ * 闸机实测（主机 Haruki，`<work-root>/eratw-安卓移植计划/.tooling/jdk-17.0.20.1+1`，
  * 命令 `java -Xmx512m`，进程持有 64 MiB 活跃 `byte[]`；同一进程同时用 PowerShell
  * `Get-Process` 采 Windows 工作集）：
  *
@@ -285,9 +285,15 @@ fun usedHeapBytes(): Long = Runtime.getRuntime().let { it.totalMemory() - it.fre
  *
  * [statusReader] 是可注入的取行器：单测喂固定文本、Android 侧喂 `Debug.getMemoryInfo` 一类
  * 更准的读数时都不必改本函数。默认实现每次现读（原版 :8318 也是每次 `new Process`，不缓存）。
+ *
+ * **取行器抛异常照样回落（2026-11-01 稳定性复查）**：注入口是移植侧新增的，`Debug.getMemoryInfo`
+ * 一类平台读数在个别机型上会抛（权限/反射失效）。旧写法直接调用，异常会穿过
+ * `BuiltinHost.memoryUsageBytes` 把 GETMEMORYUSAGE 变成 CodeEE —— 与「内存读数不许让函数失败」
+ * 的既有口径相悖（[:readSelfStatus] 早就把 IO 异常吞成 null）。现在任何异常都按「读不到」处理：
+ * 回落 used heap，并在 [MemoryUsageReading.counter] 如实登记。
  */
 fun processMemoryReading(statusReader: () -> List<String>? = { readSelfStatus() }): MemoryUsageReading {
-    parseVmRssBytes(statusReader() ?: emptyList())?.let {
+    parseVmRssBytes(runCatching { statusReader() }.getOrNull() ?: emptyList())?.let {
         return MemoryUsageReading(it, MemoryCounter.PROC_STATUS_VM_RSS)
     }
     return MemoryUsageReading(usedHeapBytes(), MemoryCounter.USED_HEAP)

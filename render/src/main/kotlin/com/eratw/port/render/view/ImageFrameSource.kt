@@ -77,4 +77,50 @@ class ImageFrame(
 interface ImageFrameSource {
     /** 按资源名取一帧；查不到返回 null（绘制侧按原版口径什么都不画）。 */
     fun frame(resource: String): ImageFrame?
+
+    /**
+     * 按**图形缓冲编号**（`GCREATE` 系列语句建的 gid）取一帧；查不到返回 null。
+     *
+     * 这是 `CBGSETG` 那条路的取图口：CBG 的 gid 图层在 core 侧只登记 gid 与宽高
+     * （`CbgLayerSnapshot` 的 `gid` / `widthPx` / `heightPx`），像素住在 `GraphicsPool` 里，
+     * 绘制侧拿不到 —— 于是按名那套 [frame] 在这里不成立，必须按编号现取。
+     *
+     * 契约：
+     * - 只有「gid 存在、缓冲已创建、像素拿得到」才返回非空；未建 / 已 dispose /
+     *   像素不可得一律 null ⇒ 绘制侧按原版「该 layer 画不出来」处理（静默不画）；
+     * - 返回帧的 `srcX/srcY` 恒 0，`srcW/srcH` 与 `destW/destH` 都是缓冲的
+     *   `width`/`height`（= core 快照里的 `widthPx`/`heightPx`），`basePos`/动画字段恒 0
+     *   —— CBG 图层不是 `ASprite`，没有 `DestBaseSize`/子矩形/动画；
+     * - 实现方**不得**把像素塞进 `CbgLayerSnapshot`，也不得为它往 `SpritePool` 注册同名
+     *   sprite：前者会把 MB 级 `IntArray` 送进 L3 StateHash 的逐元素哈希链，后者会让
+     *   `aux:sprite` 整表进链（同一条代价，已在方案论证里否决）。
+     *
+     * 默认实现恒 null：纯文件实现（桌面 `uipreview`、单测假体）不实现本方法即零行为变化，
+     * 既有调用点也不会因为多一个方法而编译不过。
+     */
+    fun frameByGid(gid: Int): ImageFrame? = null
+
+    /**
+     * 「因为这个缓冲被**原地重写**而重建位图」的累计次数。
+     *
+     * 为什么要它：脚本可以在**同一块** `GCREATE` 缓冲上反复 `GDRAWSPRITE` 合成（布娃娃预览
+     * 每改一次选项就重画一遍画布），而绘制发生在 UI 线程、脚本跑在 VM 线程 —— UI 线程可能
+     * 正好在合成跑到一半时截图，取到的是**半成品**位图。只靠「每次控制台帧发布重画一次」
+     * 修不干净：发布之后如果 VM 没有新输入、UI 不再重画，屏幕上就永远停着那半张图。
+     *
+     * 所以绘制侧在 `onDraw` 前后各读一次这个计数：**变了就再排一帧**。第二帧取到的位图
+     * 是按新的写代数重建的（见 `GraphicsBuffer.pixelRevision`），且此时计数不再变 ⇒ 收敛，
+     * 不会自激。
+     *
+     * 默认 0 = 该来源没有「原地重写」这条通路（纯文件图实现），绘制侧照旧只画一帧。
+     */
+    val cacheRebuilds: Long get() = 0L
+
+    /**
+     * 是否有一笔位图重建被「写空闲稳定期」推迟着（见 `SpriteBitmapSource` 的 `REBUILD_SETTLE_MS`）。
+     *
+     * 绘制侧看到 true 就继续排帧：脚本还在连续画（一屏 20+ 层合成）时不必每帧重建 4.3 MiB 位图，
+     * 写一停就重建 —— 画面最终一定追到最新内容，且合成期间不做无谓分配。
+     */
+    val hasPendingRebuild: Boolean get() = false
 }

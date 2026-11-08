@@ -212,4 +212,53 @@ class DimVarSizesSnapshotTest {
         assertNotNull(self, "带 VARSIZE 尺寸的全局声明应真实在册")
         assertEquals(palam, self.spec.dims[0].toLong(), "运行期注册的尺寸 = 快照 PALAM")
     }
+
+    // ------------------------------------------------------------------
+    // 5) 运行期并入（a59cd7ff 的运行期半边，SystemVariableBootstrap.mergedVarSizes）：
+    //    本批用户全局要并进快照，后声明的 `#DIM X, VARSIZE("Y")`（Y 亦是用户全局）
+    //    折得出 —— 原版边装边注册（IdentifierDictionary.cs:429）。GameSession 装配全局
+    //    #DIM 时摘掉并入接线（只喂系统表）⇒ 本用例「只喂系统表」对照支就是当时的现状。
+    // ------------------------------------------------------------------
+
+    @Test
+    fun 运行期并入后用户全局的varsize引用折得出() {
+        val base = DimVarSizes.systemSnapshot(null)
+        val decls = listOf(
+            SystemVariableBootstrap.RawDeclaration("#DIM 用户尺寸表, 42", "A.ERH", 1),
+            SystemVariableBootstrap.RawDeclaration("#DIM 依赖表, VARSIZE(\"用户尺寸表\")", "A.ERH", 2),
+        )
+        val merged = SystemVariableBootstrap.mergedVarSizes(
+            base = base,
+            declarations = decls,
+            config = DimParseConfig(),
+            keywordTables = emptyMap(),
+            consoleWidth = 136,
+        )
+        assertEquals(listOf(42L), merged["用户尺寸表"]?.toList(), "先声明的用户全局要进并入快照")
+        assertNull(base["用户尺寸表"], "并入必须返回新表、不动 base")
+
+        // 真实 install 挂并入后的快照：VARSIZE("用户尺寸表") 折出 42、依赖声明在册
+        val store = VariableStore(VariableRegistry())
+        val res = SystemVariableBootstrap.install(
+            store,
+            decls,
+            DimParseConfig().withPureStaticDimFolders(merged),
+        )
+        assertEquals(0, res.failures.size, "并入快照后依赖声明应注册成功：${res.failures.map { it.message }}")
+        val dep = store.userVar("依赖表")
+        assertNotNull(dep, "依赖用户全局尺寸的声明应真实在册")
+        assertEquals(42L, dep.spec.dims[0].toLong(), "运行期注册的尺寸 = 用户全局的 42")
+
+        // 对照红线（失败不许变静默成功）：同一批声明只喂系统表（旧口径）必须仍失败
+        val bareStore = VariableStore(VariableRegistry())
+        val bare = SystemVariableBootstrap.install(
+            bareStore,
+            decls,
+            DimParseConfig().withPureStaticDimFolders(base),
+        )
+        assertTrue(
+            bare.failures.isNotEmpty() || bareStore.userVar("依赖表") == null,
+            "只喂系统表时 VARSIZE(用户全局) 必须仍失败留痕（旧口径 = 声明被丢）",
+        )
+    }
 }

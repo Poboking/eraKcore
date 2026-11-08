@@ -1,0 +1,44 @@
+=== 符号表 ===
+配置: IgnoreCase=true SortFilenames=true DebugMode=false Collator=JA_JP 宏 1 个（含展开体） ERH #DIM CONST 声明 1 条
+尺寸可解常量 2 个  不可求值丢弃声明: 收集前 1 → 收集后 1
+  仍不可求值（前 1 条）:
+    sub/C_サブ.ERB:2 #DIM SORT_VALUE [[VARSIZE("RELATION")]]
+定义 25  唯一名 11  重名 11（非事件 9 / 事件 2）  被遮蔽 14  方法 1
+
+=== 重名组 ===
+[非事件] @Z_PLAIN  3 处
+  1. Z_FIRST.ERB:1 (fileIndex=3) 
+  生效: Z_FIRST.ERB:1
+[事件] @EVENTCOM  3 处
+  1. Z_FIRST.ERB:8 (fileIndex=3) #PRI 
+  2. Z_FIRST.ERB:5 (fileIndex=3) 
+  3. a_second.ERB:9 (fileIndex=1) #LATER 
+[非事件] @G12_DUP  2 处
+  1. Z_FIRST.ERB:12 (fileIndex=3) #FUNCTION 
+  生效: Z_FIRST.ERB:12
+[非事件] @G12_ARGS  2 处
+  1. Z_FIRST.ERB:17 (fileIndex=3) 
+  生效: Z_FIRST.ERB:17
+[非事件] @G12_ONLY  3 处
+  1. sub/C_サブ.ERB:21 (fileIndex=4) #SINGLE 
+  生效: sub/C_サブ.ERB:21
+[非事件] @G12_SINGLE  2 处
+  1. Z_FIRST.ERB:31 (fileIndex=3) #SINGLE 
+  生效: Z_FIRST.ERB:31
+[非事件] @G12_PATH  2 处
+  1. Z_FIRST.ERB:36 (fileIndex=3) 
+  生效: Z_FIRST.ERB:36
+[非事件] @G12_CTRL  2 处
+  1. M_CTRL.ERB:1 (fileIndex=2) 
+  生效: M_CTRL.ERB:1
+[非事件] @日本語ラベル  2 处
+  1. Z_FIRST.ERB:43 (fileIndex=3) 
+  生效: Z_FIRST.ERB:43
+[非事件] @G12_SUB  2 处
+  1. sub/C_サブ.ERB:8 (fileIndex=4) 
+  生效: sub/C_サブ.ERB:8
+[事件] @EVENTTRAIN  2 处
+  1. sub/C_サブ.ERB:13 (fileIndex=4) #ONLY 
+  2. sub/C_サブ.ERB:17 (fileIndex=4) #PRI 
+
+符号表摘要: C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\sym-probe\base\fixture-ja-nocheck.json

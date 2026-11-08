@@ -1,0 +1,24 @@
+{
+  "errorGroups": [
+    {"route": "assign", "msg": "\"\u0000\"は代入演算子として認識できません", "count": 6, "examples": [{"file": "SJIS_LOSSY.ERB", "line": 0}, {"file": "SJIS_OK.ERB", "line": 0}, {"file": "SJIS_TRUNC.ERB", "line": 0}, {"file": "U8_BOM.ERB", "line": 0}, {"file": "U8_NONASCII.ERB", "line": 0}]}
+  ],
+  "warningGroups": [
+  ],
+  "topErrorFiles": [
+    {"file": "SJIS_LOSSY.ERB", "errors": 1, "warnings": 0},
+    {"file": "SJIS_OK.ERB", "errors": 1, "warnings": 0},
+    {"file": "SJIS_TRUNC.ERB", "errors": 1, "warnings": 0},
+    {"file": "U8_BOM.ERB", "errors": 1, "warnings": 0},
+    {"file": "U8_NONASCII.ERB", "errors": 1, "warnings": 0},
+    {"file": "U8_PLAIN.ERB", "errors": 1, "warnings": 0}
+  ],
+  "files": [
+    {"file": "BINARY.ERB", "encoding": "UTF-8", "binary": true, "physicalLines": 0, "logicalLines": 0, "tokens": 0, "stmtLines": 0, "errors": 0, "warnings": 0},
+    {"file": "SJIS_LOSSY.ERB", "encoding": "Shift-JIS", "binary": false, "physicalLines": 1, "logicalLines": 1, "tokens": 1, "stmtLines": 0, "decodeReplacement": true, "errors": 1, "warnings": 0, "diagnostics": [{"line": 0, "level": "ERROR", "msg": "assign|\"\u0000\"は代入演算子として認識できません"}]},
+    {"file": "SJIS_OK.ERB", "encoding": "Shift-JIS", "binary": false, "physicalLines": 1, "logicalLines": 1, "tokens": 1, "stmtLines": 0, "errors": 1, "warnings": 0, "diagnostics": [{"line": 0, "level": "ERROR", "msg": "assign|\"\u0000\"は代入演算子として認識できません"}]},
+    {"file": "SJIS_TRUNC.ERB", "encoding": "Shift-JIS", "binary": false, "physicalLines": 1, "logicalLines": 1, "tokens": 1, "stmtLines": 0, "decodeReplacement": true, "errors": 1, "warnings": 0, "diagnostics": [{"line": 0, "level": "ERROR", "msg": "assign|\"\u0000\"は代入演算子として認識できません"}]},
+    {"file": "U8_BOM.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 1, "logicalLines": 1, "tokens": 1, "stmtLines": 0, "decodeReplacement": true, "errors": 1, "warnings": 0, "diagnostics": [{"line": 0, "level": "ERROR", "msg": "assign|\"\u0000\"は代入演算子として認識できません"}]},
+    {"file": "U8_NONASCII.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 1, "logicalLines": 1, "tokens": 1, "stmtLines": 0, "errors": 1, "warnings": 0, "diagnostics": [{"line": 0, "level": "ERROR", "msg": "assign|\"\u0000\"は代入演算子として認識できません"}]},
+    {"file": "U8_PLAIN.ERB", "encoding": "UTF-8", "binary": false, "physicalLines": 1, "logicalLines": 1, "tokens": 2, "stmtLines": 0, "errors": 1, "warnings": 0, "diagnostics": [{"line": 0, "level": "ERROR", "msg": "assign|\"\u0000\"は代入演算子として認識できません"}]}
+  ]
+}

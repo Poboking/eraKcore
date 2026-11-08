@@ -87,11 +87,37 @@ interface BeginCallPort {
      */
     fun afterSourceCheckReset()
 
-    /** `TrainName[i]`；null = 该格为空或宿主未提供训练名表。 */
+    /** `TrainName[i]`；null = 该格为空（原版空槽是 `null` 元素，`Process.cs:2265`/`:2281` 都按空跳过）。 */
     fun trainName(code: Int): String?
 
-    /** `TrainName.Length`；null = 宿主未提供训练名表。 */
-    fun trainNameCount(): Int?
+    /**
+     * `TrainName.Length` —— 原版是 `ConstantData.TrainName` 的数组字段直读，**恒有值**：
+     * `CSV/Train.csv` 没装载时它是一张 0 长度数组（`ConstantData.cs` 按
+     * `MaxDataList[TRAIN 槽]` 建表），不是「没有这张表」。所以本函数返回 0 而不是 null。
+     */
+    fun trainNameCount(): Int
+
+    /**
+     * 系统字符串变量 `SAVEDATA_TEXT`（原版 `vEvaluator.SAVEDATA_TEXT`，
+     * `VariableEvaluator.cs:119-129`：属性即 `varData.DataString[0]`）。
+     *
+     * 自动存档链的两端都经它：`beginAutoSave` 写缺省文案（`Process.cs:2573`），
+     * `endAutoSaveCallSaveInfo` 把**当前值**交给 `SaveTo`（`:2583`）——中间的
+     * `SAVEINFO` 脚本可以改写它（`CALLSAVEINFO` 语义，`PUTFORM` 追加路在
+     * `StatementExecutor` 的 `Process.cs:1295-1306` 分支同格读写），所以
+     * **写侧与读侧必须是同一格变量**，不能另存旁路状态。
+     * 缺省 "" + 写 no-op = 假体/无变量池宿主；链在缺省下只会拿到空文案，不伪造内容。
+     */
+    fun savedataText(): String = ""
+    fun setSavedataText(value: String) {}
+
+    /**
+     * 原版 `count == coms.Count`（`Process.cs:2437`）：`CALLTRAIN` 队列是否已**全部执行完**。
+     * `endCallEventComEnd` 的 CALLTRAINEND 早退闸（`:2437-2448`）只在队列耗尽时触发。
+     * 缺省 true = 无队列语义的假体按「已耗尽」处理（配合 [isCTrain] 缺省 false，
+     * 该分支整体不触发，既有读数不变）。
+     */
+    fun commandsConsumed(): Boolean = true
 
     /** 脚本 `BEGIN` 写下的挂起入口（`ProcessState.begintype`）。 */
     fun pendingBegin(): BeginType?
@@ -146,6 +172,71 @@ interface BeginHost {
     /** `Config.AutoSave`（Process.cs:2556）。 */
     fun autoSave(): Boolean = false
 
+    /**
+     * `vEvaluator.SaveTo(saveTarget, vEvaluator.SAVEDATA_TEXT)`（`Process.cs:2583`；
+     * 方法体 `VariableEvaluator.cs:2644-2685`：吞掉一切异常返回 false）。
+     *
+     * 自动存档链的唯一实档动作 —— 由 [com.eratw.port.core.proc.GameSession] 接到
+     * `core/save` 既有实档路（`SystemOps.saveData` / `FileSystemOps`，与语句 `SAVEDATA`
+     * 同一条 `SaveCapture → SaveCodec → io.write` 通道，`Process.cs:1327-1349` 同源）。
+     *
+     * 三态（接口缺省纪律「没有该能力不伪造结果」）：
+     * - true  = 存档成功；
+     * - false = 原版失败 ⇒ 两行报错（[AUTO_SAVE_ERROR_TEXT1] / [AUTO_SAVE_ERROR_TEXT2]，
+     *   `Process.cs:2585-2586`）+ `ReadAnyKey`（`:2587`）；
+     * - null（缺省）= 宿主没有存档能力 ⇒ 状态机返回 BLOCKED，既不报错也不继续收口。
+     */
+    fun saveTo(slot: Int, text: String): Boolean? = null
+
+    /**
+     * `console.ReadAnyKey()`（方法体 `EmueraConsole.cs:876-895`；无参 ⇒ `anykey = false`
+     * ⇒ `InputType.EnterKey`，`:883-886`）—— **等玩家点一下**。两个调用点：
+     * - `Process.cs:2587`：自动存档失败两行报错后的等待；
+     * - `Process.cs:2450-2453` 的 `setWait()`（`:2047-2050`，方法体就是这一句）：
+     *   `endCallEventComEnd` 尾部、回训练链之前。发起条件由
+     *   [needWaitToEventComEnd]（`:2417` 置位）给出 —— 语料里「玩家选了、但自己判定不该做」
+     *   的指令只打一行提示就 `RETURN` 负数、零状态变化（例：清掃 = `COM410`，
+     *   `COMF410 掃除.ERB:18-26`），PC 上紧接着就是这次等待、提示被钉在屏上；移植侧没接时
+     *   手机上一次回合整帧一次刷屏 ⇒ 提示行一冒出来就滚进历史 ⇒ 玩家只看到「按钮点了没反应」。
+     *
+     * 缺省 no-op = 无控制台的假体/宿主不阻塞（与旧链「失败也直进 [endAutoSave]」的读数一致）；
+     * 生产宿主 [ConsoleBeginHost] 转交 [com.eratw.port.core.host.QueueInputSink.readAnyKey]
+     * 并负责等前把整帧上屏（见该覆写）。
+     */
+    fun readAnyKey() {}
+
+    /**
+     * 指令链收尾那次按键等待（[readAnyKey]）的**适用范围**。
+     *
+     * 原版口径 = 「凡是走 `SOURCE_CHECK` 的指令都等一次」（`Process.cs:2417` 置位 →
+     * `:2450-2453` 的 `setWait()`），缺省 `true` 即原样，没表态的宿主（含 [BeginFlow.NONE]
+     * 与各测试假体）行为零变化。
+     *
+     * 生产宿主收窄的理由与取值见
+     * [com.eratw.port.core.proc.ConsoleBeginHost.commandEndWaitComCodes]：手机上一次等待
+     * = 一次额外点击，而语料里 移動 是「每走一步就 `RETURN 1` 回训练链」的高频指令
+     * （`魔改内容/qol/qol_MAP.ERB:59-66`），那一步等待会吃掉玩家下一次点目的地。
+     *
+     * @param comCode 本次指令的训练码（`SELECTCOM`，原版 `Process.cs:2380` 写入；
+     *   注意取的是 **`SOURCE_CHECK` 之前**的值 —— 那之后 `RESULT` 已被脚本函数的返回值覆盖）
+     * @param result 本次指令自己的返回值（`COM<n>` 的 `RETURN`）：负数 = 语料自己判定
+     *   「不该做」，只打一行提示就返回、零状态变化（例 `COMF410 掃除.ERB:18-26`）
+     */
+    fun shouldWaitAfterCommand(comCode: Int, result: Long): Boolean = true
+
+    /**
+     * eraTW 扩展配置 `AUTO_SAVE` 的**「前」档**（裁定依据：报告引新版 `Process.cs:1849-1891`
+     * 的 `endCallEventComEnd` 分支②；缺省 `CompatiCalleventToEnd`＝「後」，报告引
+     * `ConfigData.cs:66`）。
+     *
+     * **TODO(verify)**：本仓 reference 的 `ConfigData.cs:66` 是 `FontSize`、全仓无
+     * `CalleventToEnd` 命中，`endCallEventComEnd` 在本版位于 `Process.cs:2424-2456` 且
+     * 无此分支 —— 该配置项属于 4.981 实跑的 SkiaX 分支，需反编译 `Emuera_skiaV16_x64.exe`
+     * 才能给行号级证据（BOARD 2026-10-30 条已登记「反编译参考已非权威」）。
+     * 缺省 false =「後」= 不在 [stepCallEventComEnd] 内联走自动存档链。
+     */
+    fun autoSaveAtComEnd(): Boolean = false
+
     /** `endCallShowStatus` 的 comAble 清零（Process.cs:2246-2254）。 */
     fun resetComAble() {}
 
@@ -154,6 +245,43 @@ interface BeginHost {
 
     /** `Config.ComAbleDefault`（Process.cs:2293）。 */
     val comAbleDefault: Int get() = 1
+
+    /**
+     * 系统输入是否可能是 `comAble` **下标** —— 即宿主有没有渲染
+     * `Process.endCallComAbleXX` 那组 `PrintC` 按钮。
+     *
+     * 原版 `trainWaitInput`（`Process.cs:2344-2349`）拿 `systemResult` 当 `comAble` 下标反查，
+     * 前提是控制台上真有 `getTrainComString` 打出来的 `乳交[ 51]` 这类按钮
+     * （`Process.cs:2257-2261`：文本 `名称[下标]`，值 = 下标）。
+     *
+     * 移植侧生产宿主 [ConsoleBeginHost] **不渲染**这组按钮（`onComAble` 保持缺省 no-op，
+     * 见其 KDoc「onComAble、resetComAble 保持缺省」），指令菜单完全由语料自己打印。
+     * 而画蛇添足版 `@BUILD_COM_BUTTON_HTML`（`魔改内容/PRINT系/HTML_PRINT_Components.ERB:200`）
+     * 的按钮值是**训练码本身**：
+     * `<button value='{COM_VAL}'>%COM_TEXT%[{COM_VAL,3}]</button>`，
+     * 菜单上写的就是 `乳交[ 82]`、`正常位[ 60]`。
+     *
+     * 于是 `systemResult` 永远是训练码；再拿它查 `comAble` 会**错派发**（实测读数见下），
+     * 正确的落点是 `USERCOM` 支 —— 语料 `USERCOM.ERB:84-86` 那两行注释与代码
+     * （`;SELECTCOMとTFLAG:3(SELECTCOM退避)に入力値セット` / `SELECTCOM = RESULT` /
+     * `TFLAG:3 = SELECTCOM`）就是专门为「输入值 = 训练码」准备的；配套的还原在
+     * `@SOURCE_CHECK`（`SOURCE.ERB:25` 的 `SELECTCOM = TFLAG:3`，用来抵消 `DOTRAIN 999`
+     * 对 `SELECTCOM` 的 dummy 覆盖）。若走 `comAble` 反查，这两处都成了死代码/自毁代码。
+     *
+     * 实测（桌面复现装置，探针用完已删；时停 + 咲夜 + 扒光但内裤未脱，真产物 + `save03.sav`）：
+     * - `comAble` 表 33 项、最大下标 193，其中 `comAble[82] = 180`、`comAble[60]` 无此项；
+     * - 旧口径点 `乳交[ 82]` ⇒ `SELECTCOM = comAble[82] = 180` ⇒ 跑的是 `COM180`（潤滑液）；
+     *   点 `正常位[ 60]` ⇒ 查不到 ⇒ 退回 `USERCOM`（这条反而是对的）。
+     *   同一状态下 `CAN_COM82(0)` 的语料自报明细是
+     *   `受虐属性LV1(2) - 坚强(5) - 自尊心高(15) + 侍奉精神LV2(8) + 献身的(6) = -4 < 实行值30`
+     *   —— 也就是「走对支时会被 `CAN_COM` 按実行値拒掉」，而错派发把这条判定整个绕过去了。
+     *
+     * 缺省 **true** = 按原版口径当**下标**解释（`Process.cs:2344-2349`），这是保守缺省：
+     * 没表态的宿主（含 `BeginHost.NONE` 与各测试假体）行为一律不变。
+     * 只有 [ConsoleBeginHost] 这类**明确从不渲染下标按钮**的宿主才置 false，
+     * 让 `trainWaitInput` 把输入原样交 `USERCOM` 支。
+     */
+    val systemResultIsComAbleIndex: Boolean get() = true
 
     /** 指令选择输入（`setWaitInput`，Process.cs:2330）。null = 无输入后端。 */
     fun awaitUserComInput(): Long? = null
@@ -176,8 +304,157 @@ interface BeginHost {
     /** `console.LastLineIsTemporary`（Process.cs:2426 / :2514 / :2644）。默认 false。 */
     fun lastLineIsTemporary(): Boolean = false
 
+    /**
+     * `console.LastLineIsEmpty`（调用点 `Process.cs:2428`；属性体 `EmueraConsole.cs:526-537`：
+     * 显示行表为空 ⇒ false，否则末显示行整行内容 `ToString().Trim()` 为空 ⇒ true ——
+     * `ConsoleDisplayLine.ToString()` 是整行内容（文本与按钮同池）的拼接
+     * （`ConsoleDisplayLine.cs:127-140`），不是「无按钮」）。与 [lastLineIsTemporary]
+     * 同刻同源，调用点全在临时行门的**内层**（`Process.cs:2426`/`:2516`/`:2646`），
+     * 只在该门成立时才有意义。
+     *
+     * 缺省 false = 宿主没有控制台可读（接口缺省纪律，与 [lastLineIsTemporary] 同口径）。
+     */
+    fun lastLineIsEmpty(): Boolean = false
+
+    /**
+     * `console.deleteLine(n)`（调用点 `Process.cs:2430`/`:2194`/`:2518`/`:2648`；方法体
+     * `EmueraConsole.cs:2999-3051`）：
+     * 从显示行表尾删除至多 n 条**逻辑行**（折行续行随主行一起走，被删行上的按钮随之消亡）。
+     * 状态机调用点：EVENTCOMEND 空行半句（`:2428-2432`，删 2）+ W10 接线的三处 ——
+     * 标题菜单 else 支（`:2194`，删 1）、ABLUP 收尾空行半句（`:2518`，删 2）、
+     * 商店收尾空行半句（`:2648`，删 2）+ OBS2-L1 换道的两处商店失败支
+     * （`:2624`/`:2629`，各删 1）与 ABLUP 缺函数支（`:2498`，删 1，W10 后随 ECHO-INPUT
+     * 波次换道）—— 删 1 的各支删除对象 = 玩家键入的回显行
+     * （`EmueraConsole.cs:1280-1282`），全部与 [printTemporaryLine] 的提示成对出现。
+     * 缺省 no-op = 宿主没有可删行的控制台。
+     */
+    fun deleteLine(count: Int) {}
+
+    /**
+     * `console.PrintTemporaryLine(str)`（调用点 `Process.cs:2431`/`:2195`/`:2499`/`:2519`/
+     * `:2625`/`:2630`/`:2649`；
+     * 方法体
+     * `EmueraConsole.cs:3053-3056` → `PrintSingleLine(temporary: true)`）：追加一条临时行。
+     * 与 [writeLine] 的差别：writeLine 落**普通行**（追加即存续），本方法落**临时行**
+     * （REUSELASTLINE 同族）—— 追加新显示行时若末行是临时行会先被删掉
+     * （`EmueraConsole.cs:2891-2893` 的 `addDisplayLine` 门），所以提示打在菜单重等的
+     * 窗口里可见、下一次正式输出到达时收走，与原版同寿。
+     * 缺省 no-op = 宿主没有临时行通道。
+     */
+    fun printTemporaryLine(text: String) {}
+
+    /**
+     * `console.updatedGeneration = true`（调用点 `Process.cs:2433`；字段
+     * `EmueraConsole.cs:106`。**字段直写**，不是 `UpdateGeneration()`（`:770-774`）——
+     * 那是按钮构造专用、连 lastButtonGeneration 一起前移，本点位用它旧按钮照样死，
+     * 通道语义见 [com.eratw.port.core.host.LineBufferConsoleSink.markGenerationUpdated]）。
+     *
+     * 状态机调用点（W8-gen 起）：`endCallEventComEnd` 分支①（[stepCallEventComEnd]，即
+     * `Process.cs:2433`）+ W9-gen 补的同款四处 —— 标题菜单（[stepOpenning]，`:2196`）、
+     * ABLUP 缺函数（[stepAblupWait]，`:2500`）、ABLUP 收尾临时行（[stepAblupCall]，`:2521`）、
+     * 商店收尾临时行（[stepShopEventBuy]，`:2651`）—— 全部是「非法输入/临时行收尾 →
+     * 重等输入」形态：重等前置脏，下一次等待入口的 `newGeneration`
+     * （`EmueraConsole.cs:789-796`）才不会因脚本行推进而把当前页世代前移、
+     * 把屏上旧菜单按钮整批作废（「点了没反应」）。
+     * `Process.cs:2852`/`:2868`/`:2930`（存读档 UI handler 内）暂无移植落点——
+     * 那四段 handler 未接管（`step` 落「未接管」BLOCKED），接管时须随行补置位。
+     * 缺省 no-op = 宿主没有世代机制可置（`NONE` 与假体行为不变）。
+     */
+    fun markGenerationUpdated() {}
+
     /** 系统行输出（无效值提示等）。默认丢弃。 */
     fun writeLine(text: String) {}
+
+    /**
+     * `console.PrintError(str)`（调用点 `Process.cs:2585-2586` 自动存档失败两行；
+     * 方法体 `EmueraConsole.cs:3098-3116`）。与 [writeLine] 的语义差集（逐句对照）：
+     * - 空串早退（`EmueraConsole.cs:3100-3101`）—— writeLine 无此门；
+     * - `PrintFlush(force:false)` 先结掉打印缓冲（`:3107`）；
+     * - `UseUserStyle = false` 粘滞复位（`:3108`；此后入缓冲的内容都回默认样式，
+     *   直到下一条 PRINT 系语句写真，见 `ConsoleSink.setUseUserStyle` 的 KDoc）——
+     *   writeLine 走当前用户样式（SETCOLOR/FONTSTYLE/SETFONT 全部生效）；
+     * - `PrintPlainwithSingleLine` 出**纯文本、不折行、不参与 `[...]` 自动按钮/HTML
+     *   解析**的行（`:3109`；PrintStringBuffer.cs:125-134 的 createPlainButton 口径）——
+     *   writeLine 的 `Print` 会解析自动按钮；
+     * - `addDisplayLine(force_LEFT: true)` 强制左对齐（`:3112`）—— writeLine 吃当前
+     *   ALIGNMENT；
+     * - `RefreshStrings(force_Paint:false)`（`:3113`）的对位是
+     *   `LineBufferConsoleSink.printError` 的 `publishFrame`（错误画面必上屏，
+     *   `FrameGateUnfreezeTest` 已钉）；
+     * - `Program.DebugMode` 下先 `DebugPrint`+`DebugNewLine` 双打（`:3102-3106`）——
+     *   本移植恒非调试态（`ErbPreprocessor.kt:63`「本移植恒 false」、
+     *   `Symbols.kt:342` 的 `[IF_DEBUG]` 开关），该半句**不适用**，不补。
+     *
+     * 移植侧真实现对位在 sink：`LineBufferConsoleSink.printError`
+     * （`ConsoleSink.kt:376` 声明、`LineBufferConsoleSink.kt:2272-2298` 实现，
+     * 前六条差集全部已落地）。本方法缺省**降级转 [writeLine]** —— 未覆写的宿主
+     * 保持既有普通行行为。生产宿主 `ConsoleBeginHost` 已由 OBS2-L1 组长接线覆写
+     * （转 `LineBufferConsoleSink.printError`，`ConsoleBeginHost.kt` 的 `printError`），
+     * 自动存档失败两行的样式复位/强制左对齐/不折行/不吃按钮解析/帧必上屏五格自此到位。
+     */
+    fun printError(text: String) { writeLine(text) }
+
+    /**
+     * `console.PrintSingleLine(str)`（调用点 `Process.cs:2687`/`:2694` 的存读档问句；
+     * 方法体 `EmueraConsole.cs:3147-3165`）—— **非临时行**的独立单行输出。与 [writeLine]
+     * （→ `console.Print` + `NewLine`，`EmueraConsole.cs:3167-3172`/`:3334-3336`）的差：
+     * - 先 `PrintFlush(force:false)` 把**未结的打印缓冲**单独结掉（`:3155` → `:3375-3383`
+     *   的 `printBuffer.Flush` 走折行路），再 `BufferToSingleLine(force:true)`
+     *   （`:3158` → `:3339-3353` → `printBuffer.FlushSingleLine`，`PrintStringBuffer.cs:170-177`）
+     *   把本句排成**一条不折行**的显示行；
+     * - [writeLine] 的 `Print` 是往**同一个** printBuffer 里追加（`EmueraConsole.cs:3167-3172`），
+     *   上一句 PRINTN/PRINTC 留下的未结残段与本句**并进同一段**再一起折行 ⇒ 问句与残段
+     *   粘成同一逻辑行（原版这里不会：残段先被 `PrintFlush` 单独结掉）。
+     *
+     *   注：两条路在「末显示行 `IsLineEnd == false`」时都会被 `addDisplayLine`
+     *   （`EmueraConsole.cs:2948-2965`）并进去，**看得见差别的是折行**：本方法那条
+     *   走 `FlushSingleLine` 不折行（`PrintStringBuffer.cs:170-177`），`NewLine` 那条
+     *   走 `printBuffer.Flush` 按宽度折（`EmueraConsole.cs:3375-3383`）。
+     *   钉测 `WaitInputGenerationTest` 即钉这一格。
+     *
+     * 移植侧对位在 sink：`ConsoleSink.printSingleLine`（`ConsoleSink.kt:83` 声明、
+     * `LineBufferConsoleSink.kt:1486-1491` 实现，`noBreak` 单行见 `:2736-2747`）——
+     * 通道**现成**，本方法只是 BeginHost 侧的口。缺省**降级转 [writeLine]**（纪律照
+     * [printError]）：未覆写的宿主（含 `NONE` 与各测试假体）行为与本刀之前逐字一致，
+     * 不伪造单行语义。生产宿主 [ConsoleBeginHost] 覆写转 `console.printSingleLine`。
+     */
+    fun printSingleLine(text: String) { writeLine(text) }
+
+    /**
+     * 「把当前这一屏叫出来的脚本函数」的登记（OBS2-L5）—— 对位原版
+     * `ProcessState.currentLine` 这个**字段**（`ProcessState.cs:40-50`）：C# 只在 VM 真的执行一行时
+     * 写它（`FunctionIdentifier.cs:292` 的主循环 `state.CurrentLine = enumerator.Current`，另有
+     * `:3128`/`:3179` 的 `#IF` 分支与 `Process.cs:1814` 的 STRDATA），**函数返回、栈清空都不清**
+     * （全仓无置 null 的写点）⇒ 系统菜单（商店/ABLUP/指令/标题）在 `setWaitInput`
+     * （`Process.cs:2052-2088`）挂起时，`process.getCurrentLine`（`Process.cs:142`）读到的就是
+     * 「印完这一屏之后停住的那条脚本行」，同一屏重问多少次都是同一个身份位
+     * ⇒ `EmueraConsole.cs:789-796` 走 else 支、`lastButtonGeneration` 原地不动、屏上旧按钮
+     * 保持可点。移植侧的等待点没有那个字段可退：BEGIN 状态机的每次等待都发生在 `vm.run`
+     * **返回之后**（`Vm.unwindScopes` 把帧深收回 -1，`Vm.kt:947-955`；引擎侧函数走
+     * `runEntry` → `vm.run`，`ProcessRuntime.kt:2901-2923`），现算的
+     * `ProcessRuntime.scriptLineTokenNow`（`:1242`）在无帧时恒 -1（桌面实测：真
+     * [GameSession] 装配下 `begin(SHOP)` 泵到 `Shop_WaitInput` 前后读数都是 -1；
+     * 同一结论的独立记载见 `core/diag/PageFunctionTrail.kt:9-14`「等待点全部发生在
+     * BeginFlow 的 Kotlin 步、相邻两次 ERB 调用之间 ⇒ 无帧」）⇒ 直接把现算通道接进
+     * [ConsoleBeginHost] 等于没接。本方法就是缺的那一格：**由最清楚「这一屏是谁印的」的
+     * [BeginFlow] 在每次真的跑过脚本函数之后把函数名登记给宿主**。
+     *
+     * 登记点 = [BeginFlow] 的脚本调用统一入口（`callScript`），且只在被调方**真的存在**
+     * （`callFunction` 返回 true）时登记：缺函数支一支脚本都没跑（`Process.cs:2495` 的
+     * `ABLUP{N}` 缺失、`:2618` 的 `EVENTBUY` 缺失），身份位必须留在印上一屏的那个函数上，
+     * 与原版「没执行行 ⇒ `currentLine` 不变」同形。
+     *
+     * 粒度差（如实登记）：原版是**行**级、这里是**函数**级（宿主拿不到无帧时刻的 pc）。
+     * 唯一能观察到的差别是「同一函数两次叫屏之间没盖过任何按钮」—— 而换屏必然重印按钮、
+     * 按钮盖章就把 `lastButtonGeneration` 推到新世代并置脏（`LineBufferConsoleSink.stampButtonGeneration`
+     * `:753-758`，写点 `:1930`/`:1949`/`:2246`/`:2769`/`:3150`），`EmueraConsole.cs:789` 的
+     * `!updatedGeneration` 门随即短路，身份位在这一格**根本不参与判定** ⇒ 函数级与行级
+     * 在可观测面等价。真换了另一支函数叫屏（`SHOW_SHOP` → `EVENTBUY` → …）身份位照旧变，
+     * 原版「脚本走远 ⇒ 旧页作废」的判据不被本刀冻住（钉在 WaitInputGenerationTest）。
+     *
+     * 缺省 no-op = 宿主没有世代概念（[BeginHost.NONE] 与各测试假体），行为与本刀之前逐字一致。
+     */
+    fun noteWaitPageProducer(functionKey: String) {}
 
     /**
      * `AppContents.UnloadTempLoadedConstImageNames()`（`Process.cs:2671`；
@@ -277,10 +554,14 @@ data class StateStep(
 /**
  * @param calls 脚本调用/变量端口（[ProcessRuntime] 或单测假体）
  * @param host  状态机宿主能力（默认 [BeginHost.NONE]）
+ * @param autoSaveSavedataText `beginAutoSave` 写 `SAVEDATA_TEXT` 的缺省文案提供者
+ *   （原版 `Process.cs:2573` `DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss") + " "`；
+ *   移植侧时钟可注入以稳定单测读数，缺省用本地时钟的同一格式）。
  */
 class BeginFlow(
     private val calls: BeginCallPort,
     private val host: BeginHost = BeginHost.NONE,
+    private val autoSaveSavedataText: () -> String = { defaultAutoSaveSavedataText() },
 ) {
     var state: SystemStateCode = SystemStateCode.Normal
         private set
@@ -330,10 +611,60 @@ class BeginFlow(
     private var doTrainSelectCom: Long = -1L
 
     /**
+     * `Process.NeedWaitToEventComEnd`（`Process.cs:128`）：`endCallSourceCheck` 在把状态交给
+     * `Train_CallEventComEnd` 之前置真（`:2417`），`endCallEventComEnd` 据此在回菜单前
+     * `setWait()`（`:2450-2453`）。原版清位有两处（`EmueraConsole.cs:894` 进入等待即清、
+     * `Process.cs:2454` 返回后再清），本移植取前者那一处，时机与理由见消费点。
+     *
+     * 置真条件是 `RESULT != 0`（`endCallComXX`，`:2404-2407` 的 0 直接跳 `endCallEventComEnd`，
+     * 不经 `endCallSourceCheck` ⇒ 不等待）—— 语料正是用负数 RESULT 表达「选了但不该做」。
+     *
+     * **值从「恒真」改成策略判定**（2026-11-02）：置位时机与消费点都不动，但置进去的值来自
+     * [pendingComEndWait]（在 `endCallComXX` 那一刻算好的 [BeginHost.shouldWaitAfterCommand]），
+     * 好让生产宿主把这条等待收窄到「只打一行提示就返回」的指令上。
+     */
+    private var needWaitToEventComEnd = false
+
+    /**
+     * `endCallComXX` 那一刻算出的「这次指令收尾要不要等一次按键」，等 `endCallSourceCheck`
+     * 把它搬进 [needWaitToEventComEnd]。
+     *
+     * 为什么要提前算：`SOURCE_CHECK` 是脚本函数，它一返回就把 `RESULT` 覆盖成自己的返回值
+     * （`ステータス計算関連/SOURCE/SOURCE.ERB:1`），到收尾点已经读不到「这条指令自己被拒了没有」；
+     * `SELECTCOM` 同理要靠 `SOURCE_CHECK` 里的 `SELECTCOM = TFLAG:3` 还原，也不能等到收尾点再读。
+     * 故判定输入（训练码 + 指令自己的 `RESULT`）只在 `endCallComXX` 这一步是准的。
+     */
+    private var pendingComEndWait = false
+
+    /**
      * endNormal 终局粘滞位。第一次 `Normal` 分支报 FAILED 后置位；此后 [step] 幂等返回
      * 终局步，不再消费挂起 BEGIN、不再进入任何输入等待。证据链见 [terminalEndNormalStep]。
      */
     private var endNormalTerminal = false
+
+    /**
+     * `Process.saveTarget`（`Process.cs:140`；构造期 `:191` 复位 -1）。自动存档固定槽 99
+     * （`Process.cs:136` `const AutoSaveIndex = 99`，`:2572` 置位、`:2583` 判 `== 99` 才实存、
+     * `endCallEventShop` `:2555` 每次商店返回复位）。
+     *
+     * 帧状态挂本实例（禁静态可变全局，AGENTS 铁律 4）。
+     *
+     * **TODO(verify)**：挖虫报告还称「`Initialize` 复位 saveTarget=-1（`Process.cs:983-984`）」
+     * 与「saveTarget>=0 时不重复进 AUTO_SAVE（`:1656-1659`）」——这两处在本地 1.824 反编译的
+     * 对应行号是 `SerializeData`/`ARRAYSHIFT` 方法体，`saveTarget` 全量引用仅
+     * `:140/:191/:2555/:2572/:2583/:2832/:2882`。前者按报告裁定落进
+     * [resetToBootState]（回标题=回出厂态的移植对位）；后者落进 [stepShopEventShop] 的
+     * 入口闸。两处均缺新版行号级证据，待反编译 `Emuera_skiaV16_x64.exe` 复核。
+     */
+    var saveTarget: Int = -1
+        private set
+
+    /**
+     * `Process.needCheck`（`Process.cs:188` 构造期置 true；`endCallEventComEnd`
+     * 尾部 `:2449` 置 true、CALLTRAINEND 早退 `:2445` 置 false）。
+     * 它是 `:2426-2436` 临时行早退闸的三个条件之一。
+     */
+    private var needCheck = true
 
     private fun registerComAble(comNo: Int, trainCode: Int) {
         comAble[comNo] = trainCode
@@ -391,8 +722,7 @@ class BeginFlow(
         if (!allowed) throw CodeEE("DOTRAIN命令不能在此位置执行")
         calls.clearCommands()
         if (no < 0L) throw CodeEE("对DOTRAIN命令传入了小于0的值")
-        val count = calls.trainNameCount()
-        if (count != null && no >= count) {
+        if (no >= calls.trainNameCount()) {
             throw CodeEE("对DOTRAIN命令传入了大于TRAINNAME数组元素数的值")
         }
         doTrainSelectCom = no
@@ -449,6 +779,10 @@ class BeginFlow(
     fun resetToBootState() {
         endNormalTerminal = false
         userComDelivered = false
+        // 报告裁定的 `Initialize` 复位项（挖虫报告引 `Process.cs:983-984`；本地 1.824 只在
+        // 构造器 `:191` 复位，`Initialize` 本体 `:195+` 不碰 —— 版本差，见 [saveTarget] KDoc
+        // 的 TODO(verify)）。回标题=新会话出厂态，移植侧对位本函数。
+        saveTarget = -1
         state = SystemStateCode.Normal
     }
 
@@ -493,21 +827,7 @@ class BeginFlow(
             SystemStateCode.Train_CallEventCom -> stepEndEventCom()
             SystemStateCode.Train_CallComXX -> stepTrainCallComXX()
             SystemStateCode.Train_CallSourceCheck -> stepTrainCallSourceCheck()
-            SystemStateCode.Train_CallEventComEnd -> {
-                // 原版 `endCallEventComEnd`（Process.cs:2424-2456）有三条早退/分支，本移植只走
-                // 「回到训练菜单」主路径，另三条未接（登记，见交付）：
-                // 1. 临时行校验（`:2426-2436`：LastLineIsTemporary && !isCTrain && needCheck
-                //    ⇒ endCallShowUserCom 重显指令菜单）——`needCheck` 字段（`:2449` 置 true、
-                //    `:2437-2448` CALLTRAINEND 置 false）未建模，无法只补半条；
-                // 2. CALLTRAINEND 早退（`:2437-2448`）；
-                // 3. NeedWaitToEventComEnd 的 setWait（`:2450-2453`，`:2417` 置位）——移植侧
-                //    「等按键」是宿主驱动式，无 awaitAnyKey 通道。
-                state = SystemStateCode.Train_CallEventTrain
-                done(
-                    SystemStateCode.Train_CallEventComEnd,
-                    "endCallEventComEnd", StepOutcome.CONTINUE, null, "Process.cs:2455 → 2226-2242",
-                )
-            }
+            SystemStateCode.Train_CallEventComEnd -> stepCallEventComEnd()
             SystemStateCode.Train_DoTrain -> stepTrainDoTrain()
             SystemStateCode.AfterTrain_Begin -> stepAfterTrain()
             SystemStateCode.Ablup_Begin -> stepAblupBegin()
@@ -521,9 +841,15 @@ class BeginFlow(
             SystemStateCode.Shop_CallShowShop -> stepShopShow()
             SystemStateCode.Shop_WaitInput -> stepShopWait()
             SystemStateCode.Shop_CallEventBuy -> stepShopEventBuy()
+            // 注册表 `Process.cs:2031-2032`：CallSaveInfo 的 handler 是
+            // endAutoSaveCallSaveInfo（内含 SaveTo(99) 真档）；CallUniqueAutosave 才是
+            // 裸 endAutoSave（`SYSTEM_AUTOSAVE` 自管存档）。Skipped 在原版不是 runSystemProc
+            // 入口（endCallEventShop :2561-2562 赋态后直调），移植侧拆步后由本分支兜住，
+            // 判据同 CallSaveInfo（saveTarget 已清 ⇒ 不重存）。
             SystemStateCode.AutoSave_CallSaveInfo,
-            SystemStateCode.AutoSave_CallUniqueAutosave,
-            SystemStateCode.AutoSave_Skipped -> endAutoSave(state, "endAutoSave")
+            SystemStateCode.AutoSave_Skipped ->
+                endAutoSaveCallSaveInfoStep(state, "endAutoSaveCallSaveInfo")
+            SystemStateCode.AutoSave_CallUniqueAutosave -> endAutoSave(state, "endAutoSave")
             SystemStateCode.LoadData_DataLoaded -> stepDataLoaded()
             SystemStateCode.LoadData_CallSystemLoad -> stepSystemLoad()
             SystemStateCode.LoadData_CallEventLoad -> stepEventLoad()
@@ -668,7 +994,7 @@ class BeginFlow(
         // ProcessState.cs:227-236）。本移植的脚本调用是同步的（callFunction 内部跑完），
         // 故这条赋值必须提前到调用之前，否则「TITLE 里 BEGIN SHOP」会误记成非正常回合。
         state = SystemStateCode.Normal
-        if (calls.callFunction("SYSTEM_TITLE", false, false)) {
+        if (callScript("SYSTEM_TITLE", false, false)) {
             // ProcessState.cs:352-362 —— 函数栈已空：脚本以 BEGIN 收尾时当场转态，
             // 宿主不得看到「Normal + pending」的中间态（见 [beginAtScriptReturn]）。
             beginAtScriptReturn(
@@ -726,7 +1052,7 @@ class BeginFlow(
                 done(from, "endOpenning", StepOutcome.CONTINUE, null, "Process.cs:2169-2180")
             }
             1L -> {
-                if (calls.callFunction("TITLE_LOADGAME", false, false)) {
+                if (callScript("TITLE_LOADGAME", false, false)) {
                     state = SystemStateCode.Openning_TitleLoadgame
                     done(from, "endOpenning", StepOutcome.CALLED, "TITLE_LOADGAME", "Process.cs:2181-2186")
                 } else if (host.beginLoadGameOpening()) {
@@ -756,7 +1082,17 @@ class BeginFlow(
                 // `while (systemState != Normal)` 会拿同一份陈旧 systemResult 反复进本分支刷屏。
                 // 这里按原版真正再等一次，并把新值写进 systemResult；状态留在 Openning
                 // （openingInput 的第二个动作），下一步 endOpenning 消费新值。
-                host.writeLine("无效的值")
+                // :2194-2195 —— 先删 1 条逻辑行再画临时行（W10 保真度收口：原先经
+                // [BeginHost.writeLine] 落普通行，提示会残留屏上；换道后与原版同寿，
+                // 被下一次正式输出收走，文案见 [INVALID_VALUE_TEXT]）。
+                host.deleteLine(1)
+                host.printTemporaryLine(INVALID_VALUE_TEXT)
+                // Process.cs:2196 console.updatedGeneration = true —— 标题菜单非法输入的
+                // 重等（:2197 openingInput() → setWaitInput）之前置脏：本次等待入口的
+                // newGeneration 才不会因提示行推进过脚本行而把屏上 [0]/[1] 菜单按钮的
+                // 世代前移（EmueraConsole.cs:789-796），「点了没反应」。只置脏不前移的
+                // 通道语义见 [BeginHost.markGenerationUpdated]。
+                host.markGenerationUpdated()
                 val again = host.awaitOpeningInput()
                 if (again == null) {
                     return StateStep(
@@ -802,7 +1138,7 @@ class BeginFlow(
                 StepOutcome.CONTINUE, null, "Process.cs:2203-2208",
             )
         }
-        val called = calls.callFunction("EVENTFIRST", true, true)
+        val called = callScript("EVENTFIRST", true, true)
         if (called) {
             // ProcessState.cs:352-362 —— EVENTFIRST 以 `BEGIN SHOP` 收尾（语料 SYSTEM.ERB:30）
             // 时事件栈在这一刻清空，原版当场 Begin()；不补这一步宿主会停在 Normal 直接退出。
@@ -825,7 +1161,7 @@ class BeginFlow(
     private fun stepTrainBegin(): StateStep {
         calls.beginTrainReset()
         state = SystemStateCode.Train_CallEventTrain
-        val called = calls.callFunction("EVENTTRAIN", false, true)
+        val called = callScript("EVENTTRAIN", false, true)
         return done(
             SystemStateCode.Train_Begin, "beginTrain",
             if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -843,7 +1179,7 @@ class BeginFlow(
             // Process.cs:2233 → :2386 —— callEventCom 先 `UpdateAfterInputCom()`
             // 清每角色 NOWEX（VariableEvaluator.cs:1756-1766），再派发 EVENTCOM。
             calls.afterInputComReset()
-            val called = calls.callFunction("EVENTCOM", false, true)
+            val called = callScript("EVENTCOM", false, true)
             done(
                 from, "endCallEventTrain",
                 if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -851,7 +1187,7 @@ class BeginFlow(
             )
         } else {
             state = SystemStateCode.Train_CallShowStatus
-            val called = calls.callFunction("SHOW_STATUS", true, false)
+            val called = callScript("SHOW_STATUS", true, false)
             done(
                 from, "endCallEventTrain",
                 if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -876,19 +1212,6 @@ class BeginFlow(
     private fun stepTrainComAble(): StateStep {
         val from = SystemStateCode.Train_CallComAbleXX
         val count = calls.trainNameCount()
-            ?: return StateStep(
-                from = from,
-                handler = "endCallComAbleXX",
-                to = state,
-                outcome = StepOutcome.BLOCKED,
-                calledFunction = null,
-                blocker = FlowBlocker(
-                    BlockerKind.HOST_MISSING, "SHOW_USERCOM", null, -1, -1,
-                    "宿主未提供 TrainName 表（CSV Str.csv 的 TRAINNAME 段），无法枚举 COM_ABLE<n>",
-                    "Process.cs:2263-2319",
-                ),
-                evidence = "Process.cs:2263-2319",
-            )
 
         // 上一个 COM_ABLE<n> 已返回：RESULT != 0 才登记（Process.cs:2265-2282）。
         if (lastCalledComable in 0 until count && calls.trainName(lastCalledComable) != null) {
@@ -898,8 +1221,12 @@ class BeginFlow(
         while (true) {
             lastCalledComable++
             if (lastCalledComable >= count) {
+                // count == 0（Train.csv 没装载）时这里第一次就命中 —— 与原版同形：
+                // `while (++lastCalledComable < TrainName.Length)` 一次不进，
+                // 落到 `:2312` 的 `lastCalledComable >= TrainName.Length` 分支照常
+                // 调 SHOW_USERCOM。原版没有「表空 = 宿主未提供」这一终局。
                 state = SystemStateCode.Train_CallShowUserCom
-                val called = calls.callFunction("SHOW_USERCOM", true, false)
+                val called = callScript("SHOW_USERCOM", true, false)
                 return done(
                     from, "endCallComAbleXX",
                     if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -908,7 +1235,7 @@ class BeginFlow(
             }
             if (calls.trainName(lastCalledComable) == null) continue
             val name = "COM_ABLE$lastCalledComable"
-            if (!calls.callFunction(name, false, false)) {
+            if (!callScript(name, false, false)) {
                 lastAddCom++
                 if (host.comAbleDefault != 0) registerComAble(lastAddCom, lastCalledComable)
                 continue
@@ -954,12 +1281,21 @@ class BeginFlow(
      * 「宿主 UI 状态、未接」直接 BLOCKED，是真机「提交之后脚本不推进」的堵点：
      * `comAble` 在原版是 `Process` 的字段（`Process.cs:102`、装载 `:1997`），不是宿主状态。
      *
-     * 分支（非 CTrain，`:2344-2349` + `:2361-2373`）：
-     * - `0 <= systemResult < comAble.Length` 且登记值 >= 0 ⇒ `SELECTCOM = comAble[systemResult]`
-     *   → `callEventCom()`（`:2361-2364`；`Train_CallEventCom` + `EVENTCOM`，缺失时原版当场
-     *   `endEventCom()`，由 [SystemStateCode.Train_CallEventCom] 那步的 NOT_CALLED 继续口径承接）；
-     * - 否则 ⇒ `RESULT = sysResult` → `Train_CallEventComEnd` + `USERCOM`（force，
-     *   `:2366-2373`）。这里写的是**脚本变量** `RESULT`（`vEvaluator.RESULT`，`:2372`），
+     * 分支（非 CTrain，`:2344-2349` + `:2361-2373`），由 [BeginHost.systemResultIsComAbleIndex]
+     * 二选一 —— 判据是**宿主的按钮值到底是下标还是训练码**，不是「有没有查到」：
+     * - **宿主渲染了下标按钮**且 `0 <= systemResult < comAble.Length` 且登记值 >= 0 ⇒
+     *   `SELECTCOM = comAble[systemResult]` → `callEventCom()`（`:2361-2364`；
+     *   `Train_CallEventCom` + `EVENTCOM`，缺失时原版当场 `endEventCom()`，由
+     *   [SystemStateCode.Train_CallEventCom] 那步的 NOT_CALLED 继续口径承接）；
+     * - **宿主没渲染下标按钮**（生产 [ConsoleBeginHost] 口径）⇒ `systemResult` 是画蛇添足版
+     *   `@BUILD_COM_BUTTON_HTML` 的**训练码本身**，一律 `RESULT = sysResult` →
+     *   `Train_CallEventComEnd` + `USERCOM`（force，`:2366-2373`），由语料自己分派
+     *   （`USERCOM.ERB:85-86` 设 `SELECTCOM`/`TFLAG:3`，`:137` `DOTRAIN 999`，
+     *   `@SOURCE_CHECK` 还原后经 `@SOURCE_CALLCOM` 派 `COM{SELECTCOM}`）。
+     *   这一支同时承载语料的 `COM_ABLE` / `CAN_COM`（実行値）/ 妊娠 / 时停瞪人等判定，
+     *   **不能拿 `systemResult` 去查 `comAble`**（那是显示位：`comAble[82]=180` ⇒ 点乳交跑潤滑液，
+     *   实测见 [BeginHost.systemResultIsComAbleIndex]）。
+     *   这里写的是**脚本变量** `RESULT`（`vEvaluator.RESULT`，`:2372`），
      *   经 [BeginCallPort.setResult] 落 `RESULT:0`；系统输入本身另经 `setSystemResult`
      *   落 `Process.systemResult` 槽（两槽语义不同，原版也是两个字段，不得合并）。
      *   漏写 `RESULT` 时的真机症状见 [BeginCallPort.setResult] 的 KDoc（红 O）。
@@ -1006,14 +1342,25 @@ class BeginFlow(
             ),
             evidence = "Process.cs:2341-2375",
         )
-        val num = if (input >= 0L && input < Int.MAX_VALUE.toLong()) comAble[input.toInt()] else null
-        return if (num != null && num >= 0) {
+        // 两种按钮编号约定，二选一（见 [BeginHost.systemResultIsComAbleIndex]）：
+        // - 宿主渲染了 `乳交[ 51]` 这类**下标**按钮 ⇒ 按原版反查 `comAble`（`:2344-2349`）；
+        // - 宿主没渲染（生产 [ConsoleBeginHost]）⇒ 输入是画蛇添足版
+        //   `@BUILD_COM_BUTTON_HTML` 的 `<button value='{COM_VAL}'>乳交[{COM_VAL,3}]`，
+        //   也就是**训练码本身**。它绝不能拿去查 `comAble`（那是显示位，不是指令号），
+        //   而应原样交 `USERCOM` 支自己分派 —— 语料 `USERCOM.ERB:84-86` 的注释与代码
+        //   （`SELECTCOM = RESULT` / `TFLAG:3 = SELECTCOM`）就是为这条支写的。
+        val num: Int? = if (host.systemResultIsComAbleIndex && input >= 0L && input < Int.MAX_VALUE.toLong()) {
+            comAble[input.toInt()]?.takeIf { it >= 0 }
+        } else {
+            null
+        }
+        return if (num != null) {
             calls.setSelectCom(num.toLong())
             state = SystemStateCode.Train_CallEventCom
             // Process.cs:2361-2364 → :2386 —— callEventCom 的 `UpdateAfterInputCom()`
             // （VariableEvaluator.cs:1756-1766）：每次派发 EVENTCOM 前清 NOWEX。
             calls.afterInputComReset()
-            val called = calls.callFunction("EVENTCOM", false, true)
+            val called = callScript("EVENTCOM", false, true)
             done(
                 from, "trainWaitInput",
                 if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -1025,7 +1372,7 @@ class BeginFlow(
             calls.setResult(input)
             calls.setSystemResult(input)
             state = SystemStateCode.Train_CallEventComEnd
-            val called = calls.callFunction("USERCOM", true, false)
+            val called = callScript("USERCOM", true, false)
             done(
                 from, "trainWaitInput",
                 if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -1037,7 +1384,7 @@ class BeginFlow(
     private fun stepEndEventCom(): StateStep {
         state = SystemStateCode.Train_CallComXX
         val name = "COM${calls.selectCom()}"
-        val called = calls.callFunction(name, true, false)
+        val called = callScript(name, true, false)
         return done(
             SystemStateCode.Train_CallEventCom, "endEventCom",
             if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -1047,12 +1394,19 @@ class BeginFlow(
 
     private fun stepTrainCallComXX(): StateStep {
         val from = SystemStateCode.Train_CallComXX
-        if (calls.result() == 0L) {
+        val comResult = calls.result()
+        if (comResult == 0L) {
+            // Process.cs:2404-2407 直接跳 endCallEventComEnd，不经 SOURCE_CHECK ⇒ 这条支没有
+            // setWait()。顺带把上一条指令可能留下的「要不要等」清干净，免得串到这次收尾。
+            pendingComEndWait = false
             state = SystemStateCode.Train_CallEventComEnd
             return done(from, "endCallComXX", StepOutcome.CONTINUE, null, "Process.cs:2404-2407")
         }
+        // 判定输入只在这一刻是准的（SELECTCOM 尚未被 SOURCE_CHECK 还原/改写、RESULT 还是本指令的
+        // 返回值），见 [pendingComEndWait]。
+        pendingComEndWait = host.shouldWaitAfterCommand(calls.selectCom().toInt(), comResult)
         state = SystemStateCode.Train_CallSourceCheck
-        val called = calls.callFunction("SOURCE_CHECK", true, false)
+        val called = callScript("SOURCE_CHECK", true, false)
         return done(
             from, "endCallComXX",
             if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -1065,11 +1419,132 @@ class BeginFlow(
         // 与派发 EVENTCOMEND 之前清每角色 SOURCE（VariableEvaluator.cs:1768-1778）。
         calls.afterSourceCheckReset()
         state = SystemStateCode.Train_CallEventComEnd
-        val called = calls.callFunction("EVENTCOMEND", false, true)
+        // Process.cs:2417 —— 原版在派发 EVENTCOMEND 之前置 NeedWaitToEventComEnd；消费点
+        // 在 endCallEventComEnd（:2450-2453），语义见 [needWaitToEventComEnd]。
+        // 置进去的是 endCallComXX 那一刻算好的策略结果（缺省恒真 = 原版口径）。
+        needWaitToEventComEnd = pendingComEndWait
+        val called = callScript("EVENTCOMEND", false, true)
         return done(
             SystemStateCode.Train_CallSourceCheck, "endCallSourceCheck",
             if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
             "EVENTCOMEND", "Process.cs:2413-2422",
+        )
+    }
+
+    /**
+     * `endCallEventComEnd`（`Process.cs:2424-2456`）—— 旧移植只接了尾部「回训练链」一条，
+     * 本路补齐三条（挖虫波 B2，P1）：
+     *
+     * 1. **临时行早退**（`:2426-2436`）：`LastLineIsTemporary && !isCTrain && needCheck` ⇒
+     *    `endCallShowUserCom()`（`:2434`；复用屏上菜单重等输入，移植侧拆步进
+     *    [stepTrainShowUserCom]）。内层空行半句已接：`LastLineIsEmpty`
+     *    （`EmueraConsole.cs:526-537`）⇒ `deleteLine(2)` + `PrintTemporaryLine(無効な値です)`
+     *    （`:2428-2432`，经 [BeginHost.deleteLine] / [BeginHost.printTemporaryLine]，
+     *    文案 [INVALID_VALUE_TEXT]）。`:2433 console.updatedGeneration = true`
+     *    已接（[BeginHost.markGenerationUpdated]，W8-gen）—— 保住复用菜单按钮的
+     *    可点世代，机制依据见方法体内注。
+     * 2. **eraTW `AUTO_SAVE=="前"`**（裁定报告引新版 `Process.cs:1849-1891`；本地 1.824 无此
+     *    分支，`ConfigData.cs` 全仓无 `CalleventToEnd` 命中 ⇒ 版本差，TODO(verify) 见
+     *    [BeginHost.autoSaveAtComEnd]）：在指令链收尾点**内联**走一遍 B1 存档链
+     *    （置 99、写 `SAVEDATA_TEXT`、`SaveTo(99)`、失败双行+ReadAnyKey），队列清法照
+     *    `:2437-2442`（`isCTrain=false; coms.Clear(); count=0` ⇒ [BeginCallPort.clearCommands]）。
+     *    缺省 `CompatiCalleventToEnd`＝「後」⇒ 本分支不触发，既有读数不变。
+     *    报告还写本分支「`CALLFUNCTION endCallEventComEnd`（有错误双行报+ReadAnyKey）」——
+     *    该短语在本地 reference 无对应物，移植侧按「内联存档后即落 ③/尾部」建模，
+     *    不是二次重入自身（形态待新版反编译坐实，TODO(verify)）。
+     * 3. **CALLTRAINEND 早退**（`:2437-2448`）：`isCTrain && count==coms.Count` ⇒ 清队列 +
+     *    `CALLTRAINEND`（force=false）；调得动则 `needCheck=false`（`:2445`）并**原地返回**
+     *    （状态不切 —— 原版靠 runSystemProc 的循环再进本 handler，这次 `isCTrain` 已 false，
+     *    落到尾部）。
+     *
+     * 尾部 `:2449-2455`：`needCheck=true`；`NeedWaitToEventComEnd` 的 `setWait()`
+     * （`:2450-2453`，`:2417` 置位）= [BeginHost.readAnyKey] —— 指令链收尾回训练链之前
+     * 等玩家点一下（发起条件与玩家侧症状见该钩子；**等不等**由 [BeginHost.shouldWaitAfterCommand]
+     * 在 `endCallComXX` 那一刻判好，见 [pendingComEndWait]）；随后 [SystemStateCode.Train_CallEventTrain]
+     * （`endCallEventTrain` `:2226-2242`，旧移植口径不变）。
+     */
+    private fun stepCallEventComEnd(): StateStep {
+        val from = SystemStateCode.Train_CallEventComEnd
+        // ① Process.cs:2426-2436 —— 临时行 + 非批量训练 + needCheck ⇒ 复用屏上菜单重等输入。
+        if (host.lastLineIsTemporary() && !calls.isCTrain() && needCheck) {
+            // :2428-2432 —— 末行还是一条**空**临时行（指令链零输出的形态）⇒
+            // 删 2 逻辑行 + 画「无效的值」临时行。删除与提示成对，文案见 [INVALID_VALUE_TEXT]。
+            if (host.lastLineIsEmpty()) {
+                host.deleteLine(2)
+                host.printTemporaryLine(INVALID_VALUE_TEXT)
+            }
+            // :2433 console.updatedGeneration = true —— 不推进就回不去：重等输入的 newGeneration
+            // 在「标志未置且脚本行变了」时会推进按钮世代（EmueraConsole.cs:789-796），而指令链
+            // 必然改过脚本行 ⇒ 旧菜单按钮世代失配、整屏按钮点不动。置位后走 else 支
+            // （:793-796）保住 lastButtonGeneration，屏上菜单保持可点。
+            // 通道只置脏、不带 UpdateGeneration（:770-774）的前移半句 —— 那是按钮构造专用，
+            // 在本点位会把 lastButtonGeneration 抬到 newButtonGeneration，旧按钮照样死。
+            host.markGenerationUpdated()
+            state = SystemStateCode.Train_CallShowUserCom
+            return done(
+                from, "endCallEventComEnd", StepOutcome.CONTINUE, null,
+                "Process.cs:2426-2436（endCallShowUserCom；:2433 updatedGeneration 已接，W8-gen）",
+            )
+        }
+        // ② eraTW AUTO_SAVE=="前"：并入 B1 存档链（落点与 saveTarget 交集的说明见交付）。
+        if (host.autoSaveAtComEnd() && saveTarget < 0) {
+            saveTarget = AUTO_SAVE_SLOT
+            calls.setSavedataText(autoSaveSavedataText())
+            val ok = host.saveTo(AUTO_SAVE_SLOT, calls.savedataText())
+            if (ok == null) {
+                return StateStep(
+                    from = from,
+                    handler = "endCallEventComEnd",
+                    to = state,
+                    outcome = StepOutcome.BLOCKED,
+                    calledFunction = null,
+                    blocker = FlowBlocker(
+                        BlockerKind.HOST_MISSING, null, null, -1, -1,
+                        "AUTO_SAVE「前」档需要宿主 saveTo（SystemOps.saveData 同源路）——未接线",
+                        "Process.cs:2583 / VariableEvaluator.cs:2644-2685（分支属 SkiaX 扩展，TODO(verify)）",
+                    ),
+                    evidence = "裁定报告 Process.cs:1849-1891（本地版无此分支）",
+                )
+            }
+            if (!ok) {
+                // 与 endAutoSaveCallSaveInfo 支同款两行报错：原版通道是 console.PrintError
+                // （形制 `Process.cs:2585-2586`；差集与对位见 [BeginHost.printError] 的 KDoc）。
+                host.printError(AUTO_SAVE_ERROR_TEXT1)
+                host.printError(AUTO_SAVE_ERROR_TEXT2)
+                host.readAnyKey()
+            }
+            saveTarget = -1
+            // 队列清法照 :2437-2442 / 报告 :1869-1874。
+            calls.clearCommands()
+        }
+        // ③ Process.cs:2437-2448 —— CALLTRAIN 队列耗尽的收尾派发。
+        if (calls.isCTrain() && calls.commandsConsumed()) {
+            calls.clearCommands()
+            if (callScript("CALLTRAINEND", false, false)) {
+                needCheck = false
+                // 状态留在本状态：原版 runSystemProc 循环再进一次 handler，这次
+                // isCTrain 已 false（clearCommands），落到尾部。移植侧同样由下一次 step 承接。
+                return done(
+                    from, "endCallEventComEnd", StepOutcome.CALLED, "CALLTRAINEND",
+                    "Process.cs:2437-2448",
+                )
+            }
+            // 目标缺失（force=false，:2443）：原版不 return，继续落尾部。
+        }
+        // 尾部 Process.cs:2449-2455。
+        needCheck = true
+        // Process.cs:2450-2453 —— `setWait()` = `console.ReadAnyKey()`：回训练链之前等一次按键。
+        // 清位时机取原版「进入等待那一刻」那一处（`EmueraConsole.cs:894`），不是返回后的
+        // `Process.cs:2454` —— 等待被宿主销毁打断（`InputSinkClosedException`）时不留粘着的真位，
+        // 下一次到点这里不会白等一遍。
+        if (needWaitToEventComEnd) {
+            needWaitToEventComEnd = false
+            host.readAnyKey()
+        }
+        state = SystemStateCode.Train_CallEventTrain
+        return done(
+            from, "endCallEventComEnd", StepOutcome.CONTINUE, null,
+            "Process.cs:2449-2455 → 2226-2242",
         )
     }
 
@@ -1082,7 +1557,7 @@ class BeginFlow(
         calls.setSelectCom(doTrainSelectCom)
         calls.afterInputComReset()
         state = SystemStateCode.Train_CallEventCom
-        val called = calls.callFunction("EVENTCOM", false, true)
+        val called = callScript("EVENTCOM", false, true)
         return done(
             SystemStateCode.Train_DoTrain, "doTrain",
             if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -1103,7 +1578,7 @@ class BeginFlow(
             )
         }
         state = SystemStateCode.Normal
-        val called = calls.callFunction("EVENTEND", true, true)
+        val called = callScript("EVENTEND", true, true)
         if (called) {
             // ProcessState.cs:352-362 —— EVENTEND 里的 BEGIN 在事件返回时当场转态。
             beginAtScriptReturn(
@@ -1131,7 +1606,7 @@ class BeginFlow(
         // （同 [stepTitle] 的同步化口径）：EVENTTURNEND 里的 `BEGIN SHOP`
         // （语料 EVENTTURNEND.ERB:300，逐回合都会走）判定 `calledWhenNormal` 时状态必须是 Normal。
         state = SystemStateCode.Normal
-        val called = calls.callFunction("EVENTTURNEND", true, true)
+        val called = callScript("EVENTTURNEND", true, true)
         if (called) {
             // ProcessState.cs:352-362 —— 事件栈清空当刻当场转态。
             beginAtScriptReturn(
@@ -1155,7 +1630,7 @@ class BeginFlow(
             )
         }
         state = SystemStateCode.Ablup_CallShowJuel
-        val called = calls.callFunction("SHOW_JUEL", true, false)
+        val called = callScript("SHOW_JUEL", true, false)
         return done(
             SystemStateCode.Ablup_Begin, "beginAblup",
             if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -1165,7 +1640,7 @@ class BeginFlow(
 
     private fun stepAblupShowJuel(): StateStep {
         state = SystemStateCode.Ablup_CallShowAblupSelect
-        val called = calls.callFunction("SHOW_ABLUP_SELECT", true, false)
+        val called = callScript("SHOW_ABLUP_SELECT", true, false)
         return done(
             SystemStateCode.Ablup_CallShowJuel, "endCallShowJuel",
             if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -1209,12 +1684,23 @@ class BeginFlow(
         return if (input in 0L..99L) {
             state = SystemStateCode.Ablup_CallAblupXX
             val name = "ABLUP$input"
-            val called = calls.callFunction(name, false, false)
+            val called = callScript(name, false, false)
             if (called) {
                 done(from, "ablupWaitInput", StepOutcome.CALLED, name, "Process.cs:2492-2496")
             } else {
-                // Process.cs:2496-2502：无效值 → 清行 + 重新显示选择并等输入。
-                host.writeLine("无效的值")
+                // Process.cs:2496-2502：无效值 → 删行 + 画提示 + 置脏 + 重新显示选择并等输入。
+                // 删除对象 = 键入回显行（`doInputToEmueraProgram` 末尾 Print(str) 落的那条
+                // 普通行，EmueraConsole.cs:1280-1282）—— 回显机制（ECHO-INPUT 波次）补上后，
+                // :2498 的 deleteLine(1) 删的就是它（2026-11-04 曾因无回显误删 ABLUP 菜单
+                // 按钮行而回滚本刀，见 BOARD「键入回显行缺失」）。
+                host.deleteLine(1)
+                // :2499 PrintTemporaryLine(Lang.Error.InvalidValue.Text) —— zhs 文案
+                // [INVALID_VALUE_TEXT]，与 Openning 标题菜单支（:994，Process.cs:2194-2195）同一条。
+                host.printTemporaryLine(INVALID_VALUE_TEXT)
+                // Process.cs:2500 console.updatedGeneration = true —— ABLUP 重等（:2501
+                // endCallShowAblupSelect → setWaitInput :2486）前置脏，保住屏上旧按钮的
+                // 重等可点世代（通道语义见 [BeginHost.markGenerationUpdated]）。
+                host.markGenerationUpdated()
                 state = SystemStateCode.Ablup_WaitInput
                 done(from, "ablupWaitInput", StepOutcome.AWAIT_INPUT, name, "Process.cs:2496-2502")
             }
@@ -1224,7 +1710,7 @@ class BeginFlow(
             calls.setResult(input)
             calls.setSystemResult(input)
             state = SystemStateCode.Ablup_CallAblupXX
-            val called = calls.callFunction("USERABLUP", true, false)
+            val called = callScript("USERABLUP", true, false)
             done(
                 from, "ablupWaitInput",
                 if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -1234,10 +1720,25 @@ class BeginFlow(
     }
 
     private fun stepAblupCall(): StateStep {
-        state = if (host.lastLineIsTemporary()) {
-            SystemStateCode.Ablup_CallShowAblupSelect
+        // Process.cs:2512-2528 endCallAblupXX —— ABLUP{N}/USERABLUP 收尾分流。
+        if (host.lastLineIsTemporary()) {
+            // :2516-2520 空行半句（W10 保真度收口）—— 末行还是一条**空**临时行 ⇒
+            // 删 2 条逻辑行 + 画提示临时行（与 EVENTCOMEND 分支① `:2428-2432` 同形；
+            // 删行数 :2518 实测为 2，非标题 else 支的 1）。文案 [ABLUP_INVALID_VALUE_RAW]
+            // 是**硬编码日文**：官方行为 —— 该半句不经 Lang，zhs 化环境也打日文
+            // （同文件 :2431/:2499/:2649 的兄弟无效值点位都走 Lang.Error.InvalidValue.Text，
+            // 全仓唯 :2519 一处字面量，照抄不本地化，ADR-005）。
+            if (host.lastLineIsEmpty()) {
+                host.deleteLine(2)
+                host.printTemporaryLine(ABLUP_INVALID_VALUE_RAW)
+            }
+            // Process.cs:2521 console.updatedGeneration = true —— 临时行收尾 ⇒ 回菜单重等
+            // （:2522 endCallShowAblupSelect → setWaitInput :2486），置脏保住屏上旧按钮世代。
+            // 置位在空行判定**之外**、临时行门**之内**（:2521 的原文位置，照抄）。
+            host.markGenerationUpdated()
+            state = SystemStateCode.Ablup_CallShowAblupSelect
         } else {
-            SystemStateCode.Ablup_Begin
+            state = SystemStateCode.Ablup_Begin
         }
         return done(
             SystemStateCode.Ablup_CallAblupXX, "endCallAblupXX",
@@ -1258,7 +1759,7 @@ class BeginFlow(
             )
         }
         state = SystemStateCode.Shop_CallEventShop
-        val called = calls.callFunction("EVENTSHOP", false, true)
+        val called = callScript("EVENTSHOP", false, true)
         return done(
             SystemStateCode.Shop_Begin, "beginShop",
             if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -1266,20 +1767,121 @@ class BeginFlow(
         )
     }
 
+    /**
+     * `endCallEventShop`（`Process.cs:2553-2563`）+ `beginAutoSave`（`:2565-2579`）的复合步
+     * （原版在同一次调用里嵌套直调，移植侧把「SAVEINFO 返回后」拆给下一次 [step]）。
+     *
+     * 逐句对位：
+     * 1. `:2555 saveTarget = -1` —— 每次商店返回都是**新的一档**；入口闸先判
+     *    `saveTarget >= 0`（裁定项「不重复进 AUTO_SAVE」，证据与 TODO(verify) 见
+     *    [saveTarget] KDoc）：本轮已带存档目标时**既不覆盖也不重存**，直进 [endAutoSave] 收口。
+     * 2. `:2556-2560` `Config.AutoSave && calledWhenNormal` ⇒ [beginAutoSaveStep]；
+     * 3. `:2561-2562` 否则 `AutoSave_Skipped` + 直调 `endAutoSaveCallSaveInfo()` —— 移植侧
+     *    同一步内接 [endAutoSaveCallSaveInfoStep]；`saveTarget` 已是 -1 ⇒ 判据
+     *    `saveTarget == 99`（`:2583`）不成立，不触实存，读数与旧「直进 endAutoSave」一致。
+     */
     private fun stepShopEventShop(): StateStep {
         val from = SystemStateCode.Shop_CallEventShop
+        if (saveTarget >= 0) {
+            // 不重复进 AUTO_SAVE（见 [saveTarget] KDoc 的 TODO(verify)）；saveTarget 原样保留，
+            // 等本轮存档链自己的收口点复位 —— 这里抢跑只会把「已存过」状态洗掉。
+            return endAutoSave(from, "endCallEventShop", "Process.cs:2592-2601（入口闸，见交付 TODO(verify)）")
+        }
+        saveTarget = -1
         if (host.autoSave() && calledWhenNormal) {
-            if (calls.callFunction("SYSTEM_AUTOSAVE", false, false)) {
-                state = SystemStateCode.AutoSave_CallUniqueAutosave
-                return done(from, "endCallEventShop", StepOutcome.CALLED, "SYSTEM_AUTOSAVE", "Process.cs:2565-2571")
-            }
-            if (calls.callFunction("SAVEINFO", false, false)) {
-                state = SystemStateCode.AutoSave_CallSaveInfo
-                return done(from, "endCallEventShop", StepOutcome.CALLED, "SAVEINFO", "Process.cs:2572-2578")
-            }
+            return beginAutoSaveStep(from)
         }
         state = SystemStateCode.AutoSave_Skipped
-        return endAutoSave(from, "endCallEventShop", "Process.cs:2561-2562 / :2581-2601")
+        return endAutoSaveCallSaveInfoStep(from, "endCallEventShop", "Process.cs:2561-2562 / :2581-2601")
+    }
+
+    /**
+     * `beginAutoSave`（`Process.cs:2565-2579`）逐句：
+     * 1. `:2567-2571` `SYSTEM_AUTOSAVE` 存在 ⇒ `AutoSave_CallUniqueAutosave`（它的 handler
+     *    是**裸 endAutoSave**，注册表 `:2032` —— 该函数自管实存）；
+     * 2. `:2572-2574` `saveTarget = 99`（`const AutoSaveIndex`，`:136`）+
+     *    `SAVEDATA_TEXT = DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss") + " "`（`:2573`）+
+     *    置 `AutoSave_CallSaveInfo`；
+     * 3. `:2575-2578` `SAVEINFO` 存在 → 返回等脚本跑完（下一次 [step] 进
+     *    [endAutoSaveCallSaveInfoStep]）；缺失 → 原版**当场**直调 `endAutoSaveCallSaveInfo()`，
+     *    移植侧同步接上。
+     *
+     * **TODO(verify)**：裁定报告还称 beginAutoSave 里 `ShopItem==-1` 先调 `EVENTSHOP(0)`、
+     * `SAVEDATA_TEXT` 取 eraTW 文案键 `AUTO_SAVE_2/3`（缺省 `AUTO_SAVE`）——本地 1.824 的
+     * `:2565-2579` 无这两处（`:2573` 就是时间戳行），lang 表也无 `AUTO_SAVE_*` 键；
+     * 属 SkiaX 分支扩展，未落地（缺行号级证据，禁脑补）。缺省文案先按 `:2573` 时间戳，
+     * 文案键由 [autoSaveSavedataText] 注入口透出，组长拿到新版反编译后一处即可接上。
+     */
+    private fun beginAutoSaveStep(from: SystemStateCode): StateStep {
+        if (callScript("SYSTEM_AUTOSAVE", false, false)) {
+            state = SystemStateCode.AutoSave_CallUniqueAutosave
+            return done(from, "beginAutoSave", StepOutcome.CALLED, "SYSTEM_AUTOSAVE", "Process.cs:2565-2571")
+        }
+        saveTarget = AUTO_SAVE_SLOT
+        calls.setSavedataText(autoSaveSavedataText())
+        state = SystemStateCode.AutoSave_CallSaveInfo
+        if (callScript("SAVEINFO", false, false)) {
+            return done(from, "beginAutoSave", StepOutcome.CALLED, "SAVEINFO", "Process.cs:2572-2578")
+        }
+        // :2576-2577 —— SAVEINFO 缺失时原版当场 endAutoSaveCallSaveInfo()（嵌套直调拆步口径：
+        // 本步直接续上，状态已是 AutoSave_CallSaveInfo）。
+        return endAutoSaveCallSaveInfoStep(from, "beginAutoSave", "Process.cs:2565-2578 / :2581-2601")
+    }
+
+    /**
+     * `endAutoSaveCallSaveInfo`（`Process.cs:2581-2590`）：
+     * `saveTarget == 99` 才实存（`:2583` —— Skipped 分支的 -1 就是靠这条判据跳过，
+     * 玩家配置 `MAKE AUTOSAVES:NO` 走的正是它）；`SaveTo` 失败 ⇒ 两行报错 +
+     * `ReadAnyKey`（`:2584-2588`，**不抛、不中断**，随后照常 [endAutoSave]）；
+     * 无论成败收口都进 [endAutoSave]（`:2589`），并把本轮的 `saveTarget` 复位
+     * （`:2555` 每次商店返回复位，移植侧入口闸在复位**之前**判 `>= 0`，故收口点在此，
+     * 差异见交付「与基准差异」①）。
+     *
+     * **TODO(verify)**：裁定报告称本函数「无论成败 `CallErbHid(RESET_EVENT)`→`Initialize()`」
+     * （引 `Process.cs:2530-2545`，该区间本地是 `beginTurnend`/`beginShop`，
+     * 且全 reference 无 `RESET_EVENT`/`CallErbHid` 命中）—— 属 SkiaX 分支扩展，未落地；
+     * 若新版坐实，落点在下面 `saveTarget = -1` 之后追加复位链，宿主接线归组长。
+     */
+    private fun endAutoSaveCallSaveInfoStep(
+        from: SystemStateCode,
+        handler: String,
+        evidence: String = "Process.cs:2581-2601",
+    ): StateStep {
+        if (saveTarget == AUTO_SAVE_SLOT) {
+            val ok = host.saveTo(AUTO_SAVE_SLOT, calls.savedataText())
+            if (ok == null) {
+                // 宿主没有存档能力：BLOCKED，不伪造成败、不转态（接口缺省纪律）。
+                return StateStep(
+                    from = from,
+                    handler = handler,
+                    to = state,
+                    outcome = StepOutcome.BLOCKED,
+                    calledFunction = null,
+                    blocker = FlowBlocker(
+                        BlockerKind.HOST_MISSING, null, null, -1, -1,
+                        "AUTO_SAVE 链需要宿主 saveTo（SystemOps.saveData 同源路）——未接线",
+                        "Process.cs:2583 / VariableEvaluator.cs:2644-2685",
+                    ),
+                    evidence = "Process.cs:2581-2590",
+                )
+            }
+            if (!ok) {
+                // :2584-2588 —— 两行报错 + ReadAnyKey。文案 = Lang.Error.AutoSaveError1/2
+                // （日原文 Lang.cs:3142/:3146；zhs 译文 emuera-zhs.xml:740-741，
+                // 「预期以外的的错误」双「的」为官方原文，ADR-005 照抄）。
+                // 报告称该键在 eraTW 资源里叫 AUTO_SAVE_4/5 —— 键名差、内容同，TODO(verify) 并注。
+                // OBS2-L1 裁定：原版是 console.PrintError（`Process.cs:2585-2586`；
+                // `EmueraConsole.cs:3098-3116`），改走 [BeginHost.printError] 通道 ——
+                // 样式复位 / 强制左对齐 / 不折行 / 不吃按钮解析 / 帧必上屏的对位在
+                // `LineBufferConsoleSink.printError`（现 ConsoleBeginHost 未覆写该方法，
+                // 缺省降级 = writeLine，接线前行为与换道前逐字一致；接线登记「需组长接线」）。
+                host.printError(AUTO_SAVE_ERROR_TEXT1)
+                host.printError(AUTO_SAVE_ERROR_TEXT2)
+                host.readAnyKey()
+            }
+        }
+        saveTarget = -1
+        return endAutoSave(from, handler, evidence)
     }
 
     private fun stepShopShow(): StateStep {
@@ -1325,8 +1927,15 @@ class BeginFlow(
      *   缺失即 CodeEE，由 [BeginCallPort.callFunction] 抛）→ 切 `Shop_CallEventBuy`
      *   （`:2638`；原版先调函数后置状态，移植侧顺序一致）。
      *
-     * deleteLine(1) 在移植侧暂无独立通道：临时行文本经 [BeginHost.writeLine] 交出，
-     * 保真度欠账与「无效的值」三处同款（见 ConsoleBeginHost.writeLine 的 KDoc）。
+     * 两支失败提示自 OBS2-L1 起走与原版同形的 [BeginHost.deleteLine]`(1)` +
+     * [BeginHost.printTemporaryLine] 通道（删除对象 = 键入回显行，见 `:2624` 支的注释）。
+     * 原版该支**不置** `updatedGeneration`（`Process.cs:2609-2640` 无此句，对照 `:2500`）：
+     * PC 上商店重等的等待行身份恒为同一条 ERB `INPUT` 语句（`process.getCurrentLine`），
+     * `EmueraConsole.cs:789-796` 走 else 支、旧按钮保持可点。移植生产链自 OBS2-L5 起把这一身份
+     * 接上（本类的脚本调用统一入口 [callScript] → [BeginHost.noteWaitPageProducer] →
+     * `ConsoleBeginHost.waitScriptLine`；装配点 `GameSession` 的 `pageScriptLineIdentity`），
+     * 重等前后同一组按钮的可点集合不变；未接时的读数（身份退化行水位 ⇒ 第二次重等把旧按钮整批
+     * 作废）与接线后的对照钉在 ShopTemporaryLineTest 与 WaitInputGenerationTest。
      */
     private fun stepShopWait(): StateStep {
         val from = SystemStateCode.Shop_WaitInput
@@ -1365,21 +1974,31 @@ class BeginFlow(
             if (model.itemSales(no)) {
                 if (model.buyItem(no)) {
                     state = SystemStateCode.Shop_CallEventBuy
-                    val called = calls.callFunction("EVENTBUY", false, true)
+                    val called = callScript("EVENTBUY", false, true)
                     return done(
                         from, "shopWaitInput",
                         if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
                         "EVENTBUY", "Process.cs:2613-2623",
                     )
                 }
-                host.writeLine(NOT_ENOUGH_MONEY_TEXT)
+                // Process.cs:2624-2625（OBS2-L1 换道，形制同 ablupWaitInput :1599-1606 支）：
+                // deleteLine(1) 删的是玩家那次键入的回显行（`EmueraConsole.cs:1280-1282`，
+                // 回显随 f85b3c2d 落 main）；提示走临时行通道，与回显同寿、被下一次正式
+                // 输出收走。**原版 :2624-2630 两支都没有 updatedGeneration 置位半句**
+                // （逐字核对 `Process.cs:2609-2640`，置位只在 `endCallEventBuy` `:2651`；
+                // 对照 `ablupWaitInput` `:2500` 带置位）⇒ 照抄不补 [markGenerationUpdated]
+                // （ADR-005；重等后旧按钮的世代口径见 [stepShopWait] 的 KDoc）。
+                host.deleteLine(1)
+                host.printTemporaryLine(NOT_ENOUGH_MONEY_TEXT)
                 return backToShopWait(from, "Process.cs:2624-2632")
             }
-            host.writeLine(OUT_OF_STOCK_TEXT)
+            // Process.cs:2629-2630 —— 与上支同形，文案 `Lang.Error.OutOfStock`。
+            host.deleteLine(1)
+            host.printTemporaryLine(OUT_OF_STOCK_TEXT)
             return backToShopWait(from, "Process.cs:2629-2632")
         }
         model.writeResult(input)
-        calls.callFunction("USERSHOP", true, false)
+        callScript("USERSHOP", true, false)
         state = SystemStateCode.Shop_CallEventBuy
         return done(from, "shopWaitInput", StepOutcome.CALLED, "USERSHOP", "Process.cs:2634-2639")
     }
@@ -1397,6 +2016,19 @@ class BeginFlow(
 
     private fun stepShopEventBuy(): StateStep {
         return if (host.lastLineIsTemporary()) {
+            // :2646-2650 空行半句（W10 保真度收口）—— 末行还是一条**空**临时行 ⇒
+            // 删 2 条逻辑行 + 画「无效的值」临时行（与 EVENTCOMEND 分支① `:2428-2432`
+            // 同形；删行数 :2648 实测为 2）。文案 [INVALID_VALUE_TEXT]：原版此处 :2649
+            // 走 Lang.Error.InvalidValue.Text（**不经**硬编码，与 ABLUP `:2519` 的日文
+            // 字面量不同，见 [ABLUP_INVALID_VALUE_RAW]）。
+            if (host.lastLineIsEmpty()) {
+                host.deleteLine(2)
+                host.printTemporaryLine(INVALID_VALUE_TEXT)
+            }
+            // Process.cs:2651 console.updatedGeneration = true —— 临时行收尾 ⇒ 回商店重等
+            // （:2652 endCallShowShop → setWaitInput :2605）前置脏，保住屏上旧按钮世代。
+            // 置位在空行判定**之外**、临时行门**之内**（:2651 的原文位置，照抄）。
+            host.markGenerationUpdated()
             state = SystemStateCode.Shop_CallShowShop
             done(
                 SystemStateCode.Shop_CallEventBuy, "endCallEventBuy",
@@ -1424,7 +2056,7 @@ class BeginFlow(
             return done(from, handler, StepOutcome.CONTINUE, null, evidence)
         }
         state = SystemStateCode.Shop_CallShowShop
-        val called = calls.callFunction("SHOW_SHOP", true, false)
+        val called = callScript("SHOW_SHOP", true, false)
         return done(
             from, handler,
             if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -1447,7 +2079,7 @@ class BeginFlow(
     private fun stepDataLoaded(): StateStep {
         val from = SystemStateCode.LoadData_DataLoaded
         state = SystemStateCode.LoadData_CallSystemLoad
-        val called = calls.callFunction("SYSTEM_LOADEND", false, false)
+        val called = callScript("SYSTEM_LOADEND", false, false)
         return done(
             from, "beginDataLoaded",
             if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -1467,7 +2099,7 @@ class BeginFlow(
         host.unloadTempLoadedConstImageNames()
         host.unloadTempLoadedGraphicsImageNames()
         state = SystemStateCode.LoadData_CallEventLoad
-        val called = calls.callFunction("EVENTLOAD", false, true)
+        val called = callScript("EVENTLOAD", false, true)
         return done(
             from, "endSystemLoad",
             if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -1491,8 +2123,11 @@ class BeginFlow(
      * `beginSaveGame`（`Process.cs:2685-2690`）/ `beginLoadGame`（`:2692-2697`）—— 两个方法体
      * 恰三句、逐行同形，对拍如下：
      * 1. `console.PrintSingleLine(Lang.SystemLine.SaveQuestion / LoadQuestion.Text)`
-     *    （`:2687` / `:2694`）→ [BeginHost.writeLine]（zhs 常量见 [SAVE_QUESTION_TEXT] /
-     *    [LOAD_QUESTION_TEXT]，临时行保真度欠账与「无效的值」同款口径）；
+     *    （`:2687` / `:2694`）→ [BeginHost.printSingleLine]（zhs 常量见 [SAVE_QUESTION_TEXT] /
+     *    [LOAD_QUESTION_TEXT]）。OBS2-L5 换道：此前走 [BeginHost.writeLine] 会把问句并进上一句
+     *    未结的 PRINTN/PRINTC 残段（原版 `PrintSingleLine` 先 `PrintFlush` 结掉缓冲再单行落，
+     *    `EmueraConsole.cs:3155-3158`），差集逐句见 [BeginHost.printSingleLine] 的 KDoc；
+     *    未覆写该通道的宿主缺省降级回 writeLine，读数与换道前逐字一致；
      * 2. `state.SystemState = SaveGame_Begin / LoadGame_Begin`（`:2688` / `:2695`）——
      *    进入本 handler 的前提就是处于该状态（注册表 `:2023` / `:2027` 按状态分派），
      *    原版是**同值写**，移植侧同样无事发生；
@@ -1529,8 +2164,10 @@ class BeginFlow(
      */
     private fun stepSaveOrLoadGameBegin(save: Boolean): StateStep {
         val from = if (save) SystemStateCode.SaveGame_Begin else SystemStateCode.LoadGame_Begin
-        // Process.cs:2687 / :2694 —— PrintSingleLine(SaveQuestion / LoadQuestion)。
-        host.writeLine(if (save) SAVE_QUESTION_TEXT else LOAD_QUESTION_TEXT)
+        // Process.cs:2687 / :2694 —— PrintSingleLine(SaveQuestion / LoadQuestion)，**非临时行**、
+        // 独立单行（差集见 [BeginHost.printSingleLine] 的 KDoc；OBS2-L5 换道，之前误走 writeLine
+        // 会把问句并进上一句未结的 PRINTN/PRINTC 残段）。
+        host.printSingleLine(if (save) SAVE_QUESTION_TEXT else LOAD_QUESTION_TEXT)
         // Process.cs:2688 / :2695 —— 同值状态写，无事发生（见方法 KDoc 第 2 句）。
         // Process.cs:2689 / :2696 —— printSaveDataText() 的槽位列表半边（:2758-2801）交宿主。
         host.printSaveDataSlots(save)
@@ -1558,6 +2195,23 @@ class BeginFlow(
 
     // ------------------------------------------------------------------
 
+    /**
+     * 状态机跑脚本函数的**唯一入口**（OBS2-L5）：委托 [BeginCallPort.callFunction]，
+     * 并在被调方真的存在时把函数名登记给宿主当「本页来源」——理由与粒度差见
+     * [BeginHost.noteWaitPageProducer] 的 KDoc（原版 `ProcessState.currentLine` 是「跑过才算数」
+     * 的字段，缺函数支一支脚本都没跑，故 `called == false` 时不登记）。
+     *
+     * 登记发生在 `callFunction` **返回之后**：那一刻 VM 已无帧，宿主拿不到 pc，
+     * 只能按函数名取身份位（同一时刻读 `scriptLineToken` 恒 -1，证据链见上）。
+     */
+    private fun callScript(name: String, force: Boolean, isEvent: Boolean): Boolean {
+        val called = calls.callFunction(name, force, isEvent)
+        if (called) {
+            host.noteWaitPageProducer(name)
+        }
+        return called
+    }
+
     private fun done(
         from: SystemStateCode,
         handler: String,
@@ -1567,6 +2221,50 @@ class BeginFlow(
     ): StateStep = StateStep(from, handler, state, outcome, called, null, evidence)
 
     companion object {
+        /**
+         * 「本页来源函数」身份位的 pc 位固定值（OBS2-L5）：BEGIN 状态机的等待点没有帧，
+         * 拿不到真 pc，故身份位取**函数级**粒度 —— 生产侧 `GameSession.beginWaitPageIdentity`
+         * 与钉测装置（`WaitInputGenerationTest`）共用本常量，避免两侧各写一份 0 而悄悄分叉。
+         *
+         * 粒度差的边界与「为什么可观测面等价」见 [BeginHost.noteWaitPageProducer] 的 KDoc；
+         * `pc = 0` 与真语句 token 只可能在**同一个函数**上重合（跨函数不会折叠，
+         * 因为 id 按函数键分配，见 `proc/LineIdentityIds.kt`）。
+         */
+        internal const val PAGE_IDENTITY_PC = 0
+
+        /**
+         * 清掃的训练码（`CSV/Train.csv:199` 的 `410,掃除`）。
+         *
+         * 它是「玩家选了、但语料自己判定不该做」这一类指令的代表：`COMF410 掃除.ERB:18-26`
+         * 在 `YOGORE < OSOUJI_LIMIT` 时只 `DRAWLINE` + 打一行「也没有那么乱七八糟、就算不扫除可以吧」
+         * 就 `RETURN -1`，零状态变化 —— 没有收尾那一次等待，那行提示在手机上会被下个回合的
+         * 输出整帧刷掉（BOARD 2026-11-01「点清扫看着没反应」）。
+         */
+        internal const val COM_CLEANING = 410
+
+        /**
+         * `endCallAblupXX` 空行半句的提示串（`Process.cs:2519`）。**官方行为：该半句不经
+         * Lang，zhs 化环境也打日文** —— 同文件其余无效值点位（`:2431`/`:2499`/`:2649`）
+         * 全走 `Lang.Error.InvalidValue.Text`（日原文「無効な値です」，`Lang.cs:3130`，
+         * zhs 译文「无效的值」），唯 `:2519` 是字面量硬编码；照抄不本地化（ADR-005）。
+         */
+        private const val ABLUP_INVALID_VALUE_RAW = "無効な値です"
+
+        /**
+         * `Lang.Error.InvalidValue.Text`。日原文「無効な値です」
+         * （`Lang.cs:3130`），zhs 译文「无效的值」（lang.emuera-zhs.xml:737；游戏语料
+         * `lang/emuera.zhs.xml:405` 同文）。移植侧错误/系统行文案取 zhs 资源。
+         * W10 起临时行通道的消费方：EVENTCOMEND 分支①（`Process.cs:2431`）、标题菜单
+         * else 支（`:2195`，W10 换道）、ABLUP 缺函数支（`:2499`，OBS2-L1 已换道，
+         * 落点 [stepAblupWait] 的 deleteLine(1) + [printTemporaryLine] 两语句）、
+         * 商店收尾空行半句（`:2649`，W10 接线）；商店钱不够/售罄（`:2625`/`:2630`，
+         * OBS2-L1 换道，落点 [stepShopWait]）。通道语义见 [BeginHost.printTemporaryLine]
+         * （`ConsoleBeginHost.writeLine` 的 KDoc 已随 OBS2-L1/L5 的换道同步更正——
+         * 该方法如今的普通行欠账位为零）；
+         * ABLUP 收尾空行半句 `:2519` 是日文硬编码不经 Lang，见 [ABLUP_INVALID_VALUE_RAW]。
+         */
+        internal const val INVALID_VALUE_TEXT = "无效的值"
+
         /**
          * `Lang.Error.NotEnoughMoney.Text`（Process.cs:2625）。日原文
          * 「お金が足りません。」（Lang.cs:3150），zhs 译文「MONEY不足」
@@ -1594,5 +2292,40 @@ class BeginFlow(
          * （lang.emuera-zhs.xml:1025）。
          */
         internal const val LOAD_QUESTION_TEXT = "读取几号存档？"
+
+        /**
+         * 自动存档固定槽 `const int AutoSaveIndex = 99`（`Process.cs:136`；
+         * 置位 `:2572`、判据 `:2583`）。
+         */
+        internal const val AUTO_SAVE_SLOT = 99
+
+        /**
+         * `Lang.Error.AutoSaveError1.Text`（`Process.cs:2585`）。日原文
+         * 「オートセーブ中に予期しないエラーが発生しました」（Lang.cs:3142），
+         * zhs 译文「自动存档期间发生预期以外的的错误」（lang.emuera-zhs.xml:740 ——
+         * 双「的」为官方资源原文，ADR-005 照抄）。挖虫报告称 eraTW 资源里该键叫
+         * AUTO_SAVE_4 —— 键名差、本仓取官方 zhs 译文，TODO(verify) 见
+         * [endAutoSaveCallSaveInfoStep] KDoc。
+         */
+        internal const val AUTO_SAVE_ERROR_TEXT1 = "自动存档期间发生预期以外的的错误"
+
+        /**
+         * `Lang.Error.AutoSaveError2.Text`（`Process.cs:2586`）。日原文
+         * 「オートセーブをスキップします」（Lang.cs:3146），zhs 译文
+         * 「自动存档将被跳过」（lang.emuera-zhs.xml:741）。报告键名 AUTO_SAVE_5，同上注。
+         */
+        internal const val AUTO_SAVE_ERROR_TEXT2 = "自动存档将被跳过"
+
+        /**
+         * `beginAutoSave` 缺省档名（`Process.cs:2573`）：
+         * `DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss") + " "`（本地时区、尾随一个空格）。
+         * 测试经 [BeginFlow.autoSaveSavedataText] 注入固定串收稳读数。
+         */
+        internal fun defaultAutoSaveSavedataText(): String =
+            java.time.LocalDateTime.now().format(AUTO_SAVE_TEXT_FORMAT) + " "
+
+        /** C# `yyyy/MM/dd HH:mm:ss` 的等价格式（`Process.cs:2573`）。 */
+        private val AUTO_SAVE_TEXT_FORMAT: java.time.format.DateTimeFormatter =
+            java.time.format.DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss")
     }
 }

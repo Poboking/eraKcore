@@ -8,11 +8,11 @@ import java.util.zip.CRC32
 import java.util.zip.GZIPInputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import org.junit.jupiter.api.Assumptions
 
 /**
  * BH3-SAVEBIN 的**改动档**战场。
@@ -708,7 +708,12 @@ class SaveFormatMutatedWriteTest {
         // 头完好、正文坏（CRC 改坏）⇒ 解压在 CreateReader 的 try 内 ⇒ 非容器（:810-813 + :826-828）
         val badBody = good.copyOf().also { it[it.size - 8] = (it[it.size - 8].toInt() xor 0xFF).toByte() }
         assertFalse(SaveFormat.isBinaryContainer(badBody), "头完好正文坏的档必须判「不是容器」")
-        assertNull(SaveFormat.peek(badBody), "同上：peek 给 null 而不是抛穿")
+        // 2026-10-31：列表快探测（peekHeader）只解头，不再校验 GZip 尾部；完整探测（peek）
+        // 仍是原版 CreateReader 的全量解压口径，读档前置校验靠它。
+        assertTrue(SaveFormat.isContainerShell(badBody), "壳判定只看魔数/版本/校验表，不进正文")
+        assertNotNull(SaveFormat.peekHeader(badBody), "列表快探测：头字段可解即给头")
+        assertNull(SaveFormat.peek(badBody), "完整探测仍按全量解压校验，坏尾部给 null")
+        assertFailsWith<SaveFormatException>("读档仍必须拒绝坏正文") { SaveFormat.read(badBody) }
 
         // 未压缩分支同口径
         val plain = SaveFormat.write(baseSave(compressed = false))
@@ -717,14 +722,61 @@ class SaveFormatMutatedWriteTest {
     }
 
     // ==================================================================
-    // 6. 真档：改一个变量再写（ERATW_SAVE_SAMPLES 指向 sav 目录；未设置即 skip）
+    // 6. 真档：改一个变量再写（样本目录见 saveSamplesRootOrFail；拿不到样本判红，不跳过）
     // ==================================================================
 
     /**
-     * 真档改动档 round-trip。样本目录走环境变量 `ERATW_SAVE_SAMPLES`（语料
-     * `eratw-画蛇添足版eratw4.980/sav` 的 6 份 .sav：global + save00..03 + save1000）；
-     * 未设置或不是目录时按 JUnit Assumptions **跳过**（可见的 skipped，不是静默通过），
-     * 目录下没有 .sav 则断言失败。
+     * 真存档样本目录：公开仓**只认显式来源** —— `-PsaveSamples=<目录>`（由
+     * `core-vm/build.gradle.kts` 的 `wireRealSaveSamples` 导出成 `ERATW_SAVE_SAMPLES`）
+     * 或环境变量 `ERATW_SAVE_SAMPLES`。公开仓不携带任何内部存档备份路径；没有显式来源
+     * 时按公开适配口径跳过（上游是硬判红）。
+     *
+     * 「在位」= 目录存在**且至少有一份 `.sav`**（空目录按不在位）；显式指了但目录不可用
+     * 仍判红 —— 闸指了样本目录就必须能用，不退回落、不跳过。
+     */
+    private fun saveSamplesRootOrFail(): Path {
+        val fromEnv = System.getenv("ERATW_SAVE_SAMPLES")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: run {
+                // 公开仓不含内部存档样本：按公开适配口径跳过。
+                org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_SAVE_SAMPLES：跳过真存档样本判据")
+                throw AssertionError("unreachable")
+            }
+        val p = Path.of(fromEnv)
+        if (savFiles(p).isNotEmpty()) return p
+        throw AssertionError(
+            "ERATW_SAVE_SAMPLES=$fromEnv 已设但不是「有 .sav 的目录」（规整后 ${p.toAbsolutePath().normalize()}：" +
+                dirVerdict(p) + "）。闸指了样本目录就必须能用，不退回落、不跳过。",
+        )
+    }
+
+    /** 目录里的 `.sav` 清单（不是目录 / 列不出来 ⇒ 空表，交给判红文案去说缺什么）。 */
+    private fun savFiles(dir: Path): List<Path> =
+        if (!Files.isDirectory(dir)) {
+            emptyList()
+        } else {
+            Files.list(dir).use { s ->
+                s.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".sav") }
+                    .sorted()
+                    .toList()
+            }
+        }
+
+    /** 目录侧证（判红文案用）：不存在 / 不是目录 / 里面到底有什么。 */
+    private fun dirVerdict(dir: Path): String = when {
+        !Files.exists(dir) -> "路径不存在"
+        !Files.isDirectory(dir) -> "不是目录"
+        else -> runCatching {
+            val names = Files.list(dir).use { s -> s.map { it.fileName.toString() }.sorted().toList() }
+            "共 ${names.size} 项，内容 = $names"
+        }.getOrElse { "列目录失败：${it.message}" }
+    }
+
+    /**
+     * 真档改动档 round-trip。样本目录解析见 [saveSamplesRootOrFail]：§5 闸口径下**必须**拿到样本
+     * （语料 `eratw-画蛇添足版eratw4.980/sav` 的 6 份 .sav：global + save00..03 + save1000），
+     * 拿不到 ⇒ [AssertionError] 判红并打印已认到的目录内容；**没有 skipped 这条路**了
+     * （旧实现是 `Assumptions.assumeTrue`：§5 从不导出 `ERATW_SAVE_SAMPLES`，这条硬钉每次都是
+     * skip，闸仍报绿 = 假绿）。
      *
      * 四类改动逐文件各做一遍（目标都是从档里现找，不写死变量名）：
      * 1. 角色块标量保宽 ±1（NORMAL 才有角色块）：payload 只差 1 字节且差值字节就是新值；
@@ -741,17 +793,9 @@ class SaveFormatMutatedWriteTest {
      */
     @Test
     fun `真档改一个变量再写形状保持`() {
-        val dir = System.getenv("ERATW_SAVE_SAMPLES")?.trim()?.takeIf { it.isNotEmpty() }?.let { Path.of(it) }
-        Assumptions.assumeTrue(
-            dir != null && Files.isDirectory(dir),
-            "ERATW_SAVE_SAMPLES 未设置或不是目录：$dir",
-        )
-        val root = dir!!
-        val files = Files.list(root).use { s ->
-            s.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".sav") }
-                .sorted()
-                .toList()
-        }
+        val root = saveSamplesRootOrFail()
+        println("[save-mutated] 样本目录 = $root（${dirVerdict(root)}）")
+        val files = savFiles(root)
         assertTrue(files.isNotEmpty(), "$root 下没有 .sav 样本")
 
         for (f in files) {

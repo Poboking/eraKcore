@@ -1,0 +1,17 @@
+status	check	in_memory	reloaded	detail
+OK	program.statements	26	26	
+OK	program.instructions	33	33	
+OK	meta.functions	7 条	7 条	
+OK	meta.labels	7 函数 / 0 标签	7 函数 / 0 标签	
+OK	meta.files	7 条	7 条	
+OK	meta.data-sections	0 节	0 节	
+OK	meta.global-dims	3 条	3 条	
+OK	meta.private-dims	4 条	4 条	
+OK	meta.dim-config	bin=false macro=0 const=0 strConst=0	bin=false macro=0 const=0 strConst=0	
+DIFF	meta.program-sha256	38cb86808befa07a24b92a3003ebeadc598ee82c785524dd86037c60f40af87b	28cb86808befa07a24b92a3003ebeadc598ee82c785524dd86037c60f40af87b	侧车与容器必须成对（头部摘要 = program.erbc 的 SHA-256）
+OK	runtime.globals	3	3	
+OK	runtime.private-vars	4	4	
+OK	runtime.system-vars	158	158	
+OK	runtime.private-dim-failures	0 条	0 条	
+OK	runtime.global-dim-failures	0 条	0 条	
+OK	usages.names	19 个名字 sha256=204ddf5ed6d34c12	19 个名字 sha256=204ddf5ed6d34c12	

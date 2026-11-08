@@ -343,6 +343,10 @@ data class HotkeyToggleResult(
  *   `FunctionMethodCreator.cs:8679-8706`）；
  * - **没有下标检查**：越界照原版直接抛（C# 的 `state[index]`，`index` 是 `nint`，:47；
  *   比较侧 :221、:226 同样裸取）。本层不加「看起来合理」的夹取。
+ * - 但**也不许把 Long 折回 Int**：`nint` 在 .NET 上是原生整数宽度，超 int 上界/负值在
+ *   `new nint[size]` 与 `state[index]` 处当场抛（OverflowException / 越界）。本层的 `toInt()`
+ *   回绕会把它们错位成「0 长数组」「写进 0 号格」，故 [init] / [set] 各带一道范围判定，
+ *   抛的位置与官方一致，不是新增宽容。
  */
 class HotkeyStates {
 
@@ -352,14 +356,30 @@ class HotkeyStates {
     val initialized: Boolean
         get() = cells != null
 
-    /** `HotkeyStateInit`（:35-39）。 */
+    /**
+     * `HotkeyStateInit`（:35-39）。
+     *
+     * 官方是 `state = new nint[size]`：负数与超过 int 上界在 .NET 当场 OverflowException。
+     * 直接 `size.toInt()` 会把它们**折回**成 0 或负数 —— 0 长数组不抛，之后每一次
+     * `HOTKEY_STATE` 都撞越界（症状完全错位），负数则是 NegativeArraySizeException。
+     * 故按官方口径在 init 当场抛，并把原值带进消息里。
+     */
     fun init(size: Long) {
+        if (size < 0L || size > Int.MAX_VALUE) {
+            throw IllegalStateException("HOTKEY_STATE_INIT: 非法大小 $size（官方在此当场 OverflowException，本端口不把原值折回 Int）")
+        }
         cells = LongArray(size.toInt())
     }
 
     /** `HotkeyStateSet`（:41-48）：未初始化即抛原文异常，下标越界照原版裸抛。 */
     fun set(index: Long, value: Long) {
-        cellArray()[index.toInt()] = value
+        val array = cellArray()
+        // 同 [init]：`index.toInt()` 回绕会把一个明显越界的写法（如 2^32）静默写成 0 号格，
+        // 而官方是裸抛 IndexOutOfRangeException。判据不变，只是不许回绕。
+        if (index < 0L || index >= array.size) {
+            throw ArrayIndexOutOfBoundsException(index.toString())
+        }
+        array[index.toInt()] = value
     }
 
     /** 解释器侧的裸取（:221、:226）。 */

@@ -91,6 +91,7 @@ import com.eratw.port.core.stmt.WhileStmt
 import com.eratw.port.core.vars.CharacterTemplate
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import com.eratw.port.core.err.CodeEE
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -104,9 +105,9 @@ import kotlin.test.assertTrue
  * - `skipPrint` / `mesSkip` / `saveSkip`、让出边界计数、`SystemOps` 调用序列；
  * - 抽样变量写面（数值 / 字符串）。
  *
- * 旧树路径（`execute(stmt, ctx)`）是参照系：它在本波次按契约原样保留（已标 `@Deprecated`），
- * 收尾提交才删除。数据节的两条语句（PRINTDATA / STRDATA）例外 —— 旧重载在波次 C 过渡期
- * 已改为抛 `UnsupportedOperationException`（契约 T2-64-C §2.2），故这两条只断言新路径行为。
+ * 对象树路径（`execute(stmt, ctx)`）是参照系：它是 Android 真机生产默认路径，本波次原样保留，
+ * 不是待删物。数据节的两条语句（PRINTDATA / STRDATA）例外 —— 对象树一侧只接实例键读面，
+ * 而扁平一侧只接语句池下标键，故这两条只断言新路径行为（契约 T2-64-C §2.2）。
  */
 class StatementExecutorFlatTest {
 
@@ -115,7 +116,7 @@ class StatementExecutorFlatTest {
     // ------------------------------------------------------------------
 
     private class FlatSource(val flat: FlatStatements) : FlatStmtSource {
-        /** 新路径不得触达的读点（旧树兜底）：命中即计数，末端断言为 0。 */
+        /** 新路径不得触达的读点（对象树兜底）：命中即计数，末端断言为 0。 */
         var statementAtCalls = 0
 
         override fun opAt(index: Int): Int = flat.opAt(index)
@@ -137,9 +138,9 @@ class StatementExecutorFlatTest {
     /**
      * 固定数据节（键 = 语句池下标）。
      *
-     * 过渡期说明：本地 worktree 的 `DataSections` 仍以语句实例为唯一抽象成员（正式版由 lane C
-     * 换成语句池下标键，见契约 T2-64-C §2.2），故这里同时覆写两个重载；收尾删除旧重载时，
-     * 删掉 `groupsOf(stmt)` 这一行与 `@Suppress` 即可（其余不动）。
+     * 双面说明：`DataSections` 的主读面是语句池下标键（扁平通道），实例键是对象树通道的读面
+     * （见 `sem/ExecContext.kt` 的接口 KDoc），故这里两个都覆写、返回同一份组。只覆写一面时，
+     * 另一面要么撞上「未实现」的显式失败实现、要么把「有数据节」静默查成空。
      */
     private fun sections(groups: List<List<Expr>>): DataSections = object : DataSections {
         override fun groupsOf(stmtIndex: Int): List<List<Expr>>? = groups
@@ -239,7 +240,7 @@ class StatementExecutorFlatTest {
         assertEquals(oldEnv.ctx.mesSkip, newEnv.ctx.mesSkip, "mesSkip 不一致：${stmt.code}")
         assertEquals(oldEnv.ctx.saveSkip, newEnv.ctx.saveSkip, "saveSkip 不一致：${stmt.code}")
         assertEquals(oldEnv.executor.yieldBoundaryCount, newEnv.executor.yieldBoundaryCount, "让出边界不一致：${stmt.code}")
-        assertEquals(0, source.statementAtCalls, "新路径触达了旧树兜底：${stmt.code}")
+        assertEquals(0, source.statementAtCalls, "新路径触达了对象树兜底：${stmt.code}")
         return oldEnv to newEnv
     }
 
@@ -285,14 +286,14 @@ class StatementExecutorFlatTest {
         for (no in nos.toSet()) env.store.registerTemplate(CharacterTemplate(no = no, name = "T$no", csvNo = no))
     }
 
-    /** 直接经变量池追加角色（替身造数据，不走语句层，避免对拍两侧的初始状态依赖旧路径）。 */
+    /** 直接经变量池追加角色（替身造数据，不走语句层，避免对拍两侧的初始状态依赖被比较路径）。 */
     private fun seedChara(env: SemTestEnv, vararg nos: Long) {
         templates(env, *nos)
         for (no in nos) env.store.addCharacter(no)
     }
 
     // ------------------------------------------------------------------
-    // 37 个 StmtTag：全部分派且不触达旧树兜底
+    // 37 个 StmtTag：全部分派且不触达对象树兜底
     // ------------------------------------------------------------------
 
     private fun oneStatementPerTag(): List<Statement> {
@@ -348,7 +349,7 @@ class StatementExecutorFlatTest {
         val env = SemTestEnv()
         env.ctx.dataSections = sections(emptyList())
         for (i in 0 until flat.count) {
-            // 语句能否成功执行不属本条判据（如 VAR_DECL 在本作配置下禁用）；只要求不走旧树。
+            // 语句能否成功执行不属本条判据（如 VAR_DECL 在本作配置下禁用）；只要求不走对象树。
             try {
                 env.executor.execute(source, i, env.ctx)
             } catch (e: Throwable) {
@@ -366,7 +367,7 @@ class StatementExecutorFlatTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `变量族 直读与旧树逐字一致`() {
+    fun `变量族 直读与对象树逐字一致`() {
         // SET：非常量项
         assertIntVar(
             dual(
@@ -483,7 +484,28 @@ class StatementExecutorFlatTest {
     }
 
     @Test
-    fun `数组族 直读与旧树逐字一致`() {
+    fun `VARSET 显式负端点抛 OoRInstructionArg 口径`() {
+        // C#：显式端点使 (start,end) != (0,GetLength()) ⇒ 进 IsArrayRangeValid（
+        // VariableEvaluator.cs:289-310），四处 token 同口径 index1<0||index2<0 即抛
+        // OoRInstructionArg（VariableData.cs:89-100 / ReferenceToken.cs:78-89 /
+        // CharaVariableToken.cs:72-83 / LocalVariableToken.cs:47-58）。修复前 end<0 被
+        // VariableStore 的"到末尾"哨兵吞掉、静默全量填充（R22-1）。
+        // compare/capture 会把异常吃掉做两路比对，故这里对两路分别断言抛 CodeEE。
+        val negEnd = InstructionStmt(FunctionCode.VARSET, SpVarSetArgument(iVar("FLAG", 0), IntLiteral(7), null, IntLiteral(-5)), 1, "")
+        val negStart = InstructionStmt(FunctionCode.VARSET, SpVarSetArgument(iVar("FLAG", 0), IntLiteral(7), IntLiteral(-3), IntLiteral(5)), 1, "")
+        val negSource = FlatSource(FlatStatements.encode(listOf(negEnd, negStart), emptyList()))
+        val oldEnv = SemTestEnv()
+        val newEnv = SemTestEnv()
+        assertFailsWith<CodeEE> { oldEnv.executor.execute(negEnd, oldEnv.ctx) }
+        assertFailsWith<CodeEE> { oldEnv.executor.execute(negStart, oldEnv.ctx) }
+        assertFailsWith<CodeEE> { newEnv.executor.execute(negSource, 0, newEnv.ctx) }
+        // 缺省端点（不显式）不受影响：仍是"到末尾"全量填充。
+        val envs = dual(InstructionStmt(FunctionCode.VARSET, SpVarSetArgument(iVar("FLAG", 0), IntLiteral(7), null, null), 1, ""))
+        assertEquals(7L, envs.first.store.readInt("FLAG", longArrayOf(9999L)))
+    }
+
+    @Test
+    fun `数组族 直读与对象树逐字一致`() {
         // ENCODETOUNI
         dual(InstructionStmt(FunctionCode.ENCODETOUNI, ExpressionArgument(StrLiteral("AB")), 1, ""))
         // SPLIT
@@ -559,7 +581,7 @@ class StatementExecutorFlatTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `显示族 直读与旧树逐字一致`() {
+    fun `显示族 直读与对象树逐字一致`() {
         dual(printStmt(FunctionCode.PRINTL, ExpressionArgument(StrLiteral("x"))))
         dual(printStmt(FunctionCode.PRINTW, ExpressionArgument(StrLiteral("x"))))
         dual(printStmt(FunctionCode.PRINTN, ExpressionArgument(StrLiteral("x"))))
@@ -605,7 +627,7 @@ class StatementExecutorFlatTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `输入族 直读与旧树逐字一致`() {
+    fun `输入族 直读与对象树逐字一致`() {
         dual(InstructionStmt(FunctionCode.WAIT, VoidArgument(), 1, ""))
         dual(InstructionStmt(FunctionCode.FORCEWAIT, VoidArgument(), 1, ""))
         dual(InstructionStmt(FunctionCode.WAITANYKEY, VoidArgument(), 1, ""))
@@ -654,7 +676,7 @@ class StatementExecutorFlatTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `角色库与进程状态 直读与旧树逐字一致`() {
+    fun `角色库与进程状态 直读与对象树逐字一致`() {
         assertEquals(
             2,
             dual(
@@ -727,7 +749,7 @@ class StatementExecutorFlatTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `系统与存档 直读与旧树逐字一致`() {
+    fun `系统与存档 直读与对象树逐字一致`() {
         assertIntVar(
             dualSys(InstructionStmt(FunctionCode.SAVEDATA, SpSaveDataArgument(IntLiteral(1), StrLiteral("t")), 1, "")),
             "RESULT", 0,
@@ -776,7 +798,7 @@ class StatementExecutorFlatTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `杂项与随机数 直读与旧树逐字一致`() {
+    fun `杂项与随机数 直读与对象树逐字一致`() {
         dual(InstructionStmt(FunctionCode.STRLEN, ExpressionArgument(StrLiteral("abc")), 1, ""))
         dual(InstructionStmt(FunctionCode.STRLENU, ExpressionArgument(StrLiteral("abc")), 1, ""))
         dual(InstructionStmt(FunctionCode.PRINTCPERLINE, SpGetIntArgument(iVar("FLAG", 0)), 1, ""))
@@ -839,7 +861,7 @@ class StatementExecutorFlatTest {
     }
 
     // ------------------------------------------------------------------
-    // 数据节（新路径专用：旧重载在过渡期抛 UnsupportedOperationException）
+    // 数据节（扁平通道专用：读点是语句池下标键，对象树一侧的实例键读面另路）
     // ------------------------------------------------------------------
 
     @Test

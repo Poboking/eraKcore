@@ -104,7 +104,8 @@ import java.util.Locale
  * 同一状态码的另一个消费点 `CHKCHARADATA`（`core/fn/CharaFileMethods.kt`）已改为直接取用
  * 本对象的四个常量（M11-A L8 收口，SAVE-05），两侧不再有第二份措辞。
  *
- * 头解析复用 [SaveFormat.peek]（`core/data/save`，二进制 + 文本两式），不造第二套解析器。
+ * 头解析复用 [SaveFormat.peek] / [SaveFormat.peekHeader]（`core/data/save`，二进制 + 文本两式），
+ * 不造第二套解析器。完整探测（读档前置校验）用 `peek`；存档列表的快探测用 `peekHeader`。
  */
 object SaveDataProbe {
 
@@ -173,7 +174,8 @@ object SaveDataProbe {
     fun saveName(no: Long): String = String.format(Locale.ROOT, "save%02d.sav", no)
 
     /**
-     * 完整探测。返回 null 只表示宿主探测能力未接线（无 [BuiltinHost.fileOps]）——
+     * 存档槽探测（缺省完整解压；[headerOnly] = 列表快探测）。
+     * 返回 null 只表示宿主探测能力未接线（无 [BuiltinHost.fileOps]）——
      * 调用方必须按「宿主未接线」抛错，禁止静默回落成 `FILENOTFOUND`（那是伪造读数）。
      * 文件存在但不是可读普通文件（权限、坏盘）按原版 `CheckDataByFilename` 的 catch 分支
      * 返回 `ETC_ERROR`（VariableEvaluator.cs:2219-2228），不再冒充「宿主未接线」。
@@ -188,6 +190,9 @@ object SaveDataProbe {
      *   即 GameBase.csv 的 `バージョン` 行**是否存在且能解析出数字**
      *   （`GameBase.cs:138-140`：`ScriptVersionDefined = tryatoi(array[1], out ScriptVersion)`）。
      *   null = 调用方没交出该位，退回 `version == 0` 的近似，见 [checkVersion]。
+     * @param headerOnly 只解头字段（[SaveFormat.peekHeader]），不校验正文/尾部。**只给
+     *   存档列表渲染用**（`CHKDATA` 每页 40 格、每次重绘重调，2026-10-31「多档后加载变慢」）；
+     *   读档前置校验必须用缺省 `false`（[SaveFormat.peek]），否则坏档会在变量池复位后才暴露。
      */
     fun check(
         host: BuiltinHost,
@@ -196,26 +201,31 @@ object SaveDataProbe {
         gameBase: GameBaseData,
         useSaveFolder: Boolean? = null,
         scriptVersionDefined: Boolean? = null,
+        headerOnly: Boolean = false,
     ): SaveDataCheck? {
         val ops = host.fileOps ?: return null
         val path = candidatePaths(host, kind, no, useSaveFolder).firstOrNull { ops.exists(it) }
             ?: return SaveDataCheck(EraDataState.FILENOTFOUND, MES_NOT_FOUND) // :2162-2166
         val bytes = host.readFileBytes(path)
             ?: return SaveDataCheck(EraDataState.ETC_ERROR, MES_LOAD_ERROR) // :2219-2228
-        return checkBytes(bytes, kind, gameBase, scriptVersionDefined)
+        return checkBytes(bytes, kind, gameBase, scriptVersionDefined, headerOnly)
     }
 
     /**
      * 纯字节探测（[check] 的读盘之后半程；单独暴露给「调用方已有文件内容」的场景与单测）。
      * 分支序与 `CheckDataByFilename`（VariableEvaluator.cs:2159-2217）一致。
+     *
+     * @param headerOnly 见 [check]：true = [SaveFormat.peekHeader]（列表快探测），
+     *   false = [SaveFormat.peek]（整份解压，读档前置校验）。
      */
     fun checkBytes(
         bytes: ByteArray,
         kind: SaveFileKind,
         gameBase: GameBaseData,
         scriptVersionDefined: Boolean? = null,
+        headerOnly: Boolean = false,
     ): SaveDataCheck {
-        val head: SaveHeader = SaveFormat.peek(bytes)
+        val head: SaveHeader = (if (headerOnly) SaveFormat.peekHeader(bytes) else SaveFormat.peek(bytes))
             ?: return SaveDataCheck(EraDataState.ETC_ERROR, MES_CORRUPTED)
         // 原版只在二进制容器里比类别（:2196-2201）；文本分支（:2176-2194）无类型可比。
         if (head.binary && head.fileType != kind) {

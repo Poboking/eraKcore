@@ -37,7 +37,7 @@ class VariablePoolTest {
     fun `负数与等于长度的下标都越界`() {
         val s = store()
         val e1 = assertFailsWith<CodeEE> { s.readInt("DAY", idx(-1)) }
-        assertTrue(e1.message!!.contains("越界"), e1.message)
+        assertEquals("数组变量\"DAY\"的第1参数(-1)超出数组范围", e1.message, "Error.OoRVarArg 逐字（Lang.cs:1638）")
         assertFailsWith<CodeEE> { s.readInt("DAY", idx(1000)) }
         assertFailsWith<CodeEE> { s.writeInt("DAY", idx(1000), 1) }
     }

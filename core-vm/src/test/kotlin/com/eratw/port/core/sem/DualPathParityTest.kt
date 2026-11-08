@@ -38,10 +38,12 @@ import kotlin.test.assertTrue
  *
  * ## 这个装置回答什么
  *
- * 波次 B 起 `StatementExecutor` 有两条入口：
- * - **树路径** [StatementExecutor.execute] `(stmt, ctx)` —— 波次 A 之前的唯一语义实现；
- * - **扁平路径** [StatementExecutor.execute] `(source, index, ctx)` —— ASSIGN / PRINT 家族 / BAR 系
- *   直读参数流，其余经 `source.statementAt(index)` 回落树路径。
+ * 波次 B 起 `StatementExecutor` 有两条实现通道：
+ * - **对象树路径** [StatementExecutor.execute] `(stmt, ctx)` —— Android 真机生产默认
+ *   （`GameHost` 缺省不开扁池 ⇒ `flatStmtSource == null` ⇒ 逐语句对象树执行，原版同形）；
+ * - **扁平路径** [StatementExecutor.execute] `(source, index, ctx)` —— 归因/装置通道
+ *   （`files/flat-statements.on` 或 `--ez eratwFlatStatements true` 打开），ASSIGN / PRINT 家族 /
+ *   BAR 系直读参数流，其余经 `source.statementAt(index)` 回落对象树路径。
  *
  * 两条路径必须**逐字同义**。E2E 黄金管道（stdout）证明的是「进程级可观测面」，覆盖不到
  * 「某条语句在某个分支上的写面/异常文案」；本装置在同一初始状态下把**同一条语句**分别喂给
@@ -78,19 +80,20 @@ import kotlin.test.assertTrue
  * [DualPathObs] / [DualPathFlatSource] / [observe]；语句族的「可安全执行」判定表写在
  * 那个 main 的 KDoc 里（本文件只覆盖确定性语句）。
  *
- * ## 数据节（PRINTDATA / STRDATA）的过渡写法
+ * ## 数据节（PRINTDATA / STRDATA）的两面供给
  *
- * 当前 `DataSections` 的键是**语句实例**（`groupsOf(stmt)`），所以装置用 [MapDataSections]
- * 按实例取组。车道 C/D 把键换成语句池下标（`groupsOf(index)`）之后，这个替身必须同步改成
- * 下标键 —— 否则执行器的读点会打到「会抛 UnsupportedOperationException」的过渡重载上。
- * 这是本文件与跨路 API 的唯一耦合点，改签名时一起改（已写进交付消息的「需组长接线」）。
+ * `DataSections` 有两条读面：语句池下标键（`groupsOf(index)`，扁平通道）与语句实例键
+ * （`groupsOf(stmt)`，对象树通道的读面，见 `sem/ExecContext.kt` 的接口 KDoc），所以装置用
+ * [MapDataSections] 两面都供同一份组。扁平一侧的读点若打到实例键，会撞上「未实现」的显式
+ * 失败实现；对象树一侧若没有实例键，数据节会静默查空。这是本文件与跨路 API 的唯一耦合点，
+ * 改签名时一起改。
  *
- * ## 波次 C 车道 D 合入后的形态（写给收口人）
+ * ## 两条通道并存是既定形态（写给后来者）
  *
- * 车道 D 删掉旧入口 `execute(stmt, ctx)` 之后，本文件的树路径一侧**编译期即红**（这是刻意的：
- * 删入口必须同步改闸）。届时把树路径一侧换成「`source.statementAt(index)` → 直读入口」的
- * 还原对照，或按 `CONTRACT-T2-64-C §3-D` 的口径把本装置收敛成 code 层的对拍器。
- * 在此之前它就是「波次 B 两条路等价」的唯一闸。
+ * 对象树路径是 Android 真机生产默认，扁平路径是归因/装置通道；本装置测的是**两条实现通道的
+ * 一致性**，不是「新替代旧」——删任一条都没有正当性。若将来某条入口签名变化，树路径一侧会
+ * **编译期即红**（这是刻意的：改入口必须同步改闸），届时只改 [executeTreePath] 一处接缝
+ * （换成 `source.statementAt(index)` 造树再走语义实现的副本，或走 code 层对拍器）。
  */
 class DualPathParityTest {
 
@@ -852,14 +855,14 @@ internal fun DualPathObs.firstDiff(other: DualPathObs): String? = when {
 internal const val DUAL_PATH_FUNCTION_KEY = "DUAL"
 
 /**
- * **树路径调用的唯一接缝** —— 车道 D 合入、旧入口 `execute(stmt, ctx)` 被删时只改这里。
+ * **对象树通道调用的唯一接缝** —— 两个装置（单测 + 真语料）都只经本函数触对象树路径。
  *
- * 现在直接调旧入口。D 交付之后，可选择：
- * 1. 换成 code 层的还原对照（`FlatStatements.statementAt(index)` 造树再走旧语义的副本）；
- * 2. 换成 D 交付的 code 层对拍器（`CONTRACT-T2-64-C §3-D` 的「对拍装置保留在 code 层」）。
+ * 对象树入口 `execute(stmt, ctx)` 是 Android 真机生产默认路径（`flatStmtSource == null` 时
+ * 逐语句执行，与原版同形），不是待删的过渡物。若将来该入口签名变化，只在本函数适配：
+ * 1. 换成 code 层的还原构造（`FlatStatements.statementAt(index)` 造树再走语义实现的副本）；
+ * 2. 换成 code 层对拍器（`CONTRACT-T2-64-C §3-D` 的「对拍装置保留在 code 层」）。
  *
- * 两个装置（单测 + 真语料）都只经本函数触树路径，故适配点只有一处；不在这里改成反射
- * 调「可能存在的方法」——那会在删入口后静默退化成空闸。
+ * 适配点只有一处；不在这里改成反射调「可能存在的方法」——那会在入口变动后静默退化成空闸。
  */
 internal fun executeTreePath(
     executor: StatementExecutor,
@@ -1012,7 +1015,7 @@ internal class MapDataSections(
     override fun groupsOf(stmtIndex: Int): List<List<Expr>>? =
         if (groups.size == 1) groups.values.first() else null
 
-    /** 树路径（旧口径）：对拍 oracle 要能跑，故同时实现实例键读面。 */
+    /** 树路径（对象树通道的读面）：对拍 oracle 要能跑，故同时实现实例键读面。 */
     @Suppress("DEPRECATION")
     override fun groupsOf(stmt: Statement): List<List<Expr>>? = groups[stmt]
 }

@@ -1,0 +1,28 @@
+# erbc compile manifest —— 确定性构建清单（同一语料两次编译逐字节相同）
+manifest-format 2
+format-version 2
+container-magic ERBC
+container-version 2
+erbcc 0.1.0-SNAPSHOT
+compiler-digest 8185fdd6f2db2c2611f634a745c710a9dedd7d9c8eb58be417d6f5549347d382
+compiler-sources 204
+build-mode full
+corpus-root C:\DSH\eratw-安卓移植计划\eratw-android\tools\erbcc-rs\tests\data\rust-sidecar-fuzz\corpus\ERB
+source-files 4
+binary-skipped 0
+source SC_A.ERB 131 b45bcd3f528fa11c79862f614a44b397ef69e2776e3f34660dfb030bda96e41a
+source SC_B.ERB 84 38cd8e9944181b73cc07c051f85a09b26498cb330abdaa29ef717c810b03d788
+source SC_C.ERB 65 ac76dc043787507770c7d5764c4c79636a21278e05dc56d7895a2d0d98363ce2
+source SC_GLOBALS.ERH 117 542eb76ec5773e2125d2fa159c84e7ad098fcc2b8ee4d8995cf31e6b6f7e2247
+artifacts 3
+artifact erbc.v1/program.erbc 1606 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe9
+artifact erbc.v1/program.meta 1352 983e5764bffbc070c4abab9021c88021d518383a1a5f53ca47329f613743e5a1
+artifact erbc.v1/program.stmt.idx 64 57d2b7fa14e81925f6ffb0ac829acfbd4f9be1388f12efd6045c9d6cc3867235
+program instructions 16
+program statements 10
+program functions 3
+program strings 0
+program constants 0
+program expressions 1
+program global-slots 0
+program entry-function 0

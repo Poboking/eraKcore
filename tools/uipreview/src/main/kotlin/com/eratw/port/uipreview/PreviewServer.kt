@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * |---|---|---|
  * | GET | `/` | 静态页（classpath `web/index.html`） |
  * | GET | `/frame.png?rev=N` | 当前帧 PNG；`rev` = 帧序号（`PreviewRenderer.FrameShot.frameRev`），相同回 304，否则 200 + `X-Frame-Rev` |
- * | GET | `/state` | JSON：帧序号/sink 版本/画布几何/columns/heightLines/按钮表/当前 InputRequest/canSkip/failure |
+ * | GET | `/state` | JSON：帧序号/sink 版本/画布几何/columns/heightLines/按钮表/div 子行按钮表/当前 InputRequest/canSkip/failure |
  * | POST | `/tap` | `{"x":画布px,"y":画布px}` → 进泵线程请求队列（命中链在泵线程执行） |
  * | POST | `/submit` | `{"text":"..."}` → `QueueInputSink.submit(text, false)`（内部锁，直接从 HTTP 线程入队） |
  * | POST | `/scroll` | `{"rows":N}`（正=向下翻向新行/贴底方向，负=向上翻历史）→ 泵线程请求队列 |
@@ -183,6 +183,10 @@ class PreviewServer(
             sb.append('}')
         }
         sb.append(']')
+        // div 子行按钮（DIV-WIRE-2 余项④）：数据源 = `ConsoleScreen.divTargets()`（命中层像素
+        // 条目，经 [PreviewRenderer.UiSnapshot.divButtons] 发布）。既有键（buttons/chips）原样
+        // 不动，本键只新增；若同帧还有绘制侧几何快照键，两者口径**分开**（见 [divButtonsJson]）。
+        sb.append(",\"divButtons\":").append(divButtonsJson(ui?.divButtons ?: emptyList()))
         sb.append('}')
         return sb.toString()
     }
@@ -247,13 +251,8 @@ class PreviewServer(
 
     internal fun jsonString(s: String): String = JsonString.of(s)
 
-    /** 按钮值（Long / String）→ JSON 值。 */
-    private fun jsonValue(v: Any?): String = when (v) {
-        null -> "null"
-        is Long -> v.toString()
-        is Number -> v.toString()
-        else -> jsonString(v.toString())
-    }
+    /** 按钮值（Long / String）→ JSON 值（与顶层 [jsonValueOf] 同一实现）。 */
+    private fun jsonValue(v: Any?): String = jsonValueOf(v)
 
     companion object {
         private const val WEB_INDEX = "web/index.html"
@@ -261,6 +260,77 @@ class PreviewServer(
         /** POST 体上限（点击/文本/滚动都是小对象；防呆，不与原版语义相关）。 */
         private const val MAX_BODY_BYTES = 64 * 1024
     }
+}
+
+/**
+ * `/state` 的 `divButtons` 段（DIV-WIRE-2 余项④）—— **纯函数**，便于单测。
+ *
+ * 数据源 = `ConsoleScreen.divTargets()`：命中层按 `ConsoleDivPart.cs:137-172` 的
+ * TestChildHitbox（块矩形 `:140` + 子行按钮 `:152/:159`）建好的**像素命中条目**，
+ * 经 [PreviewRenderer.UiDivButton] 原样发布。序列化侧**不再折算**：
+ * - 本键的 `x`/`y`/`width`/`height` 是**命中几何**（画布像素浮点，原样搬）；
+ * - 若同一 `/state` 里存在 `divs[]` 这类**绘制**快照键，它的宽 = `width + 2`
+ *   （`ConsoleDivPart.cs:178` 的官方 fudge）、y 由行顶表折算 —— 两套几何不许互相折算，
+ *   否则会出现「报出来的点 ≠ 点得中的点」。
+ *
+ * 字段：`blockIndex`（`DivOverlayPlanner.Plan.all` 拼接序的块号，`DivOverlay.kt:107`；
+ * 与 `focusedDiv/pressedDiv` 同一套编号）/ `childRow`（子行序号，0 起）/
+ * `depth`（覆盖层次，`EmueraConsole.cs:1830` 的 depth 降序）/ `colStart`-`colEnd`
+ * （子行内半角格区间，0 起、不含 indent）/ `x`-`y`-`width`-`height`（命中矩形，画布像素）/
+ * `value`（按钮回环值，Long 或 String）/ `label`（按钮文案）。
+ */
+internal fun divButtonsJson(buttons: List<PreviewRenderer.UiDivButton>): String {
+    val sb = StringBuilder(64 + buttons.size * 96)
+    sb.append('[')
+    var i = 0
+    while (i < buttons.size) {
+        if (i > 0) sb.append(',')
+        val b = buttons[i]
+        sb.append("{\"blockIndex\":").append(b.blockIndex)
+        sb.append(",\"childRow\":").append(b.childRow)
+        sb.append(",\"depth\":").append(b.depth)
+        sb.append(",\"colStart\":").append(b.colStart)
+        sb.append(",\"colEnd\":").append(b.colEnd)
+        sb.append(",\"x\":").append(jsonFloat(b.xPx))
+        sb.append(",\"y\":").append(jsonFloat(b.yPx))
+        sb.append(",\"width\":").append(jsonFloat(b.widthPx))
+        sb.append(",\"height\":").append(jsonFloat(b.heightPx))
+        sb.append(",\"value\":").append(jsonValueOf(b.value))
+        sb.append(",\"label\":").append(JsonString.of(b.label))
+        sb.append('}')
+        i++
+    }
+    sb.append(']')
+    return sb.toString()
+}
+
+/**
+ * 像素浮点 → JSON 数字字面量。
+ *
+ * 命中层几何是 `Float`（`ButtonLayer.DivHit.xPx` 等），「原样搬」意味着不取整、不重算；
+ * 这里只做两件**格式**事：有限性守卫（NaN/Infinity 不是合法 JSON，落 `null`）与
+ * 整数值去尾（`12.0` → `12`，与 `/state` 既有整数键 `buttons[].x/y` 的观感一致）。
+ * 负坐标照常保留（`xpos` 允许为负，语料 `TEMP_CHARA_LIST_BY_DT.ERB:641`）。
+ */
+internal fun jsonFloat(v: Float): String {
+    if (!v.isFinite()) return "null"
+    val d = v.toDouble()
+    return if (d == kotlin.math.floor(d) && kotlin.math.abs(d) < 1e15) {
+        d.toLong().toString()
+    } else {
+        v.toString()
+    }
+}
+
+/**
+ * 按钮值（Long / String / null）→ JSON 字面量，与 `stateJson` 的 `buttons[].value`
+ * 同口径（[divButtonsJson] 在顶层函数位，够不到类内私有 `jsonValue`，故单列一份）。
+ */
+internal fun jsonValueOf(v: Any?): String = when (v) {
+    null -> "null"
+    is Long -> v.toString()
+    is Number -> v.toString()
+    else -> JsonString.of(v.toString())
 }
 
 /** JSON 字符串字面量转义（服务端与 CLI 控制命令共用；`\\u%04x` 控制字符兜底）。 */

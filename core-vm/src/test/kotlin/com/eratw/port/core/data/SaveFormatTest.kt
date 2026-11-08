@@ -16,27 +16,23 @@ import kotlin.test.assertTrue
  * （`save00-03.sav` / `save1000.sav` / `global.sav`）逐个 read + 版本/游戏码/描述断言，
  * 再做 `write(read(f)) == f` 的逐字节幂等判定。
  *
- * 样本位置（只读，**仓外数据，不入公开仓**）：缺省找 `.workbuddy/sav-backup/sav-20261018-110513/`，
- * 也可用环境变量 `ERATW_SAV_SAMPLES` 指向样本目录。样本缺失时本组用例**跳过**（不是失败）——
- * 公开仓 / CI 上天然没有玩家存档，硬炸只会制造噪音。
- * 从 gradle test JVM 的 cwd（模块目录 `core-vm/`）上溯两级即仓库根。
+ * 样本位置（只读，**仓外数据，不入公开仓**）：只认环境变量 `ERATW_SAVE_SAMPLES`
+ * （`-PsaveSamples` 由 core-vm/build.gradle.kts 导出）指向的样本目录。样本缺失时本组用例
+ * **跳过**（不是失败）——公开仓 / CI 上天然没有玩家存档，硬炸只会制造噪音。
  *
  * 口径：所有期望值都取**样本自身的实测字面量**（下表），不用实现算出来的值当期望
  * （CONTRACT-M3-B2 §3）。幂等失败时报告首个差异偏移 + 期望/实际字节。
  */
 class SaveFormatTest {
 
-    private val samplesDir: File? = sequenceOf(
-        System.getenv("ERATW_SAV_SAMPLES")?.let { File(it) },
-        File("../../.workbuddy/sav-backup/sav-20261018-110513"),
-        File(".workbuddy/sav-backup/sav-20261018-110513"),
-        File("../.workbuddy/sav-backup/sav-20261018-110513"),
-    ).firstOrNull { it != null && it.isDirectory }
+    private val samplesDir: File? =
+        System.getenv("ERATW_SAVE_SAMPLES")?.trim()?.takeIf { it.isNotEmpty() }?.let { File(it) }
+            ?.takeIf { it.isDirectory }
 
     /** 有样本才有断言资格；没有就整组跳过（Assumption failed），不算红。 */
     private fun requireSamples(): File =
         samplesDir ?: throw org.opentest4j.TestAbortedException(
-            "跳过：找不到真实存档样本目录（设 ERATW_SAV_SAMPLES 指向 sav-20261018-110513 可启用）",
+            "跳过：找不到真实存档样本目录（设 ERATW_SAVE_SAMPLES 指向样本目录可启用）",
         )
 
     /** 样本清单：文件名 → (类别, UniqueCode, ScriptVersion, 描述文本)。 */

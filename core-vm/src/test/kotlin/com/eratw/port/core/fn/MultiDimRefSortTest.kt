@@ -179,7 +179,7 @@ class MultiDimRefSortTest {
         val e = assertFailsWith<CodeEE> {
             mrsCall(ctx, "ARRAYMSORT", mrsRef("FLAG"), mrsRef("MAT"))
         }
-        assertTrue(e.message!!.contains("EmptyRefVar"), "实际：${e.message}")
+        assertEquals("引用类型变量\"MAT\"缺少引用对象", e.message, "Error.EmptyRefVar 逐字（ReferenceToken.cs:120）")
         store.leaveFunction()
     }
 

@@ -303,7 +303,7 @@ class ConsoleDataSourceTest {
         assertEquals(listOf("ああ", "あ"), s.loggedLines())
         assertTrue(s.lines()[0].isLogicalLine)
         assertFalse(s.lines()[1].isLogicalLine)
-        assertFalse(s.lines()[0].isLineEnd, "折行续行 IsLineEnd=false")
+        assertTrue(s.lines()[0].isLineEnd, "折行的中间排带构造缺省 IsLineEnd=true（ConsoleDisplayLine.cs:16）")
         assertTrue(s.lines()[1].isLineEnd)
     }
 

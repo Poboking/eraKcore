@@ -1,0 +1,66 @@
+# erbcc-rs / rust-playable 车道登记：Rust 腿产物装进引擎后的实测读数（Haruki 机）
+# 产法：python devtools/verify_rust_erbc_playable.py all --register（或单独 gate1 / gate1w / gate2 / gate3）
+# 时间：2026-11-01 13:14:39　语料：C:\DSH\eratw-安卓移植计划\eratw-画蛇添足版eratw4.980\ERB
+# 机相关：读数含产出机绝对路径与 vm 版本；换机（或改 core-vm 源码树/编译器指纹）后重跑刷新，判据不放宽。
+
+## 四件套（rust 腿；kotlin 腿 sha 由前置双跑闸钉全等）
+program.erbc 329105851 f12b58f90be90b10ac2eb15d21dff8c2a612e937efdc7512b749a209465295b5
+program.meta 49332018 09a45eba89d7c2f0d0170d92085fe7563c1ba00eb7364647e59d92ea9c92c7d2
+program.stmt.idx 6849704 8838a4d252293fea893bd54d0131352c732e58cea3a2f490893e2af8b7ff211f
+manifest.txt 658671 dfdc186b8fed0cafea25857de3d6d9b9bfd9a10e693ce6fa67112ec80ee84440
+
+## 真语料装载告警：0 条（通道非空对照见 warn-channel 档）
+
+## 探针读数逐项（kotlin 腿为基，rust 腿与全表等值 ⇒ 只列一份）
+load_ok                            true                       OK
+program_functions                  110072                     OK
+program_instructions               4884333                    OK
+program_statements                 1712420                    OK
+meta_functions                     110072                     OK
+meta_labels_keys                   110072                     OK
+meta_labels_entries                1623                       OK
+meta_files_keys                    110072                     OK
+meta_data_sections                 3874                       OK
+meta_param_defaults                948                        OK
+meta_method_types                  4216                       OK
+meta_macros                        22                         OK
+meta_int_constants                 6012                       OK
+meta_str_constants                 88                         OK
+meta_engine_tag                    erbcc 0.1.0-SNAPSHOT       OK
+meta_program_sha256_field          f12b58f90be90b10ac2eb15d…  OK
+erbc_actual_sha256                 f12b58f90be90b10ac2eb15d…  OK
+meta_actual_sha256                 09a45eba89d7c2f0d0170d92…  OK
+load_warnings_present              true                       OK
+load_warnings_count                0                          OK
+load_warnings_sha256               e3b0c44298fc1c149afbf4c8…  OK
+global_dims_count                  7201                       OK
+global_dims_text_sha256            281a9825d3fa57e604eeb0ac…  OK
+private_dims_count                 19755                      OK
+private_dim_arity_sum              19783                      OK
+private_dim_total_size_sum         212761                     OK
+private_dim_str_decls              7911                       OK
+private_dim_const_decls            394                        OK
+private_dim_savedata_decls         0                          OK
+private_dim_charadata_decls        0                          OK
+private_dim_ref_decls              576                        OK
+private_dims_text_sha256           0a2bf12817eb9d2307290f2a…  OK
+meta_functions_text_sha256         69423995956521bd55033647…  OK
+int_constants_text_sha256          cbb5d7b906075fcda1e2b314…  OK
+
+## vmdbg 现成命令读数逐项
+vmdbg_disasm_instructionCount      4884333                    OK
+vmdbg_sweep_metaFunctions          110072                     OK
+vmdbg_sweep_skippedEvent           37                         OK
+vmdbg_sweep_selected               0                          OK
+vmdbg_sweep_programStatements      1712420                    OK
+vmdbg_sweep_touchedStatements      0                          OK
+vmdbg_vars_count                   7359                       OK
+vmdbg_vars_sha256                  91b7e043d7ace86dbdab30e5…  OK
+vmdbg_vars_sample                  A,AA_IMAGE_OPEN,ABL,ABLD…  OK
+
+## rust 腿引擎读数原样（非 COMPARE_KEYS 的旁证行）
+probe_elapsed_s 3.7
+load_program_ms 831
+load_meta_ms 1217
+vars_sample A,AA_IMAGE_OPEN,ABL,ABLDLC,ABLNAME,ABL_TSLV
+（load_*_ms / probe_elapsed_s 是墙钟，不进两腿判据）

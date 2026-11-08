@@ -136,9 +136,53 @@ class SweepTest {
         assertTrue("resume" in text, text)
     }
 
+    /**
+     * `--resume` 的跳过集**跨过滤复用**（W5-misc 第 3 条之三）：摘要必须把「本轮真跳过几个」
+     * 与「旧 jsonl 的终态集有几个」分开写。
+     *
+     * 只写后者的形状是骗人的：上一轮跑过 3 个函数、这一轮 `--only MINI_PASS` 复用同一目录，
+     * 摘要说「复用终态 3」，读的人以为本片已经跑完 3 个 —— 实际本片只跳过 1 个，另外 2 个
+     * 根本不在本轮过滤内。差值不写出来，「换过滤复用 --out」这条坑就永远看不见
+     * （坑本体不修：跳过集按 key 复用是 --resume 的定义，改它等于改断点续跑的语义）。
+     */
     @Test
-    fun sweepResumeRerunsFunctionWithOnlyRunningRecord() {
-        // 真实挂死形态：文件里只有一行 RUNNING（终态没来得及写）→ resume 必须重跑它并折成终态
+    fun sweepResumeReportsSkippedSeparatelyFromWholeTerminalSet() {
+        val outDir = tmp.resolve("sweep-out-resume-filter")
+        // 上一轮：三个函数都留下终态记录（MINI_PASS / MINI_ARGS / MINI_CODEEE）
+        val first = run(
+            *MiniCorpus.args(built, work, "sweep", "--out", outDir.toString(),
+                "--only", "MINI_(PASS|ARGS|CODEEE)"),
+        )
+        assertEquals(0, first.first, first.second)
+        assertEquals(
+            setOf("MINI_PASS", "MINI_ARGS", "MINI_CODEEE"),
+            records(outDir.resolve("sweep.jsonl")).map { it["key"] }.toSet(),
+            first.second,
+        )
+
+        // 这一轮：过滤只命中 MINI_PASS，另两条终态记录属于「非本过滤命中」，不构成跳过
+        val (code, text) = run(
+            *MiniCorpus.args(built, work, "sweep", "--out", outDir.toString(),
+                "--only", "MINI_PASS", "--resume"),
+        )
+        assertEquals(0, code, text)
+        assertTrue("本次清扫 0" in text, "过滤内只剩被跳过的那一个，本次应当清扫 0：$text")
+        assertTrue("跳过 1 个" in text, "摘要没写本轮真跳过的个数：$text")
+        assertTrue("终态集 3 个" in text, "摘要没写旧 jsonl 的终态集大小：$text")
+        assertTrue("2 个不在本片/本过滤命中" in text, "差值没解释清楚：$text")
+
+        val summary = Files.readString(outDir.resolve("summary.md"), Charsets.UTF_8)
+        assertTrue("本轮实际跳过 1 个" in summary, summary)
+        assertTrue("其余 2 个不在本片/本过滤命中内" in summary, summary)
+        assertTrue("跳过集跨过滤复用" in summary, "summary.md 少了这条警告：$summary")
+        // 跳过集不影响台账内容：本轮没跑任何函数，旧三条记录原样留着（RUNNING 已清）。
+        val recs = records(outDir.resolve("sweep.jsonl"))
+        assertEquals(3, recs.size, recs.toString())
+        assertTrue(recs.none { it["status"] == "RUNNING" }, recs.toString())
+    }
+
+    @Test
+    fun sweepResumeRerunsFunctionWithOnlyRunningRecord() {        // 真实挂死形态：文件里只有一行 RUNNING（终态没来得及写）→ resume 必须重跑它并折成终态
         val outDir = tmp.resolve("sweep-out-crash")
         Files.createDirectories(outDir)
         val jsonl = outDir.resolve("sweep.jsonl")

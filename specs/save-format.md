@@ -146,9 +146,28 @@
 
 > 次要风险：`DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss")` 受 locale 影响需固定 InvariantCulture（Process.cs:2872）；`Environment.TickCount` 仅影响 RNG 种子，不影响存档字节。
 
+### 5.3 读侧未知键与「类型/维度不符」：读完即丢（引用锚点）
+
+> **勘误（2026-11-02，T10 路）**：计划与代码注释里引用的「`specs/save-format.md` §5.3 未知键丢弃」
+> 指本节。此前 §5 只有上面三条结论、并无 5.3 小节，属引用漂移；本节按源码证据补写，不改动上面三条。
+
+- **原版口径**：`VariableData.LoadVariableBinary`（`reference/emuera-cs/MinorShift.Emuera.GameData.Variable/VariableData.cs:4081`）：
+  先从键名查变量 token（`:4084` `variableToken = null`；`:4085-4088` 查表，`:4089-4092` 命中
+  `IsCharacterData|IsConst|IsPrivate|IsLocal|IsCalc` 之一则一律置 null）；随后每个类型分支都先判
+  `variableToken == null || !IsInteger/IsString || Dimension != n`，**不匹配就走「读掉值再丢弃」**
+  （Int 分支 `:4127` 起 `reader.ReadInt()`；数组走 `ReadIntArray(null, needInit:true)` 一族）；
+  非法类型码落 `:4207-4208` `throw new FileEE(Lang.Error.AbnormalData.Text)`。
+  ⇒ **键不认识 / 类型不符 / 维度不符都**不报错、也不写变量池；只有类型字节非法才抛。
+- **移植侧对应**：`SaveData.applyEntry`（`core-vm/.../data/save/SaveData.kt:268-289`）对未知键与
+  类型/维度不符一律返回 false（跳过）；[SaveFormat] 的 `keepKey` 谓词只决定**是否建数组**，
+  键名本身照读（`core-vm/.../data/save/SaveFormat.kt:582-592`；跳过路径 `skipValue` 仍校验标签，
+  坏档不因「键不认识」被放过，见 `SaveUnknownKeySkipTest`）。
+- **迁移应用**：4.981 相对 4.980 删除的 3 个 SAVEDATA 声明（`MP_GRADE`/`P_AdjList`/`P_AdjListDone`，
+  verify-notes §24.2）在旧档读入时按本节丢弃；4.981 新增的自然变量在旧游戏下读入同样丢弃。
+
 ## 6. 实测勘误（a2-savechara，2026-10-19 实测）
 
-> 本节为**实机对拍**（6 个 PC 原版样本，`.workbuddy/sav-backup/sav-20261018-110513/`）得到的修正，
+> 本节为**实机对拍**（6 个 PC 原版样本，`<internal-workdir>/<sample-backup>/sav-20261018-110513/`）得到的修正，
 > 与上文源码推断冲突处以本节为准（合同：真相优先，附证据）。固化于 `core-vm/.../SaveFormatTest`。
 
 ### 6.1 容器头逐字节实测

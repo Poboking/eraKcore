@@ -42,8 +42,9 @@ import com.eratw.port.core.host.CellWidth
  *   [BuiltinHost] 属性，绝不伪造 0、空串或静音（音频、内存两条随各自家族一起迁出，
  *   判据不变）。
  * - OUTPUTLOG 需要 [BuiltinHost.fileOps] 与 [BuiltinHost.consoleLines]；缺任一项抛 CodeEE。
- * - GETLINESTR 只用 [BuiltinHost.measureText]（可选）；缺省回落到与 HTML 家族一致的
- *   等宽近似（半角步进 = FontSize/2、全角 = FontSize），全角/半角名单唯一取自
+ * - GETLINESTR 的量宽与 HTML 家族走**同一条三段回落链**（FN-04 core，见下方
+ *   [measureWidth]）：带样式的分段通道（缺省族 + 常规体）→ 旧 [BuiltinHost.measureText]
+ *   → 等宽近似（半角步进 = FontSize/2、全角 = FontSize），全角/半角名单唯一取自
  *   [CellWidth]（口径 = CP932 字节数），证据与分歧登记见本文件的 measureWidth。
  * - BITMAP_CACHE_ENABLE 在原版**恒返回 0**（:8672），只改下一行的位图缓存开关；
  *   本移植没有渲染器消费该开关，但返回值与开关状态都按原版落地，不属于「假实现」。
@@ -294,34 +295,44 @@ private fun isAbsolutePath(p: String): Boolean =
 // ---------------------------------------------------------------------------
 
 /**
- * EmueraConsole.getStBar（:3420-3435）。
+ * GETLINESTR 的 bar 构造：语义与宽度口径见 [buildStBarText] 与下方 measureWidth 的
+ * KDoc；本函数只负责把 BuiltinContext 的宿主度量接进来。
+ */
+private fun buildBar(c: BuiltinContext, barStr: String): String {
+    val state = configState(c)
+    val fontSize = state.intOf(ConfigKey.FontSize)
+    return buildStBarText(barStr, drawableWidth(state)) { measureWidth(c, it, fontSize) }
+}
+
+/**
+ * EmueraConsole.getStBar（:3420-3436）的共享实现：先追加一份 barStr，然后**每次整串**
+ * 测量宽度直到 >= [drawableWidth]，再逐字符删到 <=。DrawableWidth = WindowX -
+ * max(2, FontSize/6)（Config.cs:461-466）。
  *
- * 先追加一份 barStr，然后**每次整串**测量宽度直到 >= DrawableWidth，再逐字符删到
- * <= DrawableWidth。DrawableWidth = WindowX - max(2, FontSize/6)（Config.cs:461-466）。
+ * 两个消费者：GETLINESTR（[buildBar]，度量走宿主 measureText 或等宽近似）与
+ * `DRAWLINESTR` 伪变量初值（GameSession 装配期，原版 Process.cs:259 的
+ * `console.setStBar(Config.DrawLineString)`；空串回落 "-" 见 Config.cs:725-728）。
  *
  * 与原版的唯一差异是「零进度保护」：原版对零宽字符串会死循环，本实现对测量值不再
  * 增长的输入抛 CodeEE。TODO(verify)：真实字体下未发现零宽 barStr 用例。
  */
-private fun buildBar(c: BuiltinContext, barStr: String): String {
-    val state = configState(c)
-    val drawable = drawableWidth(state)
-    val fontSize = state.intOf(ConfigKey.FontSize)
+internal fun buildStBarText(barStr: String, drawableWidth: Int, measure: (String) -> Long): String {
     val sb = StringBuilder(barStr)
     var width = 0L
     // 原版 num 从 0 开始，故至少会追加一次
     var previous = -1L
-    while (width < drawable) {
+    while (width < drawableWidth) {
         sb.append(barStr)
-        width = measureWidth(c, sb.toString(), fontSize)
+        width = measure(sb.toString())
         if (width <= previous) {
-            throw CodeEE("函数 GETLINESTR：字符串\"${barStr}\"的显示宽度不随追加增长，无法确定长度")
+            throw CodeEE("字符串\"${barStr}\"的显示宽度不随追加增长，无法确定长度")
         }
         previous = width
     }
-    while (width > drawable) {
+    while (width > drawableWidth) {
         if (sb.isEmpty()) return ""
         sb.setLength(sb.length - 1)
-        width = measureWidth(c, sb.toString(), fontSize)
+        width = measure(sb.toString())
     }
     return sb.toString()
 }
@@ -334,8 +345,13 @@ private fun drawableWidth(state: ConfigState): Int {
 
 /**
  * 原版逐次调用 StringMeasure.GetDisplayLength（StringMeasure.cs:42-72，GDI 像素）。
- * 宿主提供 [BuiltinHost.measureText] 时用宿主值；否则退到与 HtmlMethods.kt 同式的
- * 等宽近似：半角步进 = FontSize/2、全角 = FontSize。
+ * 量宽走 FN-04 的三段回落链（FONT-MEASURE F2 收口）：
+ * 1. [BuiltinHost.measureTextRun]：带样式的分段通道；本函数的 bar 是纯文本，请求恒为
+ *    「缺省族 + 常规体」（fontName 空串、样式位 0，StringStyle.cs:26-31、FontFactory.cs:13-17），
+ *    生产由 Android 侧 `AndroidTextMeasure.measurePixels` 回答；
+ * 2. [BuiltinHost.measureText]：旧纯文本回调（保留给未升级的宿主，读数与改造前一致）；
+ * 3. [approxDisplayWidth]：等宽近似（headless / 装置），与 HtmlMethods.kt 的
+ *    [approxTextWidth] 同式：半角步进 = FontSize/2、全角 = FontSize。
  *
  * **宽度表不在本文件**：全角/半角唯一取自 [CellWidth.isFullWidth]
  * （`core/host/CellWidth.kt`，口径 = CP932(Shift-JIS) 字节数）。本文件原先那份
@@ -359,7 +375,24 @@ private fun drawableWidth(state: ConfigState): Int {
  */
 private fun measureWidth(c: BuiltinContext, s: String, fontSize: Int): Long {
     if (s.isEmpty()) return 0L
+    // FN-04 串级（与 HtmlMethods.measureText 同链，FONT-MEASURE F2）：GETLINESTR 的 bar 是
+    // 纯文本 ⇒ 请求按原版 FontFactory 的归一口径给「缺省族 + 常规体」（fontName 空串、
+    // 样式位 0，StringStyle.cs:26-31、FontFactory.cs:13-17），字号沿用本函数已读的
+    // 生效配置项（与 HTML 家族吃 `BuiltinHost.fontSize` 同源，GameSession 喂同一条
+    // scriptFontPixelSize）。真机只接了 measureTextRun ⇒ 此前 GETLINESTR 永远吃不到
+    // 真度量、恒走下面的等宽近似；补上第一段后两把尺归一。宿主没接（纯 JVM 装置、
+    // 旧宿主）时本段返回 null，读数与改造前逐位一致（回落链 2/3 段原样）。
+    c.host.measureTextRun(TextMeasureRequest(s, "", fontSize.toLong(), 0))?.let { return it }
     c.host.measureText?.let { return it(s) }
+    return approxDisplayWidth(s, fontSize)
+}
+
+/**
+ * 等宽近似（宿主未接 measureText 时的回落，与 HtmlMethods.kt 的 approxTextWidth 同式）：
+ * 全角步进 = [fontSize]、其余半个。宽度表唯一取自 [CellWidth.isFullWidth]
+ * （`core/host/CellWidth.kt`，口径 = CP932(Shift-JIS) 字节数）。
+ */
+internal fun approxDisplayWidth(s: String, fontSize: Int): Long {
     var width = 0L
     var i = 0
     while (i < s.length) {

@@ -1,0 +1,33 @@
+# erbcc-rs / rust-incremental 车道的探针登记物（产物字节复现凭据）
+#
+# 产法（2026-11-01，Haruki 机，本 worktree）：
+#   export JAVA_HOME='C:\DSH\eratw-安卓移植计划\.tooling\jdk-17.0.20.1+1'; export PATH="$JAVA_HOME/bin:$PATH"
+#   语料 = tests/data/rust-incremental/corpus/ERB（+ variants/<tag>/ 覆盖 / __delete__.lst 删除）
+#   每个 tag 各跑一次真编译：cargo test --test incremental_feasibility（Rust 编排腿 cmd_compile::execute）
+# 闸 tests/incremental_feasibility.rs 逐条断言下面每一列，跑出来的就是这些数（不是手抄期望值）。
+#
+# 刷新条件：core-vm 编译器源码变了导致产物字节变化时，重跑上面那条命令并重新登记
+# （与 tests/data/rust-kernel/parity-baseline-sha256.txt 同一条纪律）。
+#
+# 列：tag | erbc 字节 | erbc sha256 | stmt.idx 字节 | stmt.idx sha256 | meta sha256
+#      | 观测函数 IFB_ONE 的 code 绝对起点 | code 长度 | code sha256
+# IFB_ONE 来自**从不编辑**的 inc_b.ERB：它的 code 就是判据「未改动文件的产物区间」的观测量。
+tag|erbc_bytes|erbc_sha256|stmt_bytes|stmt_sha256|meta_sha256|ifb_code_start|ifb_code_len|ifb_code_sha256
+base|2188|716045faf7b00808c295bfaaf6ca89eb6fdab4193e8b9b647ab0329107d17b54|68|df1aa032e3db1a40e40c9e9e560d840d01df40032e451609c753e6f9b1e733f3|12e6bf876affca4783e1ffeb1c50b1cdddd35fd184941b07e1e4a28b9e68fd90|1602|176|a430ba531a53c43d80233614afef733b3dd4c1fa002ef0b7fcaafe5b051d20f5
+p1_comment|2188|716045faf7b00808c295bfaaf6ca89eb6fdab4193e8b9b647ab0329107d17b54|68|df1aa032e3db1a40e40c9e9e560d840d01df40032e451609c753e6f9b1e733f3|12e6bf876affca4783e1ffeb1c50b1cdddd35fd184941b07e1e4a28b9e68fd90|1602|176|a430ba531a53c43d80233614afef733b3dd4c1fa002ef0b7fcaafe5b051d20f5
+p2_strswap|2190|80ff39ebcf303007ca587d5f1ea6760299f28381cb84acdd4b48857bde3c7f3d|68|df1aa032e3db1a40e40c9e9e560d840d01df40032e451609c753e6f9b1e733f3|8a39a2d07fd1abb5b6a3dd306e6f0bbd6033a01fa8dd9af3927d8709c12eca51|1604|176|a430ba531a53c43d80233614afef733b3dd4c1fa002ef0b7fcaafe5b051d20f5
+p2_stradd|2256|81e67cf3de085fd62b40d73422e3016490b5aec89f155ad68bd47c51ae01ba39|68|df1aa032e3db1a40e40c9e9e560d840d01df40032e451609c753e6f9b1e733f3|17765f66c8760837ecc5db0a95ce9321392528cd4d0c85cadcb5fb129024c21c|1649|176|1a0a70cd1f35ced8b3e3a9f8cfc82199c49d02ea913307b59a55e291b272efe4
+p2_stmtadd|2293|774e676ed636aff20c4bdcfb0e9a6c69bb5abcd3f88e28c6a4725eb22b17bc74|72|cb89a80e562b38c466aedd56d9928eaec965520d83409cb4b00a349a77b9658a|c7c0c1792d4adbb636241110ca7d88c9eb6084ce6a047ad1e66708f6d41bfcd6|1703|176|39d65511c226228c59f068817c669c87ea4a7d9e76499d5ee04223bf3006cfe0
+p3_funcadd|2405|5f76a349909e6a3c269fa0b4ec0f75718e280a90787b4b5d9e053388555d7967|76|01ec2a2f5cbd1e8fb465ade93def72e4141f34228e7debaa36b8a33ab39c6e21|a3cec8ab6bb78ea315be29d6d8c5f182de64d0ce0370169e4e740eb68efeb9ab|1803|176|d7b0af4818e28b94f93fe05c89dae7b437203dd4951dd77ec68404ebadb2ba97
+p3_funcdel|1755|ca8540ae8ecf3d380b3fa19acfb1fcdbd06d207fab584ea15b5f140bd50a0f53|60|4e767e71234341fe6d478f3a269d15b2ab83cfc23c8c23899301b743b0b048a5|3b1d2ce01c8dfa465b170f84299bca1bb23273d14d3005f9d6f51411b66620f2|1260|176|33559825673dcdb0a0f0df0fdc1c0a2962dee428293730a80b3a934a92c13ec5
+p4_erhconst|2188|716045faf7b00808c295bfaaf6ca89eb6fdab4193e8b9b647ab0329107d17b54|68|df1aa032e3db1a40e40c9e9e560d840d01df40032e451609c753e6f9b1e733f3|f5da1bb7968b307984c14097806644f0f1289e2e8750e5d374350ee33f28691e|1602|176|a430ba531a53c43d80233614afef733b3dd4c1fa002ef0b7fcaafe5b051d20f5
+p5_lastfile|2489|6a189a3ab09aaf0d8df063b6c47f4e841bb68d95a2ba960ac0c3668ee5b4eccc|72|bb420b1d2b1f8b44411b3fc2412d1761f7836bea330b4da49f4bbf7baae4e8fa|4db45e576db1e8d9a52bd8cdeda6401de328ce52ae2c358b8f4cbf2f5d1058b1|1696|176|a430ba531a53c43d80233614afef733b3dd4c1fa002ef0b7fcaafe5b051d20f5
+p6_fileadd|2621|3baeb6204fa78b8f26fa5ea51fcea7a7630dd0d1ebe5c39226df9cacef07ffc0|76|7515ca849afc3b871b0a7bd4c4d66e548e6c11db546470d23a5c9e319a317368|595dc06f64abec48f6f7ae58b0f38b9ea7f7e1922cafa00adb26a73d3ecfd632|1944|176|ea39f9be620f3fa2fdf3f942dd56d4eacc7d781d16f1f92841ee337d3f331237
+p7_filedel|1950|4fb02934dda9f277b3793ca75bf1a180b79a228deeeb1675cc4c79ea4f8c8b29|60|eabf0d6b0e00d75aa7e24b517379a6c7518e8b3a6649c74424a26a46e5e697d3|0ea4cbbd58611e0351b57c46ba783001676b790af0684156486d6fc7686da88c|1428|176|a430ba531a53c43d80233614afef733b3dd4c1fa002ef0b7fcaafe5b051d20f5
+#
+# 观测口径：erbc = program.erbc，stmt = program.stmt.idx，meta = program.meta（三件都是产物）。
+# code_start 是 IFB_ONE 指令区间在**文件里的绝对字节起点**（= 段 5 偏移 + 4 + entryPc×16）。
+# 判据「未改动文件的产物区间逐字节不变」要 code_start 与 code_sha 同时不动才算成立。
+# 一眼读数：code_sha 不变 = {p1_comment, p2_strswap, p4_erhconst, p5_lastfile, p7_filedel}，
+# 其中 code_start 也不变的只有 {p1_comment, p4_erhconst} —— 而这两条都是「整文件一字不差」，
+# p4_erhconst 的 meta 仍然变了，所以它连「产物集不变」都不成立。

@@ -284,6 +284,35 @@ class SoundChannelTableTest {
         assertNotNull(w.table.bgm)
     }
 
+    @Test
+    fun `closeAll 逐声道隔离：一条 release 抛异常不拖累其余声道与 Bgm`() {
+        // 2026-10-31 复查：旧写法是一条裸 for 循环，第一个声道抛
+        // IllegalStateException（OEM MediaPlayer 的 `release() called on a player in
+        // invalid state` 是已知形态）之后全部跳过 —— 退出清场于是漏掉余下声道与 Bgm，
+        // 异常还会顺着 GameHost.shutdownForExit 把 session.close() 一起带走。
+        val table = SoundChannelTable(channelCount = 3)
+        val closed = ArrayList<String>()
+
+        fun decoder(name: String, boom: Boolean) = object : ChannelDecoder {
+            override val totalSeconds: Double = 1.0
+            override val positionSeconds: Double = 0.0
+            override fun seekTo(seconds: Double) = Unit
+            override fun release() {
+                if (boom) throw IllegalStateException("release() called on a player in invalid state")
+                closed += name
+            }
+        }
+
+        table.channelAtOrCreate(0)!!.play(decoder("toxic", boom = true), repeat = 1)
+        table.channelAtOrCreate(2)!!.play(decoder("healthy", boom = false), repeat = 1)
+        table.bgm!!.play(decoder("bgm", boom = false), repeat = -1)
+
+        val failed = table.closeAll()
+
+        assertEquals(1, failed, "返回的是「没放掉几条」，异常不从这里出去")
+        assertEquals(listOf("bgm", "healthy"), closed.sorted(), "抛异常之后的声道与 Bgm 照常释放")
+    }
+
     // ------------------------------------------------------------------
     // 每 VM 一份（AGENTS.md §2.4：状态挂 store.aux，不用静态可变全局）
     // ------------------------------------------------------------------

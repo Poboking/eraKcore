@@ -387,7 +387,25 @@ class GameSessionTest {
             val step = s.resumeSystem()
             assertEquals(StepOutcome.CONTINUE, step.outcome, "systemResult=0 → 新游戏分支")
             assertEquals(SystemStateCode.First_Begin, s.runtime.systemState)
-            assertTrue(s.console.loggedLines().isEmpty(), "默认标题不画（BeginHost.printDefaultTitle 缺省），内容交给 SYSTEM_TITLE 脚本")
+            // CONFIG-WIRE U4：默认标题按原版版面画（`Process.cs:2138-2158`）。本夹具没有
+            // GAMEBASE.CSV ⇒ gamebase 全空：标题/作者/追加情報/版本行都不打（空串与 version=0
+            // 的两条短路，`:2142-2151`），只剩分隔线、`"(" + ScriptYear + ")"`（年份空也打括号，
+            // `:2149`）与空 NewLine 的空格行（`EmueraConsole.cs:3375-3385`）；菜单两行取
+            // REPLACE 组键缺省（`ConfigData.cs:166-167`）。
+            // 末行「0」是系统整数输入的**回显行**，原版行为而非移植侧多打：
+            // `awaitOpeningInput` → `waitSystemInteger` 发的请求来自原版 `setWaitInput()`
+            // （`Process.cs:2052-2088`，整数支 `InputType.IntValue` 写点 `:2068`、
+            // `IsSystemInput = true` 写点 `:2070`、`console.WaitInput` `:2087`），
+            // 而 `doInputToEmueraProgram` 末尾的 `Print(str)` 在 switch **之外**
+            // （`EmueraConsole.cs:1280`，`IsSystemInput` 只切换 `InputSystemInteger`/
+            // `InputInteger` 的写槽，`:1129-1136`）⇒ 系统输入与脚本 INPUT 一样回显；
+            // 时机在 `:1096` `state = Running` + `:1097` `DoScript()` 之前 ⇒ 先于其后脚本输出。
+            val bar = "-".repeat(199)
+            assertEquals(
+                listOf(bar, "()", " ", bar, "[0] 最初からはじめる", "[1] ロードしてはじめる", "0"),
+                s.console.loggedLines(),
+                "默认标题版面（CONFIG-WIRE U4，Process.cs:2138-2158）+ 输入回显",
+            )
         } finally {
             s.close()
         }

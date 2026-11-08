@@ -17,7 +17,7 @@ import org.junit.jupiter.api.io.TempDir
  * 侧车 `load-warnings` 段（M11-E warnmeta：装载期告警进 `program.meta`）的编解码判据。
  *
  * 内容 = erbcc save-15a 的 `LoadWarning(file, line, message)`（golden 口径见
- * `.workbuddy/golden-pc-loadwarnings.txt` 前两列）；原版不持久化装载告警
+ * `<internal-workdir>/golden-pc-loadwarnings.txt` 前两列）；原版不持久化装载告警
  * （只进控制台：EmueraConsole.cs:3064-3076，消费点 ParserMediator.cs:148），本段为
  * 移植侧扩展，兼容口径按 str-constants 的「尾部可选段」先例收紧：
  * - 段加在 `str-constants` 之后、`end` 之前（段序末尾）；

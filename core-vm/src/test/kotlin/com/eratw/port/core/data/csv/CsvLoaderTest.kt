@@ -51,6 +51,7 @@ class CsvLoaderTest {
     @Test
     fun `真实游戏数据 GAMEBASE 与角色模板`() {
         val dir = requireGameDir()
+        val profile = com.eratw.port.boot.CorpusProfile.detect(dir)
         val data = GameDataLoader.load(dir)
         assertNotNull(data)
 
@@ -63,7 +64,7 @@ class CsvLoaderTest {
         assertEquals("", data.gameBase.author)                  // 作者键是「弄ってみた人」，原版不认
 
         // 29 槽：ABL=0 / BASE=7（槽号见 GameDataLoader.SLOT_FILES 注释）
-        assertEquals("Ｃ感覚", data.registry.csvTables[0][0])   // Abl.csv: 0,Ｃ感覚
+        assertEquals(profile.ablName0, data.registry.csvTables[0][0])   // Abl.csv 首名（${profile.name} 列：4.980 Ｃ感覚 / 4.981 Ｃ感觉）
         assertEquals("体力", data.registry.csvTables[7][0])       // Base.csv: 0,体力
         assertEquals(0, data.registry.csvTables[7].keywordIndex("体力"))
         assertEquals(12, data.registry.csvTables[0].keywordIndex("技巧"))

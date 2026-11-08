@@ -78,7 +78,7 @@ object CmdSet {
         if (eq <= 0) throw CliError("set 表达式缺 '=': $expr")
         val (name, indices) = parseLhs(expr.substring(0, eq).trim())
         val rhs = expr.substring(eq + 1).trim()
-        val assembled = Assembler.assemble(a)
+        val assembled = Assembler.assemble(a, out = out)
         return apply(assembled, a, "set", name, indices, rhs, out)
     }
 
@@ -122,7 +122,7 @@ object CmdSet {
         op: String,
         out: PrintStream,
     ): Int {
-        val assembled = Assembler.assemble(a)
+        val assembled = Assembler.assemble(a, out = out)
         return apply(assembled, a, op, name, indices, rhs, out)
     }
 

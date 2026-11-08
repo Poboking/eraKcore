@@ -88,15 +88,26 @@ object OptionButtonScanner {
         return merged.values.sortedBy { it.ordinal ?: Int.MAX_VALUE } + stringValues.values
     }
 
-    /** `<button value='N'>…</button>`（属性顺序不定、标签可带 title）。 */
-    private val HTML_BUTTON = Regex("""<button\b[^>]*?\bvalue='?(\d+)'?[^>]*>(.*?)</button>""", RegexOption.DOT_MATCHES_ALL)
+    /**
+     * `<button value='X'>…</button>`（属性顺序不定、标签可带 title）。
+     *
+     * value 捕获从 `(\d+)` 放宽为 `([^'>]+)`（R-F8）：原版 HTML 按钮的 `value` 是
+     * **字符串域**（字面量整串先收下 `HtmlManager.cs:1511` 的 `text7 = text8`，闭标签才
+     * 分岔 `:1543-1545`：`long.TryParse` 成功走 `ButtonValueInt`、`ButtonValueStr` 恒存原文），
+     * 命中层 `adapter/HtmlRunFlatten.kt` 的
+     * `buttonValue = v.toLongOrNull() ?: v` 已是同一形态 —— 兜底路只认数字会让
+     * 字符串按钮（如 `value='exit'`）在命中层为空时整条消失。
+     */
+    private val HTML_BUTTON = Regex("""<button\b[^>]*?\bvalue='?([^'>]+)'?[^>]*>(.*?)</button>""", RegexOption.DOT_MATCHES_ALL)
 
     /**
      * 原始 HTML 里出现的全部按钮（含 `<button>` 内嵌 `<font>` / `<shape>` 的情况）。
      *
      * 口径：
      * - 只看**尾部** [HTML_TAIL_LINES] 行（等价于「最近几页」），不会把远古页面的按钮翻出来；
-     * - **自底向上**扫、按 value 去重（先遇到的＝更靠下＝更新的一页），与右侧栏「最新页优先」一致。
+     * - **自底向上**扫、按 value 去重（先遇到的＝更靠下＝更新的一页），与右侧栏「最新页优先」一致；
+     * - 纯数字值折成 `Long`（与命中层同型，右侧栏 INT 闸只放行 Long），其余按 `String`
+     *   分流 —— `scan` 的合并层（stringValues 通道）按值的类型分表去重，这里同式。
      */
     fun scanHtmlButtons(
         lines: List<String>,
@@ -104,7 +115,7 @@ object OptionButtonScanner {
         maxLabelChars: Int = 24,
     ): List<OptionButton> {
         val out = ArrayList<OptionButton>()
-        val seen = HashSet<Long>()
+        val seen = HashSet<Any>()
         val tail = if (lines.size > HTML_TAIL_LINES) lines.subList(lines.size - HTML_TAIL_LINES, lines.size) else lines
         var i = tail.size - 1
         while (i >= 0 && out.size < maxCount) {
@@ -114,10 +125,15 @@ object OptionButtonScanner {
             val matches: List<MatchResult> = HTML_BUTTON.findAll(line).toList()
             // 同一行内也自右向左（后印的按钮在视觉上更靠右）
             for (m in matches.reversed()) {
-                val value = m.groupValues[1].toLongOrNull() ?: continue
-                if (!seen.add(value)) continue
+                // 双引号形态的捕获会带上引号本身（'? 只挡单引号）—— 剥掉再分流，
+                // 与命中层 parseAttrs 的两种引号都吃对齐。
+                val raw = m.groupValues[1].removeSurrounding("\"")
+                if (raw.isEmpty()) continue
+                val num = raw.toLongOrNull()
+                val key: Any = num ?: raw
+                if (!seen.add(key)) continue
                 val label = informative(stripTags(m.groupValues[2]).replace(ORDINAL_PREFIX, "").trim()).take(maxLabelChars)
-                out.add(OptionButton(value.takeIf { it in 0..999 }?.toInt(), label, value))
+                out.add(OptionButton(num?.takeIf { it in 0..999 }?.toInt(), label, key))
                 if (out.size >= maxCount) break
             }
         }

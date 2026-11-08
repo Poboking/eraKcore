@@ -329,7 +329,7 @@ class VmExecutionTest {
         val e = assertFailsWith<CodeEE> { vm.run() }
         assertEquals(3, e.line)
         assertEquals("main", e.funcName)
-        assertTrue(e.message!!.contains("除数为 0"), e.message)
+        assertEquals("除数为0的除法运算", e.message, "Error.DivideByZero 逐字（Lang.cs:1326 / zhs 两表同文）")
     }
 
     @Test

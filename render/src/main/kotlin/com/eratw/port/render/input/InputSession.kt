@@ -183,12 +183,18 @@ class InputSession(
      * （`MainWindow.cs:385`）：没有核心层时那道早退不成立，宏照样预填。
      * 所以这里传的是 `waitingPrimitive && consolePresent`，而不是裸的 `waitingPrimitive`。
      * 这一路整体**不**贴底（`ProcessCmdKey` 不经 `richTextBox1_KeyDown`，见类文档）。
+     *
+     * @param macroEnabled 当前等待请求的宏预填开关（WIRE-5）。**贯通**到
+     *   [MacroKeys.dispatch] 的唯一判据（[MacroKeys.prefillAllowed]）：为假时无修饰功能键
+     *   返回 `Ignored`，[applyMacro] 因此什么都不做（框一字不动）；缺省 true 照旧。
+     *   单一来源 = `InputRequest.macroEnabled`，本类不另存真源（R4-AC3）。
      */
     fun onMacroKey(
         keyCode: Int,
         modifier: MacroKeys.Modifier,
         waitingPrimitive: Boolean = false,
         useKeyMacro: Boolean = true,
+        macroEnabled: Boolean = true,
     ): MacroKeys.Decision {
         val decision = MacroKeys.dispatch(
             keyCode = keyCode,
@@ -202,6 +208,7 @@ class InputSession(
             group = macroGroup,
             useKeyMacro = useKeyMacro,
             waitingPrimitive = waitingPrimitive && consolePresent,
+            macroEnabled = macroEnabled,
         )
         applyMacro(decision)
         return decision

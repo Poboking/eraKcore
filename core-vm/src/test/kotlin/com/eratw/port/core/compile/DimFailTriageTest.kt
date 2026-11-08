@@ -1,5 +1,6 @@
 package com.eratw.port.core.compile
 
+import com.eratw.port.boot.CorpusProfile
 import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.proc.SystemVariableBootstrap
 import com.eratw.port.core.vars.DimFunctionFolders
@@ -9,7 +10,6 @@ import com.eratw.port.core.vars.DimSpec
 import com.eratw.port.core.vars.VarConfig
 import com.eratw.port.core.vars.VariableRegistry
 import com.eratw.port.core.vars.VariableStore
-import org.junit.jupiter.api.Assumptions
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -72,8 +72,8 @@ import kotlin.test.assertTrue
  * | G4 | ステータス表示関連/CN_GRAPHIC/Main.ERH:7-10 | `#DIMS CONST CN_COLORMATRIX_DIC = "" + "[青:0]…" + …` | 真缺口 | OperatorMethodManager.cs:28-33 |
  * | G5 | ステータス表示関連/CN_GRAPHIC/Main.ERH:27-301 | `#DIMS CONST CN_DICTIONARY_RESOURCES = "" + "[前髪_お嬢様:…]…` | 真缺口 | 同 G4 |
  * | P1 | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT_FUNC.ERB:14 | `#DIM CONST C_G_END = POWER(2 , 32) - 1` | 真缺口 | FunctionMethodCreator.cs:4169 |
- * | P2 | 同文件:2027-2034（`{` 续行块） | `#DIM CONST C_REF_TALENT = GETNUM(TALENT, "人类") , …` | 真缺口 | FunctionMethodCreator.cs:4810-4827 + Process.cs:304-305 |
- * | P3 | 同文件:2063-2064 | `#DIM CONST C_REF_TALENT = GETNUM(TALENT, "追加種族") ,` | 真缺口 | 同 P2 |
+ * | P2 | 同文件 4.981:2029-2038（`{` 续行块，8 项）/ 4.980:2027-2035（7 项） | `#DIM CONST C_REF_TALENT = GETNUM(TALENT, "人类") , …` | 真缺口 | FunctionMethodCreator.cs:4810-4827 + Process.cs:304-305 |
+ * | P3 | 同文件 4.981:2066-2067 / 4.980:2063-2064 | `#DIM CONST C_REF_TALENT = GETNUM(TALENT, "追加種族") ,` | 真缺口 | 同 P2 |
  * | P4 | fromEN/QOL/QoL_ShowRelation.ERB:3 | `#DIM SORT_VALUE,  VARSIZE("RELATION")` | 真缺口 | FunctionMethodCreator.cs:3437-3441 |
  * | P5 | 同文件:4 | `#DIM CHARA_TABLE, VARSIZE("RELATION")` | 真缺口 | 同 P4 |
  * | P6 | カラム機能/カラム機能(div).ERB:21 | `#DIM DYNAMIC 行文字数 = STRLENSU(GETLINESTR("─"))` | 真缺口 | FunctionMethodCreator.cs:5281 + :5900 + Process.cs:304-305 |
@@ -102,7 +102,19 @@ import kotlin.test.assertTrue
  *   宽度取 PC 基准可绘制宽 199 格（`erbcc CorpusCompile.FOLD_CONSOLE_WIDTH_CELLS`，
  *   运行期同尺），`─`（2 格/字）→ 99 字；语料侧车已烤入 `行文字数 = 99`；
  * - P2/P3 GETNUM：`:4814-4832`，关键字表 = 29 槽 CSV 名字表
- *   （`VariableRegistry.systemKeywordTables()`；TALENT 人类..人形 = 190..196）。
+ *   （`VariableRegistry.systemKeywordTables()`；TALENT 人类..人形 = 190..196，魔界人 = 200
+ *   —— 两根 `CSV/TALENT.csv` 都登记了 200,魔界人（4.980 :198 / 4.981 :203，本路实读），
+ *   差别只在 P2 的**声明项数**：4.980 七项（不引用魔界人）、4.981 八项。
+ *
+ * ## 【xmlcorpus 波 按根取列】（2026-11-06）
+ *
+ * 此前本文件的锚点用例钉的是 4.981 一列（P2 八项 + `assumeTrue` 语料缺失时跳过），
+ * 而闸配方（AGENTS.md §5）把语料根指到 4.980 ⇒ 恒红。本波改成：
+ * - 语料根用 [CorpusProfile.detect] 判版本档，P2 的项数与 GETNUM 下标期望按根两列
+ *   （本文件的 `p2ItemCount` / `p2ExpectedValues`）；
+ * - 期望值再与本根的名字表（`CSV/TALENT.csv` + `CSV/Talent.als` 别名）逐项对照
+ *   （同根自洽，两侧都不许拿另一根的读数凑）；
+ * - `ERATW_CORPUS` 未设 / 不是目录 / 判不出根 ⇒ AssertionError 判红，不再静默跳过。
  *
  * 「表缺席仍保持失败方向」的红线继续由 `foldedCfg`（无关键字表）钉住：
  * 生产折叠面另用 `productionCfg` 表达。具体值的独立用例见 `core/vars/DimFoldTest.kt`
@@ -147,7 +159,11 @@ class DimFailTriageTest {
 
     /**
      * 生产折叠面（`CorpusCompile.compile` 的同形配置）：TALENT 关键字表来自
-     * `CSV/TALENT.csv`（人类..追加種族 = 190..197），GETLINESTR 宽度 = PC 基准 199 格。
+     * `CSV/TALENT.csv` + `CSV/Talent.als`（人类..人形 = 190..196、追加種族 = 197、
+     * 魔界人 = 200；神霊/幽霊/付喪神/追加種族 走 .als 繁体别名），GETLINESTR 宽度 = PC 基准 199 格。
+     *
+     * 「魔界人 = 200」**两根同值，实读**：4.980 `CSV/TALENT.csv:198` 与 4.981 `:203` 都登记了
+     * 这一条；4.980 与 4.981 的区别只在 P2 声明引不引用它（7 项 / 8 项）。
      */
     private val productionCfg = DimParseConfig(
         systemSaveInBinary = true,
@@ -158,6 +174,7 @@ class DimFailTriageTest {
                 "TALENT" to mapOf(
                     "人类" to 190, "妖怪" to 191, "妖精" to 192, "神霊" to 193,
                     "幽霊" to 194, "付喪神" to 195, "人形" to 196, "追加種族" to 197,
+                    "魔界人" to 200, // 两根 TALENT.csv 都有：4.980 :198 / 4.981 :203（实读）
                 ),
             ),
             consoleWidth = 199,
@@ -205,6 +222,9 @@ class DimFailTriageTest {
             "#DIM CONST C_G_END = POWER(2 , 32) - 1",
             true, "C_G_END", "函数调用 POWER",
         ),
+        // P2 的内联原文是**4.980 装置原文**（7 项，无 魔界人）；4.981 原文在同一位置多一行
+        // GETNUM(TALENT, "魔界人")。两列的环境无关夹具只钉「未注入 ⇒ 报 GETNUM 不支持」这一形态，
+        // 项数与下标期望在锚点用例里按根取列 + 与本根 TALENT.csv 对照。
         Triage(
             "P2", "CHARALIST_DT/TEMP_CHARA_LIST_BY_DT_FUNC.ERB", "#DIM CONST C_REF_TALENT",
             "#DIM CONST C_REF_TALENT =  " +
@@ -268,13 +288,72 @@ class DimFailTriageTest {
 
     private fun entry(tag: String): Triage = (globalEntries + privateEntries).first { it.tag == tag }
 
-    private fun corpusRoot(): File {
+    /**
+     * 语料根（`ERB` 子树，`logicalDimLine` 的相对路径基线）连同**认出来的根版本档**，
+     * 供下面的锚点用例按根取列。
+     *
+     * 口径同 `core/config/ConfigChainTest`：`ERATW_CORPUS` 未设 / 不是目录 / 判不出根
+     * 一律 **AssertionError 判红**。旧实现是 `Assumptions.assumeTrue(corpus != null …)`：
+     * 环境变量一缺，这条「12 条原文逐条复核」就静默变绿，分诊台账等于没人验。
+     * 判根交给 [CorpusProfile.detect]（就近读 `ERB/DIM.ERH` 的 `#DIM CONST NOW_VERSION`）。
+     */
+    private fun corpusRoot(): Pair<File, CorpusProfile> {
         val corpus = System.getenv("ERATW_CORPUS")
-        Assumptions.assumeTrue(
-            corpus != null && File(corpus).isDirectory,
-            "未设 ERATW_CORPUS：跳过语料锚点用例",
-        )
-        return File(corpus)
+            ?: run {
+                // 公开仓无外部语料/样本：按公开适配口径跳过（上游为硬判红）。
+                org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_CORPUS：跳过分诊台账语料原文")
+                throw AssertionError("unreachable")
+            }
+        val dir = File(corpus)
+        if (!dir.isDirectory) {
+            throw AssertionError("ERATW_CORPUS=$corpus 不是目录：它只能指向语料游戏根的 ERB 子树")
+        }
+        // 判不出 / 不在册 ⇒ CorpusProfile.detect 自己抛 AssertionError（不降级）
+        return dir to CorpusProfile.detect(dir.toPath())
+    }
+
+    /**
+     * P2 的 GETNUM 项数与折叠期望值，**按根取列**（两根实读）：
+     * - 4.980：声明 7 项（人类..人形），`TEMP_CHARA_LIST_BY_DT_FUNC.ERB:2028-2034`；
+     * - 4.981：声明 8 项（多一条 魔界人 = 200），同文件 `:2030-2037`。
+     *
+     * 注意：两根的 `CSV/TALENT.csv` **都有** `200,魔界人`（4.980 :198 / 4.981 :203，实读），
+     * 差别只在声明引不引用它；所以这里按根取列的是「声明项数」，不是「CSV 有没有这一条」。
+     */
+    private fun p2ItemCount(profile: CorpusProfile): Int = when (profile) {
+        CorpusProfile.V4_980 -> 7
+        CorpusProfile.V4_981 -> 8
+    }
+
+    private fun p2ExpectedValues(profile: CorpusProfile): List<Long> = when (profile) {
+        CorpusProfile.V4_980 -> (190L..196L).toList()
+        CorpusProfile.V4_981 -> (190L..196L).toList() + 200L
+    }
+
+    /**
+     * 本根的「名字 → 索引」表，供 GETNUM 下标同根自洽校验。
+     *
+     * 两个来源都要读：`CSV/TALENT.csv`（简体名）与 `CSV/Talent.als`（日文/繁体别名）——
+     * 4.981 的 CSV 把 193 写成了 `神灵`，而 P2 声明用的是 `神霊`，只有 .als 里有这个名字；
+     * 4.980 的 .als 则是 `人間` 这类日文名。同名以 CSV 为准（`putIfAbsent`），
+     * 两根的索引本身一致（本路实读：190..197、200）。
+     */
+    private fun talentIndex(corpus: File): Map<String, Int> {
+        val out = LinkedHashMap<String, Int>()
+        for (rel in listOf("CSV/TALENT.csv", "CSV/Talent.als")) {
+            val f = File(corpus.parentFile, rel)
+            if (!f.isFile) throw AssertionError("缺 $f：GETNUM 的关键字表没有可对的本根数据源")
+            f.readText().removePrefix("\uFEFF").lineSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && !it.startsWith(";") }
+                .forEach { line ->
+                    val cols = line.split(',')
+                    val idx = cols.getOrNull(0)?.trim()?.toIntOrNull() ?: return@forEach
+                    val name = cols.getOrNull(1)?.trim() ?: return@forEach
+                    out.putIfAbsent(name, idx)
+                }
+        }
+        return out
     }
 
     /**
@@ -451,7 +530,8 @@ class DimFailTriageTest {
 
     @Test
     fun 语料锚点十二条改钉后逐条复核() {
-        val corpus = corpusRoot()
+        val (corpus, profile) = corpusRoot()
+        val talent = talentIndex(corpus)
         (globalEntries + privateEntries).forEach { e ->
             val raw = logicalDimLine(corpus, e.rel, e.declPrefix, e.nth)
             assertTrue(raw.startsWith(e.declPrefix), "${e.tag} 逻辑行拼接异常：${raw.take(60)}")
@@ -476,15 +556,29 @@ class DimFailTriageTest {
                     assertContentEquals(listOf(127L, 127L), spec.defaultsInt!!.toList())
                 }
                 if (e.tag == "P2") {
-                    // TALENT.csv：人类..人形 = 190..196（顺序即源文顺序）。
+                    // 项数按根取列：4.980 = 7 项（无 魔界人）、4.981 = 8 项；
+                    // 折叠出的项数必须与**本根声明**里的 GETNUM 个数一致（同根自洽，不靠硬编码蒙）。
+                    val declared = Regex("GETNUM\\(").findAll(raw).count()
+                    assertEquals(p2ItemCount(profile), declared, "P2 声明里的 GETNUM 项数（按根取列，$profile）")
+                    assertEquals(declared, spec.defaultsInt!!.size, "P2 折叠出的项数必须等于声明的 GETNUM 项数")
+                    val expected = p2ExpectedValues(profile)
                     assertContentEquals(
-                        (190L..196L).toList(),
+                        expected,
                         spec.defaultsInt!!.toList(),
-                        "P2 的 GETNUM 下标必须与 TALENT.csv 一致",
+                        "P2 的 GETNUM 下标必须与本根 TALENT.csv 一致（$profile）",
                     )
+                    // 同根自洽的独立一侧：每个名字在本根 CSV/TALENT.csv 里的索引就是折叠值
+                    val names = Regex("GETNUM\\(TALENT, \"([^\"]+)\"\\)")
+                        .findAll(raw).map { it.groupValues[1] }.toList()
+                    assertEquals(expected.size, names.size, "P2 声明的 TALENT 名字个数")
+                    names.forEachIndexed { i, name ->
+                        val idx = talent[name]
+                            ?: throw AssertionError("P2 第 ${i + 1} 项「$name」在本根 CSV/TALENT.csv 里没有登记")
+                        assertEquals(idx.toLong(), expected[i], "P2 第 ${i + 1} 项「$name」在本根 TALENT.csv 的索引")
+                    }
                 }
                 if (e.tag == "P3") {
-                    assertEquals(listOf(197L), spec.defaultsInt!!.toList(), "追加種族 = 197")
+                    assertEquals(listOf(197L), spec.defaultsInt!!.toList(), "追加種族 = 197（两根同值，实读）")
                 }
                 if (e.tag == "P6") {
                     // `─` 2 格/字，199 格 → 99 字；语料侧车 `行文字数 = 99`。

@@ -1,0 +1,8 @@
+file	encoding	binary	physicalLines	logicalLines	tokens	stmtLines	errors	warnings
+BINARY.ERB	UTF-8	1	0	0	0	0	0	0
+SJIS_LOSSY.ERB	Shift-JIS	0	1	1	1	0	1	0
+SJIS_OK.ERB	Shift-JIS	0	1	1	1	0	1	0
+SJIS_TRUNC.ERB	Shift-JIS	0	1	1	1	0	1	0
+U8_BOM.ERB	UTF-8	0	1	1	1	0	1	0
+U8_NONASCII.ERB	UTF-8	0	1	1	1	0	1	0
+U8_PLAIN.ERB	UTF-8	0	1	1	2	0	1	0

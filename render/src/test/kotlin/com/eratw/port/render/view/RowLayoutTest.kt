@@ -56,9 +56,9 @@ class RowLayoutTest {
      * 窗口 10 行，命令只落在第 0 行（字）与第 3 行（图，高 100px）；第 4..9 行是
      * `<br>` 那种**零命令**空行。
      *
-     * 手推（新口径）：`textRows = 9`（第 0 行 + 第 1,2 + 第 4..9 共 6 行零命令行）、
-     * `artRows = 1` ⇒ `remain = 380 - 9*38 = 38`、`fit = 38/1 = 38`、
-     * `artAdvance = 38.coerceIn(6, 38) = 38` ⇒ 每行高 38、`total = 380`、
+     * 手推（新口径）：图高 100px **高于**行高 38 ⇒ 第 3 行不可压（见 §3.5 的判据）⇒
+     * `artRows = 0`、`textRows = 10`（第 0 行 + 第 1,2 + 第 4..9 共 6 行零命令行 + 图行本身
+     * 按整行高算）⇒ `artAdvance` 不参与 ⇒ 每行高 38、`total = 380`、
      * `y = 380 - 380 = 0` ⇒ `tops[i] = 38*i`。
      * 旧实现（按 cmds 极值）在这里给 `tops.size == 4`、图行贴死 `contentBottom`。
      */
@@ -82,9 +82,8 @@ class RowLayoutTest {
      * 动图那一屏的真实形态（= 探针的贴底场景）：窗口 16 行、正文 0..5 行、
      * 第 6 行 360px 立绘、第 7..15 行是 `PRINT_IMAGE` 预留的 9 条 `<br>`（零命令）。
      *
-     * 手推：`textRows = 6 + 9 = 15`、`artRows = 1` ⇒ `remain = 1000 - 15*38 = 430`、
-     * `fit = 430` ⇒ `artAdvance = coerceIn(6, 38) = 38` ⇒ `total = 16*38 = 608`、
-     * `y = 1000 - 608 = 392` ⇒ `tops[6] = 392 + 6*38 = 620` ⇒
+     * 手推：360px 高于行高 38 ⇒ 第 6 行不可压 ⇒ `artRows = 0`、`textRows = 16`
+     * ⇒ `total = 16*38 = 608`、`y = 1000 - 608 = 392` ⇒ `tops[6] = 392 + 6*38 = 620` ⇒
      * `imgBottom = 620 + 360 = 980` ⇒ `overflowBelowBottom = 980 - 1000 = -20`（落在屏内）。
      * 修复前实测：`tableRows = 7`、`tops[6] = 962`、`imgBottom = 1322`、溢出 `+322px`。
      */
@@ -174,6 +173,138 @@ class RowLayoutTest {
     }
 
     // ------------------------------------------------------------------
+    // 3.5) 高于一行的图所在行**不参与压缩**（2026-11「图片遮住文字」）
+    // ------------------------------------------------------------------
+
+    /**
+     * 立绘那一行的行高不得被压 —— 压了就会让图越出脚本预留的空行、盖住后面的文字。
+     *
+     * 形态照真机 41/43 档（`@PRINT_IMAGE` / `@HTML_PRINTL_PX`）：正文 10 行、立绘行 1 行、
+     * 脚本预留的 9 条 `<br>` 空行、再一行台词。窗口 22 行、内容区 380px 高 ⇒ 内容必然超高
+     * （`remain = 380 - 21*38 = -418 < 0`），正是玩家「历史攒满一屏」的现场。
+     *
+     * 手推（修复后）：立绘 360px > 行高 38 ⇒ **不可压** ⇒ `textRows = 21`、`artRows = 0` ⇒
+     * 每行高 38、`total = 836`、`y = 380 - 836 = -456` ⇒ `tops[10] = -456 + 10*38 = -76`、
+     * 图底 `= -76 + 360 = 284`；台词行 `tops[20] = -456 + 20*38 = 304` ⇒
+     * **图底 284 < 台词行顶 304，不压字**（余量 20px = 行高 38 − 图 360/10 的取整差）。
+     *
+     * 修复前（把立绘行也压成 `minArt = 6`）：`total = 21*38 + 6 = 804`、`y = -424`、
+     * `tops[10] = -44`、图底 `= 316`，而 `tops[20]` 仍是 304 ⇒ **压字 12px**；
+     * 且这张图因 `heightPx > lineHeightPx` 被判越行（`GraphicGeometry.escapesLine`），
+     * 绘制侧把它排进**第二趟铺墨**、画在文字之上 —— 净效果就是玩家看到的「图盖住字」。
+     */
+    @Test
+    fun `高于一行的图所在行不参与压缩`() {
+        val cmds = ArrayList<DrawCmd>()
+        for (i in 0..9) cmds.add(text(i))
+        cmds.add(image(10, heightPx = 360, widthPx = 360))
+        // 第 11..19 行是脚本预留的空行（零命令），第 20/21 行是台词
+        cmds.add(text(20))
+        cmds.add(text(21))
+        val p = plan(cmds, windowRows = 22, contentBottom = 380f)
+
+        assertEquals(38f, p.heights[10], 1e-4f, "立绘行必须保持整行高（修复前被压成 6）")
+        assertTrue(p.artOnly[10], "「只有图片段」这个标记不变，绘制侧仍走纯图行那条")
+        assertEquals(-76f, p.tops[10], 1e-4f)
+        assertEquals(304f, p.tops[20], 1e-4f, "台词行行顶")
+        val imgBottom = p.tops[10] + 360f
+        assertEquals(284f, imgBottom, 1e-4f)
+        assertTrue(
+            imgBottom <= p.tops[20],
+            "图底 $imgBottom 必须落在台词行顶 ${p.tops[20]} 之上（修复前是 316 ⇒ 压字 12px）",
+        )
+    }
+
+    /**
+     * 可压判据与 [GraphicGeometry.artRowScale] 同源：**恰好等于行高**的图仍可压。
+     *
+     * `artRowScale(drawH = 38, rowHeight = 6, lineHeight = 38)` 走到最后一行
+     * `rowHeight / drawH`（`drawH > lineHeight` 不成立 ⇒ 不返回 1），图被缩到 6px =
+     * 行高本身 ⇒ 不会越行。所以 `imageHeight <= lineHeightPx` 是「能压」的充要条件。
+     *
+     * 手推：5 行各一条 38px 图、窗口 5 行、内容区 100px ⇒ `remain = 100 - 0 = 100`、
+     * `fit = 20` ⇒ `artAdvance = 20`（与 16px 横带那一档同解）。
+     */
+    @Test
+    fun `恰好一行高的图仍可压`() {
+        val cmds = (0 until 5).map { image(it, heightPx = 38) }
+        val p = plan(cmds, windowRows = 5, contentBottom = 100f)
+        for (i in 0 until 5) {
+            assertEquals(20f, p.heights[i], 1e-4f, "第 $i 行按 artAdvance 压")
+            assertTrue(p.artOnly[i])
+            // 绘制侧的实画高 = drawH × k，k 由 artRowScale 给出，必须正好等于行高
+            val k = GraphicGeometry.artRowScale(38f, p.heights[i], lineHeight, 0)
+            assertEquals(p.heights[i], 38f * k, 1e-4f, "实画高必须等于压缩后的行高")
+        }
+    }
+
+    /**
+     * 混合形态：同一屏里既有可压的横带行（16px）也有不可压的立绘行（360px）。
+     * 只有横带行吃 `artAdvance`，立绘行保持整行高 —— 两个判据互不牵连。
+     *
+     * 手推：窗口 4 行、内容区 130px ⇒ 立绘那一行不可压 ⇒ `textRows = 3`（第 1/3 行 + 立绘行
+     * 本身按整行高算）、`artRows = 1` ⇒ `remain = 130 - 3*38 = 16`、`fit = 16/1 = 16` ⇒
+     * `artAdvance = 16.coerceIn(6, 38) = 16` ⇒ `heights = [16, 38, 38, 38]`、`total = 130`、
+     * `y = 0` ⇒ `tops = [0, 16, 54, 92]`。
+     */
+    @Test
+    fun `横带行可压而立绘行不压`() {
+        val cmds = ArrayList<DrawCmd>()
+        cmds.add(image(0, heightPx = 16))   // 标题横带：可压
+        cmds.add(text(1))
+        cmds.add(image(2, heightPx = 360))  // 立绘：不可压
+        cmds.add(text(3))
+        val p = plan(cmds, windowRows = 4, contentBottom = 130f)
+        assertEquals(16f, p.heights[0], 1e-4f, "16px 横带行按 artAdvance = 16 压")
+        assertEquals(38f, p.heights[1], 1e-4f)
+        assertEquals(38f, p.heights[2], 1e-4f, "360px 立绘行不压")
+        assertEquals(38f, p.heights[3], 1e-4f)
+        assertTrue(p.artOnly[0] && p.artOnly[2], "两行的纯图标记都在")
+        assertEquals(0f, p.tops[0], 1e-4f)
+        assertEquals(16f, p.tops[1], 1e-4f)
+        assertEquals(54f, p.tops[2], 1e-4f)
+        assertEquals(92f, p.tops[3], 1e-4f)
+    }
+
+    /**
+     * 合并竖带块的首行（`rowSpan > 0`）同样不参与压缩 —— 即使那块图**本身不高于一行**。
+     *
+     * 形态：`ImageBandMerge` 把若干条等宽等高横带合成一块，`rowsNeeded = 1`
+     * （`drawHeight = 30 ≤ 行高 38`）、`rowSpan = 1`。绘制侧对这条命令**先判先返回**、
+     * 走 `drawBandStack` 按 `image.heightPx` 逐片铺满、完全不看行高
+     * （`CanvasConsoleView.kt:2603-2631` 的 `val destH = image.heightPx.toFloat()`）——
+     * 也就是说 `artRowScale` 的 `rowSpan > 0` 守卫**在这条路上根本走不到**，
+     * 布局侧必须自己把这一档排除，否则行高被压而图照铺，溢出无人兜。
+     *
+     * 手推（判据漏掉 `rowSpan` 时的错解）：`artRows = 1`、`textRows = 1`、
+     * `remain = 60 - 38 = 22` ⇒ `artAdvance = 22` ⇒ 块行高 22 而图铺 30 ⇒ **溢出 8px**。
+     * 新判据按整行高算：`artRows = 0`、`textRows = 2` ⇒ `heights = [38, 38]`、
+     * `total = 76`、`y = 60 - 76 = -16` ⇒ `tops = [-16, 22]`，块 30px 占 `[-16, 14]`，
+     * 落在自己那一行 `[-16, 22]` 之内 ⇒ 不压下一行。
+     */
+    @Test
+    fun `合并竖带块的首行不参与压缩`() {
+        val merged = DrawCmd(
+            row = 0, colStart = 0, colEnd = 10, fore = 0xFFFFFF, back = 0x000000,
+            styleMask = 0, kind = RunKind.IMAGE, glyphs = emptyList(),
+            graphic = InlineGraphic.Image(
+                resource = "TW_title000", widthPx = 200, heightPx = 30,
+                yOffsetPx = 0, widthCells = 10,
+                rowSpan = 1, bandResources = listOf("TW_title000", "TW_title001"),
+            ),
+        )
+        val p = plan(listOf(merged, text(1)), windowRows = 2, contentBottom = 60f)
+        assertEquals(38f, p.heights[0], 1e-4f, "竖带块行保持整行高（漏判会被压到 22）")
+        assertTrue(p.artOnly[0], "它仍是「只有图片段」的行，绘制侧照旧走纯图行那一支")
+        assertEquals(-16f, p.tops[0], 1e-4f)
+        assertEquals(22f, p.tops[1], 1e-4f)
+        assertTrue(
+            p.tops[0] + 30f <= p.tops[1],
+            "块底 ${p.tops[0] + 30f} 不得越过下一行行顶 ${p.tops[1]}（漏判时是 8px 溢出）",
+        )
+    }
+
+    // ------------------------------------------------------------------
     // 4) 窗口行数 0 / 1 / 负数
     // ------------------------------------------------------------------
 
@@ -190,8 +321,10 @@ class RowLayoutTest {
     }
 
     /**
-     * 窗口只有 1 行：`textRows = 0`、`artRows = 1` ⇒ `remain = 100`、`fit = 100` ⇒
-     * `artAdvance = coerceIn(6, 38) = 38`、`total = 38` ⇒ `tops[0] = 100 - 38 = 62`。
+     * 窗口只有 1 行：360px 高于行高 38 ⇒ 不可压 ⇒ `artRows = 0`、`textRows = 1`
+     * ⇒ `heights[0] = 38`、`total = 38` ⇒ `tops[0] = 100 - 38 = 62`。
+     * （判据改之前这条走 `artRows = 1`、`fit = 100` 被 `coerceIn` 夹回 38，读数同值 ——
+     * 断言不变，但只有新判据下「夹回 38」才是**语义正确**的结果而不是巧合。）
      */
     @Test
     fun `窗口只有 1 行`() {
@@ -201,7 +334,6 @@ class RowLayoutTest {
         assertEquals(38f, p.heights[0], 1e-4f)
         assertTrue(p.artOnly[0])
     }
-
     /** 零命令 + 正窗口行数 = 一屏空白行（仍旧按窗口建行、底对齐），不是空表。 */
     @Test
     fun `空屏也按窗口建行`() {

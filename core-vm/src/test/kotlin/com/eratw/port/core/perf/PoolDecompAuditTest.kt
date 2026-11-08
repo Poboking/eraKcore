@@ -29,6 +29,7 @@ import com.eratw.port.perf.SizeModel
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import java.nio.file.Files
 import java.nio.file.Path
@@ -80,6 +81,8 @@ import java.util.concurrent.TimeUnit
  * seal 后三张索引实测为 null、失效索引三行之和与公式一致、遍历后复读没有明显污染。
  * 具体 MiB 全在报告与控制台里。
  */
+// realArtifacts 家标记（realarttag 路 2026-11-06）：产物门控钉（erbc.v1 配对门），供 gateRealArtifacts 圈定；判定逻辑一字不动。
+@Tag("realArtifacts")
 class PoolDecompAuditTest {
 
     private val sizer: SizeModel = SizeModel(SizeModel.detectRefWidth())
@@ -714,10 +717,10 @@ class PoolDecompAuditTest {
         sb.appendLine("## 6. 复现")
         sb.appendLine()
         sb.appendLine("```powershell")
-        sb.appendLine("\u0024env:JAVA_HOME='D:\\DSH\\eratw-安卓移植计划\\.tooling\\jdk-17.0.20.1+1'")
-        sb.appendLine("\u0024env:GRADLE_USER_HOME='D:\\DSH\\eratw-安卓移植计划\\.tooling\\gradle-home'")
-        sb.appendLine("\u0024env:ERATW_CORPUS='D:\\DSH\\eratw-安卓移植计划\\eratw-画蛇添足版eratw4.980\\ERB'")
-        sb.appendLine("\u0024env:ERATW_GAMEDIR='D:\\DSH\\eratw-安卓移植计划\\eratw-画蛇添足版eratw4.980'")
+        sb.appendLine("\u0024env:JAVA_HOME='<work-root>\\.tooling\\jdk-17.0.20.1+1'")
+        sb.appendLine("\u0024env:GRADLE_USER_HOME='<work-root>\\.tooling\\gradle-home'")
+        sb.appendLine("\u0024env:ERATW_CORPUS='<work-root>\\eratw-画蛇添足版eratw4.980\\ERB'")
+        sb.appendLine("\u0024env:ERATW_GAMEDIR='<work-root>\\eratw-画蛇添足版eratw4.980'")
         sb.appendLine("cd <worktree>/eratw-android")
         sb.appendLine("# 产物（一次即可；峰值约 3.4 GiB，必须 6g）：")
         sb.appendLine(".\u005cgradlew --configure-on-demand :tools:erbcc:compileCorpus -Pcorpus=\u0024env:ERATW_CORPUS -Pout=<worktree>/eratw-android/core-vm/build/erbc-out")

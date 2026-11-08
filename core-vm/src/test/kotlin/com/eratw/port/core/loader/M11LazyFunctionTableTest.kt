@@ -183,6 +183,31 @@ class M11LazyFunctionTableTest {
         assertEquals(0, p.materializedFunctionCount, "越界取值不得物化任何条目（与语句池同口径）")
     }
 
+    /**
+     * 按**下标**读形参名不得物化 [FunctionInfo]（`paramNamesAt` 只解码段 8 的那一条名字）。
+     *
+     * 存在理由：`ProcessRuntime` 装配 store 时的 ARGF/REF 两趟扫描原来走
+     * `program.functions`，一次扫描把真产物的 110,072 条全解出来并**永久驻留** ——
+     * 每装配一次（新开档 / 换角色 / 补丁装载）都再付一遍。扫描改用
+     * [Program.paramNamesPeek]，本用例钉住它读数与整池解码逐字相等、且零物化。
+     */
+    @Test
+    fun `按下标读形参名与整池解码等价且不物化条目`(@TempDir dir: Path) {
+        val f = write(dir)
+        val eager = ProgramLoader.loadFile(f)
+        val lazy = ProgramLoader.loadMapped(f)
+
+        var withNames = 0
+        for (i in 0 until eager.functions.size) {
+            val expected = eager.functions[i].paramNames.toList()
+            assertEquals(expected, lazy.paramNamesPeek(i), "函数 $i 的形参名必须与整池解码逐字相等")
+            if (expected.isNotEmpty()) withNames++
+        }
+        assertTrue(withNames > 0, "夹具必须带形参名，否则本用例只在做空表对空表")
+        assertEquals(0, lazy.materializedFunctionCount, "peek 只解码名字，不得物化 FunctionInfo")
+        assertEquals(emptyList(), lazy.paramNamesPeek(lazy.functions.size), "越界给空表（扫描侧不因此炸）")
+    }
+
     @Test
     fun `无形参名段时逐位绑定判据为假且不物化函数`(@TempDir dir: Path) {
         // 段 7 有、段 8 无：hasAnyParamNames() 的「直接由条数表回答」那条路才真的被走到

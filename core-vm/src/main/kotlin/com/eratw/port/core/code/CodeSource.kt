@@ -52,14 +52,24 @@ interface CodeSource {
      * 是否支持 [fillPage] 的**原地填充**（当前只有 [MappedCodeSource] 支持）。
      *
      * PERF（2026-10-27 第五批）：VM 的取指循环据此决定页的持有方式 ——
-     * 支持时用「VM 自己的常驻页缓冲 + 原地填充」，每换一页**零分配**；
+     * 支持时**可以**用「VM 自己的常驻页缓冲 + 原地填充」，每换一页**零分配**；
      * 不支持时沿用 [page] 返回的数组。JFR 分配采样实测 `MappedCodeSource.page` 里
-     * `IntArray(16 KiB)` 占执行循环内分配的 **29.2%（45.39 MiB）**，而且 16 KiB
-     * 超过 ART 的大对象阈值（12 KiB）⇒ 每页都落 LOS，代价远不止字节数。
+     * `IntArray(16 KiB)` 占执行循环内分配的 29.2%（45.39 MiB），而且 16 KiB
+     * 超过 ART 的大对象阈值（12 KiB）⇒ 落 LOS 的代价远不止字节数。
      *
      * 选「VM 独占缓冲」而不是「页数组回收池」的原因：`page()` 返回的数组会被**调用方
      * 长期持有**（VM 的 `page` 局部变量、嵌套 VM 各自的局部变量），回收池无法证明某个
      * 数组已经没人引用，回收就会把别人正在读的页改掉。缓冲归 VM 所有则不存在别名。
+     *
+     * **但常驻缓冲等于绕开 [page] 的页缓存**（[fillPage] 从来不看 `cacheKeys`），于是
+     * `_CALL`/`_RET` 的「调用者页 ↔ 被调页」来回切每次都重搬一整页 —— 页缓存当年正是
+     * 为这条病而建。PERF-PAGEFETCH 2026-10-30 同进程交替 A/B（真产物 + save03，
+     * `CHARA_MOVEMENT`，逐轮步数 6,000,001 全等）：**2,789.6 → 742.1 ns/instr（median 3.76×）**，
+     * 三对全部同向；6M 指令一轮要取页 **8,337,638 次**，缓存服务其中 99.97%，
+     * 退路段那侧计数器恒为 0（它根本不进缓存）。更早的 `4d0dd78f` 口径登记到 **8.3×**
+     * （BOARD「③【性能回退·非本波】」），倍率随配置漂移，方向一致。
+     * ⇒ 缺省**不要**用这条路取指；VM 侧的开关是 `eratw.perf.noCachedFetch`（见 `Vm.pageBuf`）。
+     * 要同时消掉「miss 时新建数组」与「每次跨页重搬」，得换页大小/槽数这类参数，别再回到本开关。
      */
     val supportsFillPage: Boolean get() = false
 
@@ -67,6 +77,8 @@ interface CodeSource {
      * 把第 [pageIndex] 页的字写进 [dst] 的前 n 个位置，返回 n（= 本页实际字数，尾页可短）。
      *
      * 只在 [supportsFillPage] 为真时有意义；默认实现退化为 [page] + 拷贝。
+     * 本方法**不查也不填页缓存**（写了缓存就得发布一个不可变数组，等于回到 [page] 的分配），
+     * 所以它只服务「VM 自带一块缓冲、每跨一页重填」这一条退路。
      */
     fun fillPage(pageIndex: Int, dst: IntArray): Int {
         val p = page(pageIndex)
@@ -204,7 +216,11 @@ class MappedCodeSource(
     override fun page(pageIndex: Int): IntArray {
         require(pageIndex >= 0 && pageIndex < pageCount) { "页号越界($pageIndex)，共 $pageCount 页" }
         val slot = pageIndex % PAGE_CACHE_SLOTS
-        if (cacheKeys[slot] == pageIndex) return cache[slot]!!
+        if (cacheKeys[slot] == pageIndex) {
+            cacheHits++
+            return cache[slot]!!
+        }
+        cacheMisses++
         // 页首字下标与页内偏移都用 Long：pageIndex * pageWords 在 Int 上会回绕成负数，
         // 回绕后 wordCount - from 又变正，页长算错、读指针直接跑出映射窗口。
         val from = pageIndex.toLong() * pageWords
@@ -215,6 +231,22 @@ class MappedCodeSource(
         cache[slot] = out
         return out
     }
+
+    /**
+     * 页缓存命中次数（PERF-PAGEFETCH 取证用）。
+     *
+     * 计数点每次**跨页**才加一次，不在每条指令的路径上；缺省取指路（VM 走 [page]）下
+     * 「未命中 ÷ 总取页」就是这条路的真实成本占比，用来回答「这一页为什么等得久」。
+     *
+     * 只做取证、**不做同步**：多线程同时取指时最坏是少计几次，不影响任何行为（别给它补原子类，
+     * 那会把一次 `AtomicLong` 虚调用放进换页路径）。
+     */
+    var cacheHits: Long = 0L
+        private set
+
+    /** [cacheHits] 的未命中侧。 */
+    var cacheMisses: Long = 0L
+        private set
 
     /**
      * 原地填充（PERF 2026-10-27 第五批）：与 [page] 同一段读取逻辑，只是不建数组。

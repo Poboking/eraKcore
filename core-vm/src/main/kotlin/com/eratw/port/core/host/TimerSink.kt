@@ -44,6 +44,14 @@ interface TimerSink {
 // - GETMILLISECOND / GETSECOND 读的不是「上机时长」：原版是 `DateTime.Now.Ticks/10000` 与
 //   `/10000000`（FunctionMethodCreator.cs:4008/:4023）= **本地墙上时间自公元 0001-01-01** 的
 //   毫秒/秒数。故 [nowMillis] 只交 epoch 毫秒，本地偏移的折算归 `core/fn/TimeMethods.kt`。
+// ## 「计时回调的线程池任务异常吞没」的判死（W8 刀五）
+// 原版 `genericTimer` 是 `System.Timers.Timer`（EmueraConsole.cs:130/:550-553），Elapsed
+// 回调 `tickTimer`（:1003-1033）跑在 .NET 线程池上，回调体内**没有** try/catch，
+// `AutoReset` 也未设置（缺省 true ⇒ 异常照 .NET 语义抛进 ThreadPool）。移植侧不存在
+// 这条通道：本接口只有 [delay] 与 [nowMillis] 两个同步口，没有任何池任务/回调任务；
+// TINPUT 倒计时由 `core/proc/QueueInputSink`（:671-703 的钟点推进）在 **VM 线程**上
+// 就地跑，异常沿 ProcessRuntime 的常规错误面抛出并可被报告链取证 —— 本接口无池任务
+// 可吞，判死不修（判据逐条如上，无需接线）。
 // ------------------------------------------------------------------
 
 object NoopTimerSink : TimerSink {

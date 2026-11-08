@@ -1,0 +1,2 @@
+audit 闸的语料根需要这一层；erbcc audit 在缺 CSV 时必须报红（Main.kt:471-473），
+本文件只用来让 git 能跟踪这个空目录，Kotlin 侧不读非 csv 文件。

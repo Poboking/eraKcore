@@ -3,11 +3,13 @@ package com.eratw.port.erbcc
 import com.eratw.port.core.lexer.CharStream
 import com.eratw.port.erbcc.audit.Finding
 import com.eratw.port.erbcc.audit.FindingKind
+import com.eratw.port.erbcc.audit.ReachabilityAudit
 import com.eratw.port.erbcc.audit.SymbolLinkAudit
 import com.eratw.port.erbcc.compile.ArtifactFreshness
 import com.eratw.port.erbcc.compile.CorpusCompile
 import com.eratw.port.erbcc.compile.ErbcArtifacts
 import com.eratw.port.erbcc.compile.ErhLoadAudit
+import com.eratw.port.erbcc.compile.decodeRenameDic
 import com.erbcc.bridge.droppedByUnresolvableDim
 import com.eratw.port.core.lexer.ErbLexer
 import com.eratw.port.core.lexer.LexEndWith
@@ -51,7 +53,7 @@ private const val USAGE = """erbcc - EraBasic 编译器 (eratw-android)
 用法:
   erbcc scan --corpus <ERB目录> [--use-index <lazyloadingfiles.dat>] [--rename <_Rename.csv>] [--out <报告目录>]
   erbcc symbols --corpus <ERB目录> [--json <输出文件>]
-  erbcc compile --corpus <ERB目录> --out <产物目录> [--limit <N>]
+  erbcc compile --corpus <ERB目录> --out <产物目录> [--limit <N>] [--mode strict|compat] [--allow-parse-failures <容错清单>]
   erbcc check --corpus <ERB目录> [--out <产物目录>]
   erbcc audit --corpus <ERB目录> [--game-root <游戏根>] [--out <TSV文件>] [--limit <N>] [--strict] [--allow <白名单>]
   erbcc audit --corpus <ERB目录> [--game-root <游戏根>] --roundtrip [--artifact-dir <产物目录>] [--limit <N>]
@@ -68,6 +70,14 @@ compile 选项（全量语料 → .erbc 产物 + 确定性 manifest，规约见 
   --corpus      游戏数据根（ERB 语料所在目录）
   --out         产物输出目录（默认 tools/erbcc/erbc-out/；落成 <out>/erbc.v1/{program.erbc,program.meta,manifest.txt}）
   --limit       只编译前 N 个文件（调试用；manifest 会注明，正式产物必须全量）
+  --mode        strict | compat（缺省 strict）
+                strict：任何解析失败都拒落盘（出包默认，防编译器回归被吞）。
+                compat：配合 --allow-parse-failures 使用，清单内失败切片降级为 THROW 空体桩
+                （运行到该函数时抛原版 Lang.Error.CalledFailedFunc 文案，等价原版
+                「该函数不可用」，而不是静默返回默认值）；manifest 追加 degraded-slices 段随包留痕。
+  --allow-parse-failures <清单>
+                容错档清单（每行 `相对路径:行号`，`#` 开头为注释）。仅 --mode compat 接受。
+                清单外的任何失败、或清单项未命中（源已修好/行号漂移）一律退出码 1。
   退出码        0 = 成功并落盘；1 = 编译/构建失败（stderr 逐条给 文件:行号，不落盘）；2 = 参数错误
   侧车          program.meta 是装载期元数据（函数元数据 / #DIM / 标签 / 数据节 / 宏表），
                 与 program.erbc 成对分发；装载侧用 ProgramLoader + BootMetadata.read 一起读。
@@ -83,8 +93,10 @@ audit 选项（装载期符号链接审计：解析期使用点 × 运行期真�
   --out         未绑定符号 TSV（缺省 tools/erbcc/symbol-audit/unresolved-symbols.tsv）
   --limit       只切片前 N 个文件（调试用）
   --strict      有硬差异时退出码 1（未绑定变量/关键字/#DIM 注册失败等；动态关键字下标不计）
-  --allow       白名单 TSV（每行 `<kind>\t<name>` 或 `<kind>\t<functionKey>\t<name>`；# 开头为注释）
-  退出码        0 = 审计完成且（--strict 时）无硬差异；1 = 编译失败或 --strict 下有硬差异
+  --allow       白名单 TSV（每行 `<kind>\t<name>` 或 `<kind>\t<functionKey>\t<name>`；# 开头为注释）；不是合法 UTF-8 ⇒ 退出码 2 拒绝（不做有损解码，且在落任何产物之前挡下）；文件不存在不是错误 —— 打一行提示后按空白名单处理
+  --reachability 追加可达性/可移植性报告（缺省关；审计的 stdout/退出码/TSV 与不带本开关时逐字节相同）：根 = 事件名（IdentifierDictionary.cs:72-89）∪ 系统名（:91-135），BFS 给可达集与深度；静态不可判定的调用落成 dynamic-call 行（报告是下界）；可达函数上的 CLIENTWIDTH/CLIENTHEIGHT/GETFONT/GGETFONT*/GDRAWTEXT 按 persist/display/unknown 分级
+  --reach-out    可达性报告 TSV（缺省 = --out 同目录的 reachability.tsv；仅 --reachability 时生效）
+  退出码        0 = 审计完成且（--strict 时）无硬差异；1 = 编译失败或 --strict 下有硬差异；2 = 参数错误（含 `--allow` 白名单不是合法 UTF-8 的拒绝档）
 
 audit --roundtrip（CMP-79：落盘后再装载对账，审计口径改走 .erbc + program.meta 真装载链）:
   --roundtrip      编译 → 落盘 → ProgramLoader + BootMetadata.read 重建会话 → 与内存产物对账；
@@ -188,7 +200,9 @@ private fun cmdSymbols(args: List<String>) {
     val corpusDir = corpus ?: err("缺少 --corpus 参数")
     if (!Files.isDirectory(corpusDir)) err("corpus 不是目录: $corpusDir")
 
-    val table = SymbolTable.build(corpusDir, config)
+    // `#DIM CONST` 求值留在本模块（core 侧 `build` 的注入点无缺省值，ADR-010）；
+    // 本函数后文另有一个同名局部 `sizeConsts`，故此处用显式 lambda 而非 `::sizeConsts`。
+    val table = LabelTable.build(corpusDir, config) { m, d -> com.erbcc.bridge.sizeConsts(m, d) }
     val st = table.stats()
     println("=== 符号表 ===")
     println("配置: IgnoreCase=${table.config.ignoreCase} SortFilenames=${table.config.sortFilenames} " +
@@ -244,7 +258,7 @@ private fun cmdSymbols(args: List<String>) {
 
     if (collatorCheck) {
         // spec: Config.cs:681 culture 排序的近似性自检（ADR-006）
-        val c = SymbolTable.collatorCheck(corpusDir, config)
+        val c = LabelTable.collatorCheck(corpusDir, config) { m, d -> com.erbcc.bridge.sizeConsts(m, d) }
         println()
         println("=== 比较器自检（ja-JP Collator vs ORDINAL）===")
         println("文件数 ${c.files}  绝对位置位移 ${c.shiftedFiles}（含被动位移，仅供观察）")
@@ -283,7 +297,8 @@ private fun cmdSymbols(args: List<String>) {
                             sb.append("\"$k\"")
                         }
                         sb.append("]")
-                        if (s.initializer != null) sb.append(", \"initializer\": ${jstr(s.initializer)}")
+                        // `DimSpec` 已下沉到 :core-vm，跨模块的 public val 不能再被智能转换，改用 `?.let`
+                        s.initializer?.let { sb.append(", \"initializer\": ${jstr(it)}") }
                         sb.append("}")
                     }
                     sb.append("]")
@@ -319,6 +334,24 @@ internal fun cmdCompile(args: List<String>): Int {
     var corpus: Path? = null
     var out = Path("tools/erbcc/erbc-out")
     var limit: Int? = null
+    /**
+     * 显式容错档：存在**预期内**的解析失败切片时仍落盘（失败切片按空体桩随包）。
+     *
+     * 必须带「预期失败清单」（每行 `相对路径:行号`，`#` 开头为注释）：
+     * - 清单外的任何失败 → 退出码 1 —— 防未来编译器/语料回归被容错档吞掉；
+     * - 清单项未命中（源已修好或行号漂移）→ 也退出码 1 —— 防清单过期后防护失效；
+     *   未命中还要按 [listedSourceMissing] 分两桶报（源文件不在语料根 ≠ 行号漂移）。
+     * - 清单为空（0 条在册）且编译 0 失败 → 退出码 0 照旧落盘：兼容档此时**没有容错任何东西**，
+     *   产物与严格档逐字节一致、manifest 不写 degraded-slices 段，读数也必须照实说
+     *   （不许报「N 条降级切片随包」）。这不是放行口子：清单一旦有项没命中仍是退 1，
+     *   而「语料里有失败但清单没登记」走的是上一条「清单外」分支。
+     *   为什么不干脆让空清单退 1：那样兼容档通道就再也出不了包（本路要解的正是这个），
+     *   而重登清单的取证口是**严格档**（它自己会把全量失败逐条打到 stderr），不依赖空清单能跑。
+     *
+     * 只有「随包第三方口上不许改源」时才该用它；正式产物应把这些源文件修到 0 条。
+     */
+    var allowList: Path? = null
+    var mode = "strict"
     var i = 0
     while (i < args.size) {
         when (args[i]) {
@@ -326,18 +359,29 @@ internal fun cmdCompile(args: List<String>): Int {
             "--out" -> out = Path(args.getOrNull(++i) ?: err("--out 需要参数"))
             "--limit" -> limit = (args.getOrNull(++i) ?: err("--limit 需要参数"))
                 .toIntOrNull()?.takeIf { it > 0 } ?: err("--limit 需要正整数")
+            "--mode" -> mode = (args.getOrNull(++i) ?: err("--mode 需要 strict|compat")).trim().lowercase()
+            "--allow-parse-failures" -> allowList = Path(
+                args.getOrNull(++i) ?: err("--allow-parse-failures 需要清单文件（每行 文件:行号）"),
+            )
             else -> err("无法识别的 compile 参数: ${args[i]}")
         }
         i++
     }
+    if (mode !in setOf("strict", "compat")) err("--mode 只能是 strict|compat，收到 '$mode'")
+    if (mode == "compat" && allowList == null) err("compat 档必须带 --allow-parse-failures <清单>")
+    if (mode == "strict" && allowList != null) {
+        err("strict 档不接受容错清单（要容错请用 --mode compat --allow-parse-failures <清单>）")
+    }
     val corpusDir = corpus ?: err("缺少 --corpus 参数")
     if (!Files.isDirectory(corpusDir)) err("corpus 不是目录: $corpusDir")
     val root = corpusDir.toAbsolutePath().normalize()
+    allowList?.let { if (!Files.isRegularFile(it)) err("容错清单不是文件: $it") }
     if (limit != null) System.err.println("降级模式：只编译前 $limit 个文件（正式产物必须全量）")
 
     val t0 = System.currentTimeMillis()
-    val result = CorpusCompile.compile(root, limit)
+    val result = CorpusCompile.compile(root, limit, degradedStub = mode == "compat")
     val st = result.stats
+    System.err.println("编译档：$mode")
     System.err.println(
         "编译：文件 ${st.corpusFiles}  切片 ${st.slices}  成功 ${st.compiled}  " +
             "失败 ${st.compileFailures}  解析失败切片 ${st.parseFailures}  事件入口 ${st.eventEntries}  " +
@@ -355,6 +399,66 @@ internal fun cmdCompile(args: List<String>): Int {
     if (!result.ok) {
         System.err.println("编译失败 ${result.failures.size} 条（至多列 50 条，格式 文件:行号）:")
         result.failures.take(50).forEach { System.err.println("  $it") }
+    }
+    if (allowList != null) {
+        // 结构级失败（Program 都建不起来）不吃容错档：那不是「切片降级」，是根本产不出包。
+        if (result.program == null) {
+            System.err.println("容错档不放行结构级失败：Program 未能构建，拒绝落盘")
+            return 1
+        }
+        val expected = Files.readAllLines(allowList).mapNotNull { raw ->
+            val t = raw.removePrefix("\uFEFF").trim()
+            if (t.isEmpty() || t.startsWith("#")) null else t.replace('\\', '/')
+        }.toSet()
+        val actual = result.failures.mapTo(LinkedHashSet()) { "${it.file}:${it.line}" }
+        val unexpected = actual - expected
+        val stale = expected - actual
+        if (unexpected.isNotEmpty() || stale.isNotEmpty()) {
+            if (unexpected.isNotEmpty()) {
+                System.err.println("容错清单外的失败 ${unexpected.size} 条（容错档不放行）:")
+                unexpected.take(50).forEach { System.err.println("  $it") }
+            }
+            if (stale.isNotEmpty()) {
+                // 未命中要分两桶报，因为成因与修法完全不同（2026-11-04 实测）：整份清单曾钉在一个
+                // **没复制进语料根**的第三方口上包上，旧报文一律写「源已修好或行号漂移」，把第三种
+                // 成因（包没落盘 / 换了语料根 / 包已撤下）盖掉了 —— 于是有人去逐行比对一个磁盘上
+                // 根本不存在的文件的行号。两桶都照旧退 1：容错档不放行任何未点名的东西。
+                val (absent, drifted) = stale.partition { listedSourceMissing(root, it) }
+                if (absent.isNotEmpty()) {
+                    System.err.println(
+                        "容错清单的源文件不在语料根（$root）里：${absent.size} 项 —— 口上包没复制进来 / " +
+                            "换了语料根 / 包已撤下（不是行号漂移，别去对行号）——先确认包在不在根里，" +
+                            "再决定重登清单还是回严格档:",
+                    )
+                    absent.take(50).forEach { System.err.println("  $it") }
+                }
+                if (drifted.isNotEmpty()) {
+                    System.err.println(
+                        "容错清单已过期：${drifted.size} 项在本次编译中未命中（源已修好或行号漂移）——" +
+                            "请删掉这些清单项并回到严格档:",
+                    )
+                    drifted.take(50).forEach { System.err.println("  $it") }
+                }
+            }
+            return 1
+        }
+        // 读数必须与「实际降级了几条」一致：清单为空且编译 0 失败时，兼容档什么都没容错
+        // （产物与严格档逐字节一致，manifest 里连 degraded-slices 段都不写），此时不能再打
+        // 「N 条预期内失败，切片降级为入口 THROW 桩随包」——那是让人以为包里的降级在册。
+        // 走到这里 expected 空 ⇔ actual 空（非空未命中已在上面退 1），两条分支互斥且穷尽。
+        if (expected.isEmpty()) {
+            System.err.println(
+                "[erbcc] 兼容档：清单 0 条在册、本次编译 0 条失败 ⇒ 未降级任何切片，" +
+                    "产物与严格档逐字节一致（degraded-slices 段不写）；出包请用 -PcompileMode=strict，" +
+                    "只有语料里确有「不许改源」的失败时才往清单里登记",
+            )
+        } else {
+            System.err.println(
+                "[erbcc] 兼容档：${actual.size} 条预期内失败，切片降级为入口 THROW 桩随包" +
+                    "（调用时立刻抛原版 CalledFailedFunc 文案，等价原版「该函数不可用」）；清单 $allowList",
+            )
+        }
+    } else if (!result.ok) {
         return 1
     }
     // #DIM 解析告警（level 2，对齐原版 ParserMediator.Warn；spec: ErhLoader.cs:324-331、
@@ -364,13 +468,16 @@ internal fun cmdCompile(args: List<String>): Int {
         result.dimWarnings.take(50).forEach { System.err.println("  $it") }
     }
     // 装载/解析期告警（原版 ParserMediator.Warn 族；level 1，不中断装载、不改退出码）。
-    // 文案与行号口径对齐 PC 基准 `.workbuddy/golden-pc-loadwarnings.txt` 的前两列
+    // 文案与行号口径对齐 PC 基准 `<internal-workdir>/golden-pc-loadwarnings.txt` 的前两列
     // （`文件:行 | 文案`），见 CompileResult.warnings 的 KDoc。
     if (result.warnings.isNotEmpty()) {
         System.err.println("装载期告警 ${result.warnings.size} 条（至多列 50 条）:")
         result.warnings.take(50).forEach { System.err.println("  ${it.file}:${it.line} | ${it.message}") }
     }
-    val report = ErbcArtifacts.write(out, result.program!!, root, result.sourceFiles, st, result.bootMetadata)
+    val report = ErbcArtifacts.write(
+        out, result.program!!, root, result.sourceFiles, st, result.bootMetadata,
+        degraded = if (allowList != null) result.failures else emptyList(),
+    )
     println("=== 落盘完成 ===")
     println("指令 ${st.instructions}  语句 ${st.statements}  函数 ${st.functions}  " +
         "串池 ${st.strings}  常量 ${st.constants}  表达式 ${st.expressions}  " +
@@ -387,6 +494,27 @@ internal fun cmdCompile(args: List<String>): Int {
         )
     }
     return 0
+}
+
+/**
+ * 容错清单项 `相对路径:行号` 里那个**源文件**在本次语料根里存不存在（行号不参与判断）。
+ *
+ * 只有一个用途：把「清单项未命中」拆成两桶报 —— 「源文件根本不在语料根里」（口上包没复制进来 /
+ * 换了语料根 / 包已撤下）与「文件在、但这些行没失败」（源修好了 / 行号漂移）。两桶的修法相反：
+ * 前者先把包落盘再用严格档重取清单，后者删条目回严格档；混成一句「源已修好或行号漂移」就会
+ * 把人支去逐行比对一个磁盘上不存在的文件的行号（2026-11-04 lane allowlist 实测踩过）。
+ *
+ * 判据走文件系统存在性，不走编译结果：语料枚举出来的文件才会进
+ * [com.eratw.port.erbcc.compile.CompileResult]，「没进枚举」这件事在失败清单里本来就没有痕迹
+ * （除非读取失败，那条另有文案）。
+ * 项里没有冒号（形状本身不对）⇒ 归「行号漂移」桶，不新造第三类。
+ *
+ * internal 仅供本模块测试源集直接断言分桶；CLI 侧唯一调用点是 [cmdCompile]。
+ */
+internal fun listedSourceMissing(corpusRoot: Path, entry: String): Boolean {
+    val rel = entry.substringBeforeLast(':', missingDelimiterValue = "")
+    if (rel.isEmpty()) return false
+    return runCatching { !corpusRoot.resolve(rel).isRegularFile() }.getOrDefault(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +569,9 @@ internal fun cmdAudit(args: List<String>): Int {
     var allow: Path? = null
     var roundtrip = false
     var artifactDir: Path? = null
+    var reachability = false
+    var reachOut: Path? = null
+    var reachOutGiven = false
     var i = 0
     while (i < args.size) {
         when (args[i]) {
@@ -456,6 +587,11 @@ internal fun cmdAudit(args: List<String>): Int {
             "--allow" -> allow = Path(args.getOrNull(++i) ?: err("--allow 需要参数"))
             "--roundtrip" -> roundtrip = true
             "--artifact-dir" -> artifactDir = Path(args.getOrNull(++i) ?: err("--artifact-dir 需要参数"))
+            "--reachability" -> reachability = true
+            "--reach-out" -> {
+                reachOut = Path(args.getOrNull(++i) ?: err("--reach-out 需要参数"))
+                reachOutGiven = true
+            }
             else -> err("无法识别的 audit 参数: ${args[i]}")
         }
         i++
@@ -469,8 +605,27 @@ internal fun cmdAudit(args: List<String>): Int {
         err("游戏根缺少 CSV 目录: $game/CSV（关键字表与角色模板都从这里来，缺表时审计会满屏假红）")
     }
     if (limit != null) System.err.println("降级模式：只审计前 $limit 个文件（正式闸必须全量）")
+    // --reach-out 是 --reachability 的输出侧参数：只给输出路径不给开关属于入参矛盾，按参数错误挡下，
+    // 免得「以为开了报告、实际什么都没写」。
+    if (reachOutGiven && !reachability) err("--reach-out 需要配合 --reachability（可达性报告缺省关）")
+    if (roundtrip && reachability) err("--reachability 与 --roundtrip 互斥（对账链不产可达性报告）")
 
     if (roundtrip) return cmdAuditRoundTrip(root, game, artifactDir, if (outGiven) out else null, limit)
+
+    // F2（字符集闸）：`--allow` 的字节在解析之前先走**严格 UTF-8** 解码，非 UTF-8 ⇒ 报红退参数错误档。
+    // 旧实现是 `path.readText()`（Kotlin 的默认解码动作是 REPLACE），非法字节被换成 U+FFFD 后一路跑完
+    // 整份审计并落 TSV —— 「以为挂了白名单，实际挂的是一堆乱码」属于静默放过，本仓要防的形状。
+    // 这里只把**读字节**提前，解析与告警仍留在原处（下面 readAllowList 那一格）：合法 UTF-8 白名单的
+    // stdout/stderr 读数与 TSV 字节一字不变（对拍读数见 tools/erbcc-rs/build/cli-fixes 的 before/after）。
+    // 退出码取 2（`err()` 那把尺，Main.kt:163-166）而不是 1：坏的是入参，不是审计结果；
+    // 取 1 会和「--strict 下有硬差异」混成一类，让使用者以为要去看 TSV 里的符号。
+    // 校验点在 `--roundtrip` 分派之后（Main.kt:476 原样）：那条子路一个字节都不消费 `--allow`
+    // （USAGE 的 `--roundtrip` 行也没有它），把它一起收紧属于超出本格的改动。
+    val allowText = try {
+        allow?.let { readAllowListText(it) }
+    } catch (e: IllegalStateException) {
+        err(e.message ?: "白名单读取失败")
+    }
 
     val report = SymbolLinkAudit.audit(root, game, limit)
     val st = report.result.stats
@@ -495,7 +650,7 @@ internal fun cmdAudit(args: List<String>): Int {
             "系统变量 ${report.runtimeSystemVars}",
     )
 
-    val allowed = allow?.let { readAllowList(it) } ?: AllowList.EMPTY
+    val allowed = allow?.let { readAllowList(it, allowText) } ?: AllowList.EMPTY
     val blocking = report.blocking.filterNot { allowed.matches(it) }
     val suppressed = report.blocking.size - blocking.size
 
@@ -516,6 +671,29 @@ internal fun cmdAudit(args: List<String>): Int {
     report.writeTsv(out)
     println()
     println("明细：${out.toAbsolutePath().normalize()}（${report.findings.size} 行）")
+    // --reachability：只报告（合同 MODERN-R6 §3.4）。缺省关 ⇒ 上面每一行 stdout / 退出码 / TSV
+    // 都与不带本开关时逐字节相同（基线对拍见 ReachabilityCliTest）。开启后复用本次审计的
+    // 编译侧车（report.result.bootMetadata），不编译第二遍；报告本身不含绝对路径/耗时。
+    if (reachability) {
+        if (reachOutGiven) {
+            val declared = reachOut!!
+            val parent = declared.toAbsolutePath().normalize().parent
+            if (parent != null) Files.createDirectories(parent)
+        }
+        val reach = ReachabilityAudit.audit(
+            corpusRoot = root,
+            fileLimit = limit,
+            bootMetadata = report.result.bootMetadata,
+        )
+        println(reach.summaryLine())
+        val reachPath = if (reachOutGiven) {
+            reachOut!!
+        } else {
+            (out.toAbsolutePath().normalize().parent ?: Path(".")).resolve("reachability.tsv")
+        }
+        reach.writeTsv(reachPath)
+        println("可移植性明细：${reachPath.toAbsolutePath().normalize()}（${reach.rows.size} 行）")
+    }
     if (strict && blocking.isNotEmpty()) {
         System.err.println("审计未通过：--strict 下仍有 ${blocking.size} 处硬差异。")
         return 1
@@ -605,7 +783,7 @@ private fun printGroups(list: List<Finding>, indent: String, limit: Int) {
 }
 
 /** `--allow` 白名单：`kind<TAB>name` 或 `kind<TAB>functionKey<TAB>name`，`#` 开头为注释。 */
-private class AllowList(
+internal class AllowList(
     private val byName: Set<String>,
     private val byFunction: Set<String>,
 ) {
@@ -618,14 +796,53 @@ private class AllowList(
     }
 }
 
-private fun readAllowList(path: Path): AllowList {
-    if (!path.isRegularFile()) {
+/**
+ * `--allow` 白名单的**字节 → 文本**（F2 的严格 UTF-8 解码）。
+ *
+ * 返回 null 只表示「不是普通文件」——照旧口径由 [readAllowList] 按空白名单处理并往 stderr 打一行；
+ * 非 UTF-8 抛 [IllegalStateException]，消息即给使用者看的报红正文（`错误: ` 前缀由 [err] 统一加），
+ * 由 [cmdAudit] 转成退出码 2。
+ *
+ * 本函数与 [readAllowList]、[allowListCharsetRed]、[AllowList] 是 internal 而非 private：
+ * 使用者面报红与白名单解析形状要在单测里逐字钉住（`audit/AllowListCharsetTest.kt`），
+ * 而 CLI 那一层的 `err()` 会 `exitProcess`、把跑 JUnit 的 JVM 一起带走，不适合在进程内断言。
+ */
+internal fun readAllowListText(path: Path): String? {
+    if (!path.isRegularFile()) return null
+    return try {
+        Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(java.nio.ByteBuffer.wrap(Files.readAllBytes(path)))
+            .toString()
+        // 不做 BOM 剥离、也不做 Shift-JIS 回退：旧实现 `readText()` 两者都没做，
+        // 合法输入必须逐字同解（语料侧的编码探测是另一套口径，见同文件 detectEncoding）。
+    } catch (e: CharacterCodingException) {
+        throw IllegalStateException(allowListCharsetRed(path.toString()))
+    }
+}
+
+/**
+ * `--allow` 非法 UTF-8 的报红正文（不含 `错误: ` 前缀）。`pathText` 用 Kotlin 的
+ * `WindowsPath.toString()` 口径（分隔符归一成 `\`），与 Rust 侧 `cmd_audit::allow_charset_red`
+ * 逐字相同 —— 两腿这条格子的全文对拍见 `tools/erbcc-rs/tests/cli_surface_diff.rs` 的 F2 格。
+ */
+internal fun allowListCharsetRed(pathText: String): String =
+    "--allow 白名单不是合法 UTF-8 文本，已拒绝：$pathText" +
+        "（请把该文件另存为 UTF-8 再跑；这里不做有损解码，否则你以为挂上的是白名单，实际是一堆乱码）"
+
+/**
+ * 解析已解码的白名单 [text]：形状与告警一字不变（2 列 = `kind<TAB>name`、3 列 = 带 functionKey、
+ * `#` 开头与空行跳过、其它列数「跳过 + 一行告警」）。[text] 为 null（不是普通文件）时按空白名单处理。
+ */
+internal fun readAllowList(path: Path, text: String?): AllowList {
+    if (text == null) {
         System.err.println("白名单文件不存在（按空白名单处理）: $path")
         return AllowList.EMPTY
     }
     val byName = HashSet<String>()
     val byFunction = HashSet<String>()
-    for (raw in path.readText().split('\n', '\r')) {
+    for (raw in text.split('\n', '\r')) {
         val line = raw.trim()
         if (line.isEmpty() || line.startsWith("#")) continue
         val cols = line.split('\t')
@@ -638,20 +855,17 @@ private fun readAllowList(path: Path): AllowList {
     return AllowList(byName, byFunction)
 }
 
-/** spec: ParserMediator.LoadEraExRenameFile —— `置換後 , [[置換前]]`，逗号恰两列 */
-private fun loadRenameDic(file: Path): Map<String, String> {
-    val map = mutableMapOf<String, String>()
-    for (line in file.readText().split('\n', '\r')) {
-        val t = line.trimStart('\uFEFF').trim()
-        if (t.isEmpty() || t.startsWith(";")) continue
-        val parts = t.split(',')
-        if (parts.size == 2) {
-            val key = "[[${parts[1].trim()}]]"
-            map[key] = parts[0].trim()
-        }
-    }
-    return map
-}
+/**
+ * spec: ParserMediator.LoadEraExRenameFile —— `置換後 , [[置換前]]`，逗号恰两列。
+ *
+ * 解码与 [CorpusCompile.loadRenameDic] **完全同源**：三档判据（BOM 五族探测 / 无 BOM
+ * 严格 UTF-8 / 非 UTF-8 回落 CP932）只在 [decodeRenameDic] 里实现一份，本函数只负责把
+ * 文件字节交给它。旧实现 `file.readText()` 是固定 UTF-8 + REPLACE 静默替换，不认
+ * UTF-16/32 BOM、无 CP932 回落，会让 `[[置換名]]` 查不到键；本波起不再复制第四种实现。
+ * 可见性 internal 仅为本模块定向单测端到端调用（钉三档判据），不改变生产调用面。
+ */
+internal fun loadRenameDic(file: Path): Map<String, String> =
+    decodeRenameDic(Files.readAllBytes(file))
 
 // ---------------------------------------------------------------------------
 // 扫描核心

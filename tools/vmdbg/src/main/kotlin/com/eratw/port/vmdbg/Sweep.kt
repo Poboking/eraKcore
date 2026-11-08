@@ -46,6 +46,21 @@ import java.util.Locale
  * 最后一行 RUNNING 的 fn 就是肇事者。`--resume` 先读旧文件、剔除一切 RUNNING 行、
  * 保留终态记录（同 key 以最后一条为准）并重写文件，随后只跑没有终态记录的函数。
  *
+ * ## --resume 的跳过集跨过滤复用（挖虫 W5-misc 第 3 条之三，**用之前先读这段**）
+ *
+ * 跳过集是从 `--out/sweep.jsonl` 里读出来的 **key 集合**，它不知道这份 jsonl 当初是按
+ * 什么过滤跑出来的：`--only`、`--skip-methods`、`--shard i/n` 换了、去掉了、或 n 改了，
+ * 旧集合照样生效。后果不是「少跑一点」而是**静默少跑**：换过滤复用同一个 `--out` 时，
+ * 命中旧终态记录的函数一个都不会重跑，屏上却仍是「本次清扫 N + 全部片结束」的全绿形状。
+ *
+ * 三条纪律：
+ * - **换过滤就换新 `--out`**（或先删掉那份 jsonl）；同一片断点续跑才用 `--resume`；
+ * - 分片数 `n` 改变时 `--shard i/n` 的下标映射整体错位（分片按**原清单下标**取模），
+ *   这种 `--resume` 等于随机跳过，读数不可用；
+ * - 摘要行与 summary.md 把两个数分开写：`跳过 N 个` 是本轮**真**少跑的，
+ *   `终态集 M 个` 是 jsonl 里的全部 —— `M > N` 就是「旧轮命中了非本片/非本过滤的函数」，
+ *   看到差值先怀疑复用了目录，而不是继续等它跑完。
+ *
  * 墙钟兜底： ImmediateInputSink 挂 [WallBudget]，逐函数换装（见 Assembler.kt）。
  *
  * ## 输出
@@ -78,7 +93,7 @@ object CmdSweep {
         val resume = a.flag("--resume")
         val wallMs = a.longOr("--wall-ms", Cli.DEFAULT_WALL_MS)
 
-        val assembled = Assembler.assemble(a)
+        val assembled = Assembler.assemble(a, out = out)
         val rt = assembled.session.runtime
         val sink = assembled.inputSink
         val stepsCap = a.longOr("--steps", Cli.DEFAULT_SWEEP_STEPS)
@@ -101,23 +116,37 @@ object CmdSweep {
         }
         // --resume：先清 RUNNING 并收终态 key 集合；有终态记录的函数跳过（契约：跳过一切
         // 非 RUNNING 记录续跑），只跑没有终态记录的函数。
+        //
+        // 跳过集按 **key** 收，而 key 来自 `--out` 里那份**旧 jsonl** —— 它完全不认本轮的
+        // --only/--shard/--skip-methods（口径与坑见类头「--resume 的跳过集跨过滤」段）。
         val resumedKeys = HashSet<String>()
         if (resume && Files.isRegularFile(jsonl)) {
             resumedKeys.addAll(rewriteWithoutRunning(jsonl))
         }
+        // 本轮**真的**因为 resume 少跑了几个（走到过滤链最后一步才被跳过的）。
+        var resumedSkipped = 0
         all.forEachIndexed { idx, m ->
             if (m.isEvent || m.position == "·event-entry·" || m.position == "synthetic-event-entry") return@forEachIndexed
             if ('#' in m.key) return@forEachIndexed
             if (skipMethods && m.isMethod) return@forEachIndexed
             if (only != null && !only.containsMatchIn(m.name) && !only.containsMatchIn(m.key)) return@forEachIndexed
             if (shard != null && idx % shard.n != shard.i) return@forEachIndexed
-            if (m.key in resumedKeys) return@forEachIndexed
+            if (m.key in resumedKeys) {
+                resumedSkipped++
+                return@forEachIndexed
+            }
             selected.add(m)
         }
+        // 集合里那些**没落到本轮过滤内**的 key（旧轮跑过、本轮被 --only/--shard 滤掉，或压根
+        // 不在本轮清单里）。它只解释「两个数为什么不一样」，不影响本轮清扫对象。
+        val resumedOutOfFilter = (resumedKeys.size - resumedSkipped).coerceAtLeast(0)
 
         out.println("sweep: 清单 ${all.size} 跳过事件/合成入口 $skippedEvent 本次清扫 ${selected.size}" +
             (if (shard != null) " shard=${shard.i}/${shard.n}" else "") +
-            (if (resume) " resume(复用终态 ${resumedKeys.size})" else "") +
+            (if (resume) {
+                " resume(跳过 $resumedSkipped 个/终态集 ${resumedKeys.size} 个" +
+                    "（其中 $resumedOutOfFilter 个不在本片/本过滤命中内，不构成跳过）)"
+            } else "") +
             " steps=$stepsCap wallMs=$wallMs")
         val t0 = System.currentTimeMillis()
         var pass = 0
@@ -171,7 +200,7 @@ object CmdSweep {
         }
 
         val summary = renderSummary(
-            all.size, skippedEvent, records, shard, resumedKeys.size,
+            all.size, skippedEvent, records, shard, resumedSkipped, resumedKeys.size,
             programStmtTotal = program.statementCount,
             touchedStmts = globalPcs.cardinality(),
         )
@@ -258,6 +287,7 @@ object CmdSweep {
         records: List<SweptRecord>,
         shard: Shard?,
         reused: Int,
+        reusedTotal: Int,
         programStmtTotal: Int,
         touchedStmts: Int,
     ): String {
@@ -269,7 +299,14 @@ object CmdSweep {
         sb.append("- 清单（metadata.functions）: $listSize\n")
         sb.append("- 跳过事件/合成入口: $skippedEvent\n")
         shard?.let { sb.append("- 分片: ${it.i}/${it.n}\n") }
-        if (reused > 0) sb.append("- resume 复用终态记录: $reused\n")
+        if (reusedTotal > 0 || reused > 0) {
+            // 两个数都要写：只写「终态集 M」会让人以为本轮已经跑过 M 个（其实 M 里绝大多数
+            // 是别片/别过滤的产物），只写 N 又看不出这份目录被谁用过。见类头 resume 段。
+            sb.append("- resume：本轮实际跳过 $reused 个（旧 jsonl 终态集 $reusedTotal 个，" +
+                "其余 ${(reusedTotal - reused).coerceAtLeast(0)} 个不在本片/本过滤命中内）\n")
+            sb.append("> 提示：--resume 的跳过集跨过滤复用 —— 换了 --only/--shard/--skip-methods\n")
+            sb.append("> 却复用同一个 --out，命中的函数会**静默不重跑**；要换过滤请换新目录。\n")
+        }
         sb.append("- 本次清扫: ${records.size}\n\n")
 
         val byStatus = records.groupingBy { it.status }.eachCount().toSortedMap()

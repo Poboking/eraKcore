@@ -9,6 +9,7 @@ import com.eratw.port.core.host.InputSink
 import com.eratw.port.core.host.NoopTimerSink
 import com.eratw.port.core.host.TimerSink
 import com.eratw.port.core.loader.BootMetadata
+import com.eratw.port.core.loader.LoadStageMark
 import com.eratw.port.core.loader.ProgramLoader
 import com.eratw.port.core.proc.GameSession
 import com.eratw.port.core.proc.ProcessRuntime
@@ -18,6 +19,7 @@ import com.eratw.port.core.save.RootedSaveFileIo
 import com.eratw.port.core.save.SaveFileIo
 import com.eratw.port.core.save.SaveFolderIo
 import com.eratw.port.core.sem.SystemOps
+import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -36,6 +38,13 @@ import java.nio.file.Path
  *   的装置常量同值）——确定性对拍需要会话可复现。
  * - `maxStepsPerRun` = `--steps N`（call/trace 缺省 20,000,000、sweep 缺省 2,000,000，
  *   见 [Cli]；call/trace 与产品 GameSession.DEFAULT_MAX_STEPS_PER_RUN 同口径）。
+ * - `maxRunMillis` = `--step-wall-ms N`（缺省 0 = 关闭，逐字保持既有行为）：**单段落墙钟闸**，
+ *   段落 = 相邻两次让出点（输入等待返回 / `AWAIT`）之间，口径与 `--steps` 的段落计数同源
+ *   （Vm.kt:41 的 [com.eratw.port.core.code.VmConfig.maxRunMillis]，检查点每 65536 条指令一次）。
+ *   它把「一次提交后长时间不回等待点」的纯计算挂起**中断在同一条指令上**，抛点的
+ *   函数名/行号/pc/调用链随 [com.eratw.port.core.code.StepLimitExceeded] 原样带走
+ *   （`elapsedMs >= 0` 即时间闸触发，与步数闸同异常不同判据）——这是 obs-midhang 定标
+ *   「中局卡死肇事函数」的装置面；步数闸仍是引导与生产判据，两者互不顶替。
  * - `writeRoot` 保持 null（GameSession.kt:165 的缺省）⇒ SAVETEXT / OUTPUTLOG 拒写，
  *   与 sweep 规格「SAVETEXT 拒写」一致。
  * - `frameGateEnabled = false`：headless 工具没有帧节拍的读者，控制台变更立即发布，
@@ -47,6 +56,21 @@ import java.nio.file.Path
  *
  * `--erbc` / `--game` 优先；缺省读 `ERATW_ERBC_DIR` / `ERATW_GAMEDIR`（与
  * core-vm/build.gradle.kts:196-209 的 `erbcBootProfile` 旋钮同名同义）。
+ *
+ * ## 产品兼容装载档与堆预检（obs-compat512，两个**显式请求**开关）
+ *
+ * - `--compat-load`（布尔）：把装载改成 `ProgramLoader.loadMapped(path, compat = true)`
+ *   （解码期去重/校验串行、不起 `erbc-intern-seed` 并行线程），并照产品侧
+ *   （GameHost.kt:2149-2152 的 `trace.forceGc("decode")`、LoadTrace.kt:128-131 的
+ *   无条件全量 GC 口径）在**每个解码分段 mark 上收一次全量垃圾**；侧车交界与会话交界
+ *   （产品同款 `forceGc("meta")` / `forceGc("session")`，GameHost.kt:2198/:2208）同样收。
+ *   不传 = 与改前逐字相同（单参 `loadMapped(path)`、无 mark、无额外 GC）。
+ * - `--load-precheck`（布尔）：**装载之前**打一行 `ProgramLoader.estimateHeap` 读数
+ *   （`requiredBytes/requiredMiB/maxMemoryBytes/maxMemoryMiB/sufficient` + 产物/侧车/指令数）。
+ *   这行同时是「挡位真的生效」的自证：`--xmx 512m` 时 `maxMemoryBytes=536870912`。
+ *   [out] 为 null 时写 `System.out`（两个开关都是一次性的诊断请求，不改变常规子命令输出）。
+ *
+ * 两个开关缺省关；关着的时候本文件的输出顺序、参数与被拉起的进程行逐字不变。
  */
 object Assembler {
 
@@ -70,8 +94,10 @@ object Assembler {
      *   既有行为零变化（[ImmediateInputSink]）。注入时语句输入走 override，[Assembled.inputSink]
      *   仍是缺省 sink 实例（既有消费者类型不变）——AWAIT 的墙钟兜底（[WallTimerSink]）接的
      *   就是缺省实例，explore 把同一 [WallBudget] 挂到两处（见 ExploreDriver.runEpisode）。
+     * @param out `--load-precheck` 那行的落点（子命令的 stdout）；null = 写 `System.out`。
+     *   只有 `--load-precheck` 打开时才会写，其余路径一个字节都不多。
      */
-    fun assemble(a: Args, sinkOverride: InputSink? = null): Assembled {
+    fun assemble(a: Args, sinkOverride: InputSink? = null, out: PrintStream? = null): Assembled {
         val erbcRaw = a.value("--erbc")
             ?: System.getenv("ERATW_ERBC_DIR")
             ?: throw CliError("缺 --erbc <erbc.v1 目录>，且环境变量 ERATW_ERBC_DIR 未设置")
@@ -99,11 +125,55 @@ object Assembler {
             throw CliError("存档沙箱目录建不出来: $workDir（$e）", e)
         }
 
+        // 产品兼容装载档 + 堆预检（obs-compat512）：两个开关缺省关，关着时下面每一行与改前逐字相同。
+        val compatLoad = a.flag("--compat-load")
+        val loadPrecheck = a.flag("--load-precheck")
+        if (loadPrecheck) {
+            // 装载前堆预检：与宿主同一条判据（GameHost.kt:1816 的 ProgramLoader.estimateHeap），
+            // 只读段表 + 侧车大小，产物正文一个字节都不进堆。读数前不清垃圾 —— 这里的
+            // 「上限」是硬阈值（maxMemory），不是余量判据；余量见 maxMemoryBytes - used。
+            val est = try {
+                ProgramLoader.estimateHeap(programPath, metaPath)
+            } catch (e: OutOfMemoryError) {
+                throw CliError("堆预检失败（堆 OOM）: ${e.message}", e)
+            } catch (e: Exception) {
+                throw CliError("堆预检失败: $programPath（${e.message}）", e)
+            }
+            val sinkOut = out ?: System.out
+            // 一行 key=value：既能 grep，也自证挡位（--xmx 512m 时 maxMemoryBytes=536870912）。
+            sinkOut.println(
+                "loadPrecheck: requiredBytes=" + est.requiredBytes +
+                    " requiredMiB=" + est.requiredMiB +
+                    " maxMemoryBytes=" + est.maxMemoryBytes +
+                    " maxMemoryMiB=" + est.maxMemoryMiB +
+                    " sufficient=" + est.sufficient +
+                    " artifactBytes=" + est.artifactBytes +
+                    " metaBytes=" + est.metaBytes +
+                    " instructions=" + est.instructionCount +
+                    " compat=" + compatLoad,
+            )
+            sinkOut.flush()
+        }
+        // 兼容档的 mark：产品侧 compat 档逢段必收（GameHost.kt:2149-2152）；收不收在那边是
+        // LoadGcPolicy.collectAtSeam 恒真的判式（LoadTrace.kt:128-131），等价于无条件 gc()。
+        // 非兼容档恒 null ⇒ loadMapped 走单参形态，解码链一个回调都不挂。
+        val compatMark: LoadStageMark? = if (compatLoad) {
+            LoadStageMark { Runtime.getRuntime().gc() }
+        } else {
+            null
+        }
         val program = try {
-            ProgramLoader.loadMapped(programPath)
+            ProgramLoader.loadMapped(programPath, compat = compatLoad, mark = compatMark)
+        } catch (e: OutOfMemoryError) {
+            // 缺省档/无开关路径照旧让 OOM 穿出去（与改前逐字相同）；开了新开关才折成可读的
+            // 「死在装载层」口径——本路要的就是这条读数，不许把 OOM 吞成「跑完了」。
+            if (!compatLoad && !loadPrecheck) throw e
+            throw CliError("产物装载失败（堆 OOM，compat=$compatLoad precheck=$loadPrecheck）: ${e.message}", e)
         } catch (e: Exception) {
             throw CliError("产物装载失败: $programPath（${e.message}）", e)
         }
+        // 侧车交界（产品同款 forceGc("meta") 口径，GameHost.kt:2198）：49 MB 文本解析前收干净。
+        if (compatLoad) Runtime.getRuntime().gc()
         val metadata = try {
             BootMetadata.read(metaPath)
         } catch (e: Exception) {
@@ -124,12 +194,21 @@ object Assembler {
         //（与产品 GameSession.DEFAULT_MAX_STEPS_PER_RUN 同口径，GameSession.kt:718）。
         val defaultSteps =
             if (a.positional.firstOrNull() == "sweep") Cli.DEFAULT_SWEEP_STEPS else Cli.DEFAULT_CALL_STEPS
+        // 单段落墙钟闸（obs-midhang 新旋钮 `--step-wall-ms`）：VM 里「相邻两次让出之间」的墙钟上限，
+        // 口径 = GameSession.maxRunMillis（VmConfig.maxRunMillis，检查点每 65536 条指令一次）。
+        // 缺省 0 = 关闭 ⇒ 与既有子命令逐字同行为；只给装置/诊断显式启用（生产恒 0）。
+        val stepWallMs = a.longOr("--step-wall-ms", 0L)
+        if (stepWallMs < 0) throw CliError("--step-wall-ms 不得为负: $stepWallMs")
+        // 会话交界（产品同款 forceGc("session") 口径，GameHost.kt:2208）：会话装配是本链
+        // 第二大分配，兼容档在它前面把侧车解析的短命串收干净。
+        if (compatLoad) Runtime.getRuntime().gc()
         val s = try {
             GameSession(
                 gameRoot = gameRoot,
                 program = program,
                 metadata = metadata,
                 maxStepsPerRun = if (steps > 0) steps else defaultSteps,
+                maxRunMillis = stepWallMs,
                 randSeed = Cli.RAND_SEED,
                 systemOps = systemOps,
                 frameGateEnabled = false,

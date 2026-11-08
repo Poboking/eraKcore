@@ -27,8 +27,16 @@ package com.eratw.port.render.input
  * @param capacity 原版写死 100（`MainWindow.cs:52`），形参只为单测能把移位看得清而开，
  *   默认值就是官方值；哨兵值随容量走（:945 用的是 `prevInputs.Length` 而非字面量 100，
  *   只有 :958 那一处是硬编码的 `100`，容量等于一百时两者同值）。
+ *   **必须是正数**（构造期校验）：[record] 里 `newestIndex = capacity - 1` 会直接当槽位下标
+ *   用，容量 ≤ 0 时第一位非空提交就落到 `slots[-1]`，而且是在提交路径上才爆（构造点已经不在
+ *   堆栈里）。原版 `prevInputs` 是写死 100 的字段，不存在这个入参，故这里只做形态校验，
+ *   不改任何容量为正时的读数。
  */
 class InputHistory(val capacity: Int = CAPACITY) {
+
+    init {
+        require(capacity >= 1) { "capacity 必须是正数，实际 $capacity" }
+    }
 
     /** 定长槽位，null = 该槽从未写过（对应 C# `new string[100]` 的默认值）。 */
     private val slots: Array<String?> = arrayOfNulls(capacity)

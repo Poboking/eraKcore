@@ -55,7 +55,7 @@ class QolSpriteLayerStackTest {
     /** 生效配置字号（脚本 px 的尺）。语料 `emuera.config:22` = 18。 */
     private val scriptFontPx = 18
 
-    /** 真机 110 列档的 page-fit 读数：字号 41 / 行高 43（`view/PageFitter` 一档）。 */
+    /** 真机 110 列档的页码读数：字号 41 / 行高 43（旧 page-fit 一档，值保留作夹具）。 */
     private val deviceFontPx = 41
     private val deviceLinePx = 43
 

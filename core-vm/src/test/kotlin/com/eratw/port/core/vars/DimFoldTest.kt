@@ -22,7 +22,13 @@ import kotlin.test.assertTrue
  *   `:375/:405-408`（初值段逐项 SingleTerm）。
  * - 字符串 `+`：`OperatorMethodManager.cs:28-33`（PlusStrStr，GetStrValue :41-44）。
  * - 位移：`OperatorMethodManager.cs:523-534`（注册 :741）、`:509-520`（注册 :740）。
- *   原版 `&`/`|` 是逻辑与或（`:375-410`），不是按位——本包未接、也不按位复刻。
+ *   按位/逻辑层（4.981 COMF641 波）：单 `&`/`|`/`^` 是**按位**（`:467-507`，注册 :737-739；
+ *   旧注「原版是逻辑与或」系把 `&&`/`||` 的 AndIntInt/OrIntInt `:375-410` 误配单字符——
+ *   单 `&`/`|` 的词法映射是 BitAnd/BitOr，LexicalAnalyzer.cs:479-491），
+ *   `&&`/`||`/`^^`/`!&`/`!|` 才是逻辑（`:375-465`，注册 :732-736）。
+ *   4.981 随附原版引擎（1824+v24+EMv18+EEv56+Skiav16）实测 `#DIM CONST` 初值
+ *   `1 << 1 | 1 << 2` 折 **6**、`0 | 2` 折 **2**、`5 & 3 | 8` 折 **9**、
+ *   `1 << 0 | 1 << 1 | 1 << 2` 折 **7**（emuera.log 取证，2026-11-04）。
  * - VARSIZE `FunctionMethodCreator.cs:3437-3454/:3456-3473`、POWER `:4169/:4172-4190`、
  *   COLOR_FROMNAME `:3814/:3817-3835`、UNICODE `:5697/:5700-5720`。
  * - CONST 标识符自身可折叠：`UserDefinedVariableToken.cs:35`（CanRestructure = isConst），
@@ -75,6 +81,144 @@ class DimFoldTest {
         val spec = parseDim("#DIM CONST 既读面罩 = (1<<K17C_受向妄想数)-1,(1<<K17C_攻向妄想数)-1", true, cfg)
         assertContentEquals(listOf(127L, 127L), spec.defaultsInt!!.toList())
         assertEquals(2, spec.dims[0])
+    }
+
+    // ------------------------------------------------------------------
+    // 1.5 按位层 + 逻辑层（4.981 COMF641 波）：`&`/`|`/`^` 按位、双字符族逻辑
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `COMF641 卡片类型表按位或逐元素折叠`() {
+        // 4.981 语料 COMF641 アビリティカード_カードパラメータ.ERH:226-259 的 33 元素
+        // `#DIM CONST` 初值表缩微：元素文本逐条对齐原文（IDX 常量名换成同值字面映射），
+        // 期望值 = 按位折叠（原版引擎对同式实测 6/2/9/7，见文件头）。
+        // 改动前该表每个含 `|` 的元素都在 reduceInt 报「尺寸/初值表达式有多余内容」，
+        // 整条变量未注册，运行期 GETBIT 处抛 CodeEE「未定义的变量」。
+        val cfg = DimParseConfig(
+            systemSaveInBinary = true,
+            intConstants = mapOf(
+                "COM641_AC_カードIDX_ステータス補助" to 0L,
+                "COM641_AC_カードIDX_戦闘補助" to 1L,
+                "COM641_AC_カードIDX_技能補助" to 2L,
+                "COM641_AC_カードIDX_うふふ補助" to 3L,
+                "COM641_AC_カードIDX_特殊効果" to 10L,
+            ),
+        )
+        val spec = parseDim(
+            "#DIM CONST COM641_AC_カードタイプ付与BIT配列 = " + listOf(
+                "1 << COM641_AC_カードIDX_特殊効果",
+                "1 << COM641_AC_カードIDX_戦闘補助 | 1 << COM641_AC_カードIDX_技能補助",
+                "1 << COM641_AC_カードIDX_戦闘補助 | 1 << COM641_AC_カードIDX_技能補助",
+                "1 << COM641_AC_カードIDX_ステータス補助 | 1 << COM641_AC_カードIDX_戦闘補助 | 1 << COM641_AC_カードIDX_技能補助",
+                "1 << COM641_AC_カードIDX_ステータス補助 | 1 << COM641_AC_カードIDX_戦闘補助 | 1 << COM641_AC_カードIDX_技能補助",
+                "1 << COM641_AC_カードIDX_ステータス補助",
+                "1 << COM641_AC_カードIDX_ステータス補助",
+                "1 << COM641_AC_カードIDX_戦闘補助",
+                "1 << COM641_AC_カードIDX_戦闘補助",
+                "1 << COM641_AC_カードIDX_ステータス補助",
+                "1 << COM641_AC_カードIDX_ステータス補助",
+                "1 << COM641_AC_カードIDX_ステータス補助",
+                "1 << COM641_AC_カードIDX_ステータス補助",
+                "1 << COM641_AC_カードIDX_ステータス補助",
+                "1 << COM641_AC_カードIDX_ステータス補助",
+                "1 << COM641_AC_カードIDX_ステータス補助",
+                "1 << COM641_AC_カードIDX_戦闘補助",
+                "1 << COM641_AC_カードIDX_戦闘補助",
+                "1 << COM641_AC_カードIDX_戦闘補助",
+                "1 << COM641_AC_カードIDX_ステータス補助",
+                "1 << COM641_AC_カードIDX_ステータス補助",
+                "1 << COM641_AC_カードIDX_戦闘補助",
+                "1 << COM641_AC_カードIDX_戦闘補助",
+                "1 << COM641_AC_カードIDX_技能補助",
+                "1 << COM641_AC_カードIDX_ステータス補助 | 1 << COM641_AC_カードIDX_特殊効果",
+                "1 << COM641_AC_カードIDX_技能補助",
+                "1 << COM641_AC_カードIDX_戦闘補助",
+                "1 << COM641_AC_カードIDX_戦闘補助 | 1 << COM641_AC_カードIDX_技能補助",
+                "1 << COM641_AC_カードIDX_戦闘補助 | 1 << COM641_AC_カードIDX_技能補助",
+                "1 << COM641_AC_カードIDX_戦闘補助 | 1 << COM641_AC_カードIDX_うふふ補助",
+                "1 << COM641_AC_カードIDX_戦闘補助",
+                "1 << COM641_AC_カードIDX_戦闘補助 | 1 << COM641_AC_カードIDX_技能補助",
+                "1 << COM641_AC_カードIDX_ステータス補助 | 1 << COM641_AC_カードIDX_技能補助",
+            ).joinToString(", "),
+            false,
+            cfg,
+        )
+        assertContentEquals(
+            listOf(
+                1024L, 6L, 6L, 7L, 7L, 1L, 1L, 2L, 2L, 1L, 1L, 1L, 1L, 1L, 1L, 1L,
+                2L, 2L, 2L, 1L, 1L, 2L, 2L, 4L, 1025L, 4L, 2L, 6L, 6L, 10L, 2L, 6L, 5L,
+            ),
+            spec.defaultsInt!!.toList(),
+        )
+        assertEquals(33, spec.dims[0])
+    }
+
+    @Test
+    fun `按位与或异或同层左结合`() {
+        // 同层（优先级字节 80）左结合，与 C 的 `&` > `^` > `|` 三层不同：
+        // `2 | 4 & 5` 折成 (2|4)&5 = 4（C 原生会是 2|(4&5)=6 —— 不许照 C 抄）。
+        assertEquals(4L, parseDim("#DIM CONST TRI = 2 | 4 & 5", false, DimParseConfig()).defaultsInt!![0])
+        // 以下 3 条 = 原版引擎实测读数（emuera.log 取证，2026-11-04）。
+        assertEquals(9L, parseDim("#DIM CONST TRI = 5 & 3 | 8", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(0L, parseDim("#DIM CONST TRI = 1 & 2", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(2L, parseDim("#DIM CONST TRI = 0 | 2", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(8L, parseDim("#DIM CONST TRI = 12 & 10", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(6L, parseDim("#DIM CONST TRI = 12 ^ 10", false, DimParseConfig()).defaultsInt!![0])
+        // 位移(112)比按位(80)紧：`12 & 5 << 1` = 12 & (5<<1) = 8；括号内回到最松层。
+        assertEquals(8L, parseDim("#DIM CONST TRI = 12 & 5 << 1", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(24L, parseDim("#DIM CONST TRI = (1 | 2) << 3", false, DimParseConfig()).defaultsInt!![0])
+        // 负数照常按位（BitAndIntInt/BitOrIntInt 直接 & / |，非「非零即真」）。
+        assertEquals(-2L, parseDim("#DIM CONST TRI = -2 & -1", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(-1L, parseDim("#DIM CONST TRI = -2 | -1", false, DimParseConfig()).defaultsInt!![0])
+    }
+
+    @Test
+    fun `按位与或异或折叠成具体值`() {
+        // 并入自并行会话同缺陷修复波（2026-11-04 合流冲突归一）：一元 `~` 与两元素形态钉桩。
+        // 4.981 fork 的 BitAnd/BitOr/BitXor：优先级字节都是 80（spec: OperatorCode.cs:6/:29-31），
+        // 低于位移 112 ⇒ `1<<2|1<<3` = 4|8 = 12；三者同档、左结合 ⇒ `7^3&1` = (7^3)&1 = 0。
+        assertEquals(12L, parseDim("#DIM CONST TRI = 1<<2|1<<3", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(0L, parseDim("#DIM CONST TRI = 7^3&1", false, DimParseConfig()).defaultsInt!![0])
+        // 一元 `~`（BitNot 带 __UNARY__ 标记，spec: OperatorCode.cs:7/:33）：`~5 & 3` = (-6) & 3 = 2。
+        assertEquals(2L, parseDim("#DIM CONST TRI = ~5&3", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(-1L, parseDim("#DIM CONST TRI = ~0", false, DimParseConfig()).defaultsInt!![0])
+        // 括号把优先级整体抬回入口：`1 << (1|2)` = 8。
+        assertEquals(8L, parseDim("#DIM CONST TRI = 1<<(1|2)", false, DimParseConfig()).defaultsInt!![0])
+        // 语料实况形态（COMF641 アビリティカード_カードパラメータ.ERH:226）：多值 + `<<` + `|`。
+        val spec = parseDim("#DIM CONST TRI = 1<<2|1<<3, 1<<0|1<<1", false, DimParseConfig())
+        assertContentEquals(listOf(12L, 3L), spec.defaultsInt!!.toList())
+        assertEquals(2, spec.dims[0])
+    }
+
+    @Test
+    fun `逻辑与或非层返回0或1`() {
+        // 双字符族 = 逻辑层（优先级 64）：非 0 判真、结果只取 0/1
+        // （OperatorMethodManager.cs:375-391 And / :393-409 Or / :411-429 Xor /
+        // :431-447 Nand / :449-465 Nor，注册 :732-736）。判值式与 Expr.kt 二元求值同式。
+        assertEquals(1L, parseDim("#DIM CONST TRI = 2 && 3", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(0L, parseDim("#DIM CONST TRI = 0 && 3", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(1L, parseDim("#DIM CONST TRI = 0 || 5", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(0L, parseDim("#DIM CONST TRI = 0 || 0", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(1L, parseDim("#DIM CONST TRI = 2 ^^ 0", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(0L, parseDim("#DIM CONST TRI = 2 ^^ 3", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(1L, parseDim("#DIM CONST TRI = 0 !& 9", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(0L, parseDim("#DIM CONST TRI = 2 !& 9", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(1L, parseDim("#DIM CONST TRI = 0 !| 0", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(0L, parseDim("#DIM CONST TRI = 2 !| 0", false, DimParseConfig()).defaultsInt!![0])
+        // 分层锁定：`|`(80) 比 `&&`(64) 紧 ⇒ `0 && 1 | 2` = 0 && (1|2) = 0；
+        // COMF641 主形态 `1 << 1 | 1 << 2` = 6（逻辑或会得 1，位移先折同见原版引擎实测）。
+        assertEquals(0L, parseDim("#DIM CONST TRI = 0 && 1 | 2", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(1L, parseDim("#DIM CONST TRI = 3 && 0 | 2", false, DimParseConfig()).defaultsInt!![0])
+        assertEquals(6L, parseDim("#DIM CONST TRI = 1 << 1 | 1 << 2", false, DimParseConfig()).defaultsInt!![0])
+    }
+
+    @Test
+    fun `单感叹号不进折叠面保持旧失败方向`() {
+        // `!`（Not 一元）不在折叠面也不进 SYMS：`!FOO` 仍按 Word 整体进 constInt，
+        // 报「不能求值为整数常量」（与改动前同文案）；`!&`/`!|` 双字符才算逻辑层
+        // （spec: LexicalAnalyzer.cs:440-452 `!` 分支，双字符支 Nand/Nor、单字符 Not 未接）。
+        val e = assertFailsWith<CodeEE> { parseDim("#DIM CONST TRI = !FOO", false, DimParseConfig()) }
+        assertTrue((e.message ?: "").contains("!FOO"), "应保留 !FOO 的旧失败文案：${e.message}")
     }
 
     @Test
@@ -168,7 +312,10 @@ class DimFoldTest {
         // 未知名折 -1（:3832，grey 系拼写框架不认——ColorNames 口径）。
         assertEquals(-1L, parseDim("#DIM CONST TRI = COLOR_FROMNAME(\"dimgrey\")", false, cfg).defaultsInt!![0])
         val tr = assertFailsWith<CodeEE> { parseDim("#DIM CONST TRI = COLOR_FROMNAME(\"transparent\")", false, cfg) }
-        assertTrue((tr.message ?: "").contains("transparent"))
+        // 官方逐字（`Error.TransparentUnsupported`，Lang.cs:1982 / zhs 表 :450；errtext6 波把本支
+        // 原来是**自造串**（还把 C# 行号带上屏）换成官方串）。旧 pin 断言 message 含小写
+        // "transparent" —— 那是把自造串当正确行为钉死，随本波按官方原文改写。
+        assertEquals("不能将透明(Transparent)指定为颜色", tr.message, "TRANSPARENT 支必须抛官方逐字串")
     }
 
     @Test

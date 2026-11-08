@@ -1,0 +1,13 @@
+# WAITANYKEY：AnyKey 形态（ReadAnyKey(anykey: true)）。本移植的队列模型里
+# 任意键同样是一条文本提交，推进后不写 RESULT/RESULTS。
+case: wait_anykey
+target: REPLAY_WAIT_ANYKEY
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:786-798
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:876-895
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1119-1287
+--- inputs
+submit
+--- expect-console
+START-WAIT-ANYKEY
+AFTER-WAITANYKEY
+END-WAIT-ANYKEY

@@ -6,6 +6,7 @@ import com.eratw.port.core.xml.XmlParser
 import com.eratw.port.core.xml.XmlPath
 import com.eratw.port.core.xml.XmlProcessingInstruction
 import com.eratw.port.core.xml.XmlText
+import com.eratw.port.core.xml.XmlWhitespace
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -140,13 +141,20 @@ class VarsXmlAudit2Test {
      * `PreserveWhitespace=false` 只作用于 `LoadXml` 的文档级空白；给 `InnerXml` 赋值走的是
      * 片段解析，纯空白文本节点照样建。dotnet 8.0.421 实测：
      * `e.InnerXml = "  "` → `<r>  </r>`；`e.InnerXml = ""` → `<r />`（不建空文本节点）。
+     * XML-FIVE X4（dotnet 8.0.425 复探）补节点类型：纯空白片段建的是 **XmlWhitespace**
+     * （Name = `#whitespace`），混合片段的非空白文本才是 XmlText；旧断言钉成 XmlText，
+     * 随翻案修正。
      */
     @Test
     fun `片段保留纯空白文本而文档级空白仍丢弃`() {
         val frag = XmlParser.parseFragment("  ")
         assertEquals(1, frag.size)
-        assertTrue(frag[0] is XmlText)
+        assertTrue(frag[0] is XmlWhitespace)
+        assertEquals("#whitespace", frag[0].name)
         assertEquals("  ", frag[0].value)
+        val mixed = XmlParser.parseFragment(" a ")
+        assertEquals(1, mixed.size)
+        assertTrue(mixed[0] is XmlText, "混合片段的非空白文本仍是 #text")
         assertTrue(XmlParser.parseFragment("").isEmpty(), "空片段不建文本节点")
 
         val doc = XmlParser.parse("<r> <a/> </r>")

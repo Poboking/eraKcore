@@ -71,16 +71,6 @@ enum class ConfigApplyMode {
          *   * `MaxShopItem` —— `core/proc/ShopHostModel.kt:47` 的 `maxShopItem()` 每次商店输入
          *     现读（`GameSession.kt:400` 把同一份条目表交给 `StoreShopHostModel`；
          *     原版 `Config.MaxShopItem` 在 `Config.cs:205`，`_Replace.csv` 灌入见 `Config.cs:719-741`）；
-         *   * `FontSize` / `WindowX` —— 字号与窗口宽，运行期现读点是 HTML 折行宽度：
-         *     `core/fn/HtmlMethods.kt:563` 每次 `HTML_PRINT` 都跑
-         *     `EffectiveConfig.of(store).drawableWidth`，而 `drawableWidth = WindowX - max(2, FontSize/6)`
-         *     （`EffectiveConfig.recompute`，spec: `Config.cs:461-466`）。
-         *     控制台**不消费**这两项（`GameSession.kt:270-281` 只喂 `fontName` / `maxLines` /
-         *     `printCWidth` / `buttonWrap`，宽度由 app 侧画布给），所以没有烘死点；
-         *     TODO(verify)：字号对正文渲染的影响由 app 侧 `UiPrefs.fontColumns` 决定（不走本表），
-         *     本项热更只覆盖 HTML 布局宽度与夹取提示，渲染层接线后重判；
-         *   * `LineHeight` / `WindowY` —— 纯读键：移植侧除注册外没有任何消费点（控制台不吃行高，
-         *     窗口高度由 app 侧画布给），改它只需让 [EffectiveConfig] 的派生字段重算；
          *   * `SkipFrame` —— 跳过类（ERB 侧 `MESSKIP` / `ISSKIP` 家族读的是每 VM 的
          *     `skipState` 槽，不是配置，见 `core/fn/InputMethods.kt:59-69`）。`SkipFrame` 本身
          *     在移植侧只有注册（`ConfigSpec.kt:130`）没有任何消费点，改它不牵动已装配结构；
@@ -89,7 +79,14 @@ enum class ConfigApplyMode {
          *     移植侧剪贴板面尚未接线，按原版口径登记为热更。
          *     TODO(verify)：`CBUseClipboard` 一族接线后补一条同会话读数对拍。
          *
-         * **有现读点却被判 [RESTART] 的三个反例**（同时有烘死点，按「不假称热更」判）：
+         * **有现读点却被判 [RESTART] 的反例**（同时有烘死点，按「不假称热更」判）：
+         *   * `FontSize` / `LineHeight` —— 2026-11-03 单源版面重构后**由装配层烘死**：
+         *     `GameHost.applyBootFontMetrics` 在会话构造前把生效字号/行高灌进
+         *     `CanvasConsoleView` 与 `ConsoleFeed`（字号与行高是版面解算的**输入**，
+         *     列数/行数是**输出**，见 `ScreenLayout.resolve`）。运行期没有任何现读点；
+         *     若仍判热更，`HTML_PRINT` 的折行宽（`drawableWidth` 含 `FontSize/6`）会变
+         *     而屏上字形不变，且「保存并重启」被 `hotOnly` 短路成不重启
+         *     ⇒ 玩家看到「设置了也无效」。
          *   * `FontName` —— GDRAWTEXT 现读（`core/fn/GraphicsMethods.kt:1761` 的 `configFontName`，
          *     原版 `FunctionMethodCreator.cs:6522`），但控制台默认字体是构造参数
          *     （`GameSession.kt:281` → `core/host/LineBufferConsoleSink.kt:110` 的 `defaultFontName`）
@@ -104,6 +101,21 @@ enum class ConfigApplyMode {
          *     （`GameSession.kt:300` → `core/vars/VariableStore.kt:1412`）。
          *
          * 表外典型重启键（判据反例，防误迁）：
+         *   * `WindowX` / `WindowY` —— 生效面是核心折行宽（`EffectiveConfig.drawableWidth`
+         *     = `WindowX - max(2, FontSize/6)`，`Config.cs:461-466`）与 `WindowY` 派生的
+         *     可见行数；两者都在会话装配期烘进条目表（`GameSession.configStore` 走
+         *     `applyChainTo`，运行期不再现读盘），故判 [RESTART]。
+         *     **但 Android 上它们不是版面的输入**（2026-11-08 玩家回归根修）：
+         *     原版 `Config.WindowX` 是主窗口客户区宽的**回填值**（`MainWindow.cs:726`），
+         *     Android 没有可调整大小的窗口，客户区宽由屏幕决定；
+         *     `GameHost.applyBootFontMetrics` 因此**有意不**把 `effective.windowX` 交给
+         *     `applySourceWindowMetrics`（传 0 = 未接线 ⇒ 满宽解算），只保留反向的
+         *     `View.windowWidthScriptPx()` → `seedHostState` 播种链。
+         *     0.2.43 曾把配置宽灌回 View，旧盘上该键回落到引擎缺省 760 时把列数压到 80，
+         *     `DEBUG.ERB:582` 的 `MAXWIDTH()/90` 除零（详见 `GameHost` 的 KDoc 与
+         *     `render/view/ScreenLayoutWindowNarrowingRegressTest`）。
+         *     所以：「设置页改窗口宽」仍要重启才吃到（核心那把尺变了），
+         *     但**不会再改变屏上版面宽/列数** —— 这两件事不要混成一句「热更」。
          *   * `PrintCPerLine` / `PrintCLength` / `MaxLog` / `ButtonWrap` —— 烘进控制台与语句层
          *     （`GameSession.kt:270-281`、`:420-422`）；
          *   * `SaveDataNos` / `SystemSaveInBinary` / `ZipSaveData` / `UseSaveFolder` —— 烘进存档层
@@ -113,10 +125,6 @@ enum class ConfigApplyMode {
          */
         val HOT_KEYS: Set<ConfigKey> = setOf(
             ConfigKey.MaxShopItem,
-            ConfigKey.FontSize,
-            ConfigKey.LineHeight,
-            ConfigKey.WindowX,
-            ConfigKey.WindowY,
             ConfigKey.SkipFrame,
             ConfigKey.CBMaxCB,
             ConfigKey.CBScrollCount,
@@ -127,7 +135,8 @@ enum class ConfigApplyMode {
         fun of(key: ConfigKey): ConfigApplyMode = if (key in HOT_KEYS) HOT else RESTART
 
         /**
-         * 把一组改动键按作用域分成两桶，**保持输入顺序**（调用方传注册顺序即得注册顺序）。
+         * 把一组改动键按作用域分成两桶，**保持输入顺序**（调用方传条目表顺序即得表顺序，
+         * 见 [SettingsModel.changedKeys]）。
          * 空输入返回两个空桶 —— 「没改任何键」与「改了但都需重启」由 [SettingsSaveImpact] 区分。
          */
         fun split(keys: Collection<ConfigKey>): SettingsSaveImpact {
@@ -144,8 +153,8 @@ enum class ConfigApplyMode {
 /**
  * 一次保存的**影响面** —— 设置页拿它决定「写盘后原地刷新」还是「写盘 + 重开会话」。
  *
- * 两桶都保持注册顺序（[ConfigStore.items] 的顺序，spec: `ConfigData.cs:45-174`），
- * 便于界面按原版设置页的页序提示。
+ * 两桶都保持条目表顺序（[ConfigStore.items] 的顺序 = [ConfigSpecTable.all] 的拼接序
+ * GAME→REPLACE→DEBUG，见 [SettingsModel.entries] 的 KDoc），便于界面按登记表同序展示。
  *
  * @property hot 可以热更的键（[ConfigApplyMode.HOT]）
  * @property restart 必须重开会话的键（[ConfigApplyMode.RESTART]）
@@ -384,8 +393,14 @@ class SettingsModel(val store: ConfigStore = ConfigStore()) {
     // -----------------------------------------------------------------
 
     /**
-     * 全表视图，顺序 = [ConfigStore.items] 的注册顺序（`configArray` → `replaceArray` → `debugArray`，
-     * spec: `ConfigData.cs:45-174`；与 [ConfigSpecTable.all] 同序）。
+     * 全表视图，顺序 = [ConfigStore.items] 的顺序 = [ConfigSpecTable.all] 的拼接顺序：
+     * **`GAME`(100) → `REPLACE`(16) → `DEBUG`(7)**。
+     *
+     * 这条平坦序**不是** C# `setDefault()` 的注册序 —— 注册序里 debug 在 replace 之前
+     * （spec: `ConfigData.cs:45-151`（config）→ `:152-158`（debug）→ `:159-174`（replace））；
+     * 本表故意按 `ConfigData.GetItem(string)` 的三级查找序拼接（spec: `ConfigData.cs:236-248`，
+     * 裁决见 `ConfigSpec.kt` 里 `ConfigSpecTable.all` 的 KDoc，钉在 `ConfigKeyAuditTest` 的顺序用例）。
+     * 组内顺序 = C# 注册行升序（`all` 每行尾的 `// :NN`）。分组视图才按注册序出组，见 [groups]。
      *
      * 每次访问现算（123 条共用一次 `EffectiveConfig` 计算）；调用方在同一帧里要多次读时自行缓存。
      */
@@ -396,8 +411,10 @@ class SettingsModel(val store: ConfigStore = ConfigStore()) {
         }
 
     /**
-     * 分组视图，顺序 = `setDefault()` 的注册顺序 `configArray` → `debugArray` → `replaceArray`
-     * （spec: `ConfigData.cs:45-51`、`:152-158`、`:159-174`）。
+     * 分组视图，**组间**顺序 = `setDefault()` 的注册顺序 configArray → debugArray → replaceArray
+     * （spec: `ConfigData.cs:45-151`、`:152-158`、`:159-174`）；
+     * **组内**顺序 = [ConfigStore.items] 的组内过滤序（= 各组在 [ConfigSpecTable.all] 里的拼接段，
+     * 与 [entries] 的组内同序，即 C# 注册行升序）。
      */
     val groups: List<SettingsGroupView>
         get() {
@@ -617,7 +634,8 @@ class SettingsModel(val store: ConfigStore = ConfigStore()) {
     // -----------------------------------------------------------------
 
     /**
-     * 相对 [markClean] 基线**改过的键**，按注册顺序（[ConfigStore.items] 的顺序）。
+     * 相对 [markClean] 基线**改过的键**，按条目表顺序（[ConfigStore.items] 的顺序，
+     * = [ConfigSpecTable.all] 的拼接序，见 [entries] 的 KDoc）。
      *
      * 判据是值不等（与 [dirty] 同一口径），不比 `Fixed` 位 —— 钉位来自 `fixed.config`，
      * 本模型没有改它的入口。
@@ -644,6 +662,21 @@ class SettingsModel(val store: ConfigStore = ConfigStore()) {
      *
      * 非热更键**跳过**（不写一半），由调用方走重启。被 `fixed.config` 钉住的条目
      * 也跳过（[EffectiveConfig.reloadHot] 返回 [ConfigReloadResult.Fixed]）。
+     *
+     * ## 投递纪律（W9 裁定，2026-11-01）
+     * 写入发生在**调用方线程**（现网唯一接线点是设置页保存 ⇒ UI 线程，
+     * 通道与兜底口径见 app 侧 `GameHost.kt` 的 `HotConfigChannel`）。发布形态是
+     * **单条目 volatile 发布**，不是换代发布：每键一次 [ConfigItem.assign]，
+     * 可见性地基是 `ConfigItem.value/fixed` 的 `@Volatile` + [ConfigValue] 全不可变
+     * （挖虫波二 b6f58a37 补齐，此前「非 volatile」的报法已失效）。
+     * 一批键的写入**非原子** —— VM 线程中途读数可能见到「前几个键新、后几个键旧」的混合帧；
+     * 允许的判据是 [ConfigApplyMode.HOT_KEYS] 逐键申请制：表内每键的消费点都逐次现读
+     * 单键条目、没有跨键不变量，派生量（`drawableWidth` 这类）在下一次现读时自然配平。
+     * 写写竞争不存在：会话装配完成后 VM 线程对 [target] 只读（条目表的装载写发生在
+     * `GameSession` 装配期，装配完才经 `GameHost.session` 的 volatile 发布给通道）。
+     * 通道未接线 / 没有在跑的会话时 push 空转，热更键整体退化为「写盘 + 下次进入游戏生效」
+     * —— 与原版「保存只落盘」同型（spec: `ConfigDialog.cs:665-668`；原版活推先例
+     * `ConfigDialog.cs:1107-1109` 推的是静态单例上的三个 setter，等价本函数的单键发布）。
      *
      * @return 实际落地的键，顺序同 [changedKeys]
      */
@@ -799,6 +832,12 @@ class SettingsModel(val store: ConfigStore = ConfigStore()) {
             }
 
             ConfigValueType.LONG_LIST -> {
+                // 空串照原版在解析前直接拒（spec: ConfigItem.cs:92-95 `if (text.Length == 0) return false`），
+                // 拒绝理由与同族 STRING_LIST / ReplaceContinuationBR 一致取 EMPTY_TEXT；
+                // 旧实现把空串喂进 split('/') 得到 [""]，报成 INVALID_TEXT（理由错位、值两侧行为相同）。
+                if (text.isEmpty()) {
+                    return ParseOutcome.fail(SettingsRejectReason.EMPTY_TEXT, EMPTY_TEXT_MESSAGE)
+                }
                 val values = ArrayList<Long>()
                 for (token in text.split('/')) {
                     values += parseLongStrictly(token.trim())
@@ -856,7 +895,11 @@ class SettingsModel(val store: ConfigStore = ConfigStore()) {
 
     companion object {
 
-        /** `setDefault()` 的注册顺序：`configArray` → `debugArray` → `replaceArray`（spec: `ConfigData.cs:45-174`）。 */
+        /**
+         * `setDefault()` 的注册顺序：`configArray` → `debugArray` → `replaceArray`
+         * （spec: `ConfigData.cs:45-174`）。只用于 [groups] 的组间序；
+         * 平坦全表 [entries] 走的是 [ConfigSpecTable.all] 拼接序（GAME→REPLACE→DEBUG），两者不同。
+         */
         private val GROUP_ORDER = listOf(ConfigGroup.GAME, ConfigGroup.DEBUG, ConfigGroup.REPLACE)
 
         /** 稳定 id → 规格。只读表，构造期建一次（`ConfigKey.name` 与 `AConfigItem.Name` 同源，spec: `AConfigItem.cs:21`）。 */

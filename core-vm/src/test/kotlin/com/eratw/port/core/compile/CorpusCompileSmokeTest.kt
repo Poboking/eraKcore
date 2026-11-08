@@ -60,12 +60,31 @@ class CorpusCompileSmokeTest {
         // 子集运行（设了 ERATW_LIMIT）时 prescan 符号表不完整，解析失败属伪影，只判编译失败；
         // 判闸以 :core-vm:corpusSmoke 全量（FULL）为准。
         val subset = System.getenv("ERATW_LIMIT")?.toIntOrNull() != null
+        // 退化语料档（第三方口上整合包）：允许**已证明「原版也拒」**的残值，但 GAP（原版接受
+        // 我们仍拒）与未归类照旧红。典型输入 = 4.981 自带的某个第三方口上引用了 4.981
+        // `CSV/_Rename.csv` 里已删掉的 rename 键 ⇒ 原版 `LexicalAnalyzer.cs:808-826` 同样装载失败。
+        // **基线 4.980 不开这个档**：它的 0/0 判闸保持不变。
+        val allowOriginalRejects = System.getenv("ERATW_ALLOW_ORIGINAL_REJECTS") == "1"
         if (!subset) {
-            // 契约 R8：parseFailures 与 parseFailureLines 双双入闸（基线 0/0）
-            assertTrue(
-                r.parseFailures == 0 && r.parseFailureLines == 0,
-                "解析失败切片 ${r.parseFailures}（${r.parseFailureLines} 行，基线 0/0），归因见 $abs/summary.md §7、§8",
-            )
+            if (allowOriginalRejects) {
+                val gaps = r.parseGroups.values.filter {
+                    it.verdict == CorpusCompileValidator.VERDICT_GAP ||
+                        it.verdict == CorpusCompileValidator.VERDICT_UNCLASSIFIED
+                }
+                assertTrue(
+                    gaps.isEmpty(),
+                    "退化语料档只允许「原版也拒」的残值，出现 GAP/未归类：${
+                        gaps.joinToString("; ") { "${it.signature} ×${it.lines}" }
+                    }（归因见 $abs/summary.md §7）",
+                )
+            } else {
+                // 契约 R8：parseFailures 与 parseFailureLines 双双入闸（基线 0/0）
+                assertTrue(
+                    r.parseFailures == 0 && r.parseFailureLines == 0,
+                    "解析失败切片 ${r.parseFailures}（${r.parseFailureLines} 行，基线 0/0），归因见 $abs/summary.md §7、§8；" +
+                        "第三方整合包语料可设 ERATW_ALLOW_ORIGINAL_REJECTS=1 走退化档（只放行「原版也拒」）",
+                )
+            }
         }
         assertTrue(
             r.failures.isEmpty(),

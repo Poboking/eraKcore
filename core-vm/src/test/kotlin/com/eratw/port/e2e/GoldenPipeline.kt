@@ -2,6 +2,7 @@ package com.eratw.port.e2e
 
 import com.erbcc.bridge.buildExprCallTable
 import com.erbcc.bridge.buildFuncDims
+import com.erbcc.bridge.sizeConsts
 import com.erbcc.bridge.toLocalDim
 import java.time.ZoneId
 import com.eratw.port.core.compile.CallDefaultsCollector
@@ -25,8 +26,10 @@ import com.eratw.port.core.fn.SkipState
 import com.eratw.port.core.fn.UserFunctionKind
 import com.eratw.port.core.host.FileOps
 import com.eratw.port.core.host.GraphicsSink
+import com.eratw.port.core.host.InputSink
 import com.eratw.port.core.host.LineBufferConsoleSink
 import com.eratw.port.core.host.NoopGraphicsSink
+import com.eratw.port.core.host.NoopInputSink
 import com.eratw.port.core.host.seedGoldenRuntimeSprites
 import com.eratw.port.core.lexer.LexError
 import com.eratw.port.core.lexer.LexerConfig
@@ -63,7 +66,7 @@ import com.eratw.port.core.code.Opcode
 import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.VmConfig
 import com.eratw.port.erbcc.LabelDef
-import com.eratw.port.erbcc.SymbolTable
+import com.eratw.port.erbcc.LabelTable
 import com.eratw.port.erbcc.Symbols
 import java.nio.file.Files
 import java.nio.file.Path
@@ -119,6 +122,16 @@ object GoldenPipeline {
      *
      * 仓库根 = 本测试 JVM 的 cwd（模块目录 `core-vm/`）上两级。判据统一为「存在 CSV 子目录」，
      * 这样 CI/无游戏数据的环境会自然落到无数据分支（装置按 4 裸角色跑）。
+     *
+     * 4.981 语料切换（2026-11-01，lane-golden）对 pc-golden-root.txt 的三处重落归因——
+     * 来源均为 (b) 运行期从语料读入（TODO(verify)：PC 4.981 金基准未跑，待对拍）：
+     * - :427 `Ｃ感觉LV5 技巧LV2 `（4.980 基准 `Ｃ感覚LV5 …`）← 4.981 CSV/Abl.csv:2
+     *   `0,Ｃ感觉`（4.980 同位为 `Ｃ感覚`），经语料 PRINT_ABL 打印（GOLDEN_04_CHARA.ERB:58）；
+     * - :428 `[性别]`（4.980 基准 `[性別]`）← 4.981 CSV/Talent.csv:4 `2,性别`
+     *   （4.980 同位为 `性別`），经语料 PRINT_TALENT（GOLDEN_04_CHARA.ERB:59）；
+     * - :544 `ENUMVARENDSWITH=92` ← 游戏 ERH 顶层 DIM 名 +9，逐名清单见
+     *   [buildEnumVarNameTable] KDoc。
+     * 除上述三行外 610 行判据与 4.980 基准逐行一致（GoldenNormalizer 口径实测差集仅此三行）。
      */
     fun gameCsvDir(): Path {
         val env = System.getenv("ERATW_GAMEDIR")
@@ -126,7 +139,6 @@ object GoldenPipeline {
         val repoRoot = Path.of("").toAbsolutePath().normalize().parent?.parent
         val candidates = buildList {
             if (repoRoot != null) add(repoRoot.resolve(GAME_DIR_NAME))
-            add(Path.of("C:/DSH/eratw-安卓移植计划", GAME_DIR_NAME))
         }
         return (candidates.firstOrNull { Files.isDirectory(it.resolve("CSV")) } ?: candidates.first()).resolve("CSV")
     }
@@ -184,9 +196,27 @@ object GoldenPipeline {
      *    的文件级 `#DIMS CONST DISP_NAME` 未计入）。
      *
      * 对拍（fixture `ENUMVARENDSWITH("NAME")`，GOLDEN_10_XMLMAP.ERB:46）：
-     * 31 系统 + 52 游戏 ERH = 83（pc-golden-root.txt:544）；同节
-     * ENUMVARBEGINSWITH("RESULT")=2 / ENUMVARWITH("LOCAL")=2（:543/:545）只由系统
-     * RESULT(S)/LOCAL(S) 贡献——游戏名经 [loadGameErhVarNames] 的坏符号口径后零碰撞。
+     * 31 系统 + 61 游戏 ERH = 92（pc-golden-root.txt:544，2026-11-01 随 4.981 语料切换重落，
+     * TODO(verify)：PC 4.981 金基准未跑，待对拍）；同节
+     * ENUMVARBEGINSWITH("RESULT")=3 / ENUMVARWITH("LOCAL")=3（:543/:545）由系统
+     * RESULT(S)/RESULTF 与 LOCAL(S)/LOCALF 贡献——游戏名经 [loadGameErhVarNames] 的坏符号口径后零碰撞。
+     *
+     * 基准文件是 1.824 口径（无浮点）的 2/2。F 族把 RESULTF/LOCALF 登记为系统变量后
+     * （fork `VariableCode.cs:99-124`、`IdentifierDictionary.cs:164` 的全量克隆），
+     * 4.981 引擎的 VarKeys 必然多出这两名 ⇒ 2026-11-01 随 4.981 升版重落为 3/3；
+     * ENUMVARENDSWITH 的 83→92 差额与浮点无关（浮点名不以 NAME 结尾），全部来自
+     * 4.981 语料 ERH 新增的 9 个 NAME 结尾顶层 #DIM/#DIMS（逐个取证，均在
+     * ERB\ 子树、纯 ASCII+下划线、过 [hasBadIdentifierSymbol]、非关键字、与系统名单零碰撞）：
+     *  1. COL_DISH_NAME    —— 魔改内容/qol/qol_db.ERH:3（#DIM CONST）
+     *  2. COL_MUSHI_NAME   —— 魔改内容/qol/qol_db.ERH:52（#DIM CONST）
+     *  3. COL_WOOD_NAME    —— 魔改内容/qol/qol_db.ERH:42（#DIM CONST）
+     *  4. GRAPH_DB_NAME    —— 魔改内容/qol/qol_graph.ERH:21（#DIMS CONST）
+     *  5. KOJO_ACTIVE_NAME —— 口上・メッセージ関連/KOJO_MESSAGE.ERH:3（#DIMS）
+     *  6. KOJO_PRESET_NAME —— DLC/实用设置补丁/实用设置.ERH:31（#DIMS GLOBAL SAVEDATA）
+     *  7. MHW_CUSTOMROOMNAME —— DLC/MOVINGHOME_WISH/MHW_VARS.ERH:10（#DIMS SAVEDATA）
+     *  8. OBJKEY_NAME      —— Headers/OBJKEY_TAGS.ERH:39（#DIMS CONST）
+     *  9. WEDDING_OFFICIANT_NAME —— fromEN/Addition/Marriage/Add_Marriage.ERH:20（#DIMS SAVEDATA）
+     * （路径相对 4.981 语料 ERB\ 子树；4.980 语料同一口径扫得 52 名，差额恰为上述 9 名。）
      */
     private fun buildEnumVarNameTable(store: VariableStore): List<String> {
         val names = LinkedHashSet<String>()
@@ -242,8 +272,8 @@ object GoldenPipeline {
      *   按行跳过、不注册）。该字符集在反编译源丢失（IdentifierDictionary.cs:40），这里以
      *   「Unicode 标点/符号类、`_` 除外」近似：游戏数据实测命中的是
      *   ERB\Headers\AutoConst_TFLAG.ERH:94-95 两个含全角括号的 TFLAG 名，剔除后
-     *   ENUMVARWITH("LOCAL")=2 与基准（pc-golden-root.txt:545）一致；52 个 NAME 结尾
-     *   命中名均为纯 ASCII+下划线，不受该口径影响。
+     *   ENUMVARWITH("LOCAL")=3 与基准（pc-golden-root.txt:545，4.981 重落）一致；61 个 NAME 结尾
+     *   命中名（4.981；4.980 为 52）均为纯 ASCII+下划线，不受该口径影响。
      * - `;` 注释行剔除的 C# 机制：行首 `;` 在 SkipWhiteSpace 里 Seek(End) 清空整行
      *   （LexicalAnalyzer.cs:662-675），ReadEnabledLine 见空流 continue（EraStreamReader.cs:122-127）；
      *   行尾注释在 Analyse 内同样 `;` → Seek(End) 终止（LexicalAnalyzer.cs:919-933）——
@@ -340,12 +370,12 @@ object GoldenPipeline {
         val notes = ArrayList<String>()
         val root = fixtureDir.toAbsolutePath().normalize()
 
-        // 1) erbcc 符号表（装载序 = SymbolTable.loadOrder；事件桶/重名规则在符号层已定）
-        val symbolTable = SymbolTable.build(root)
+        // 1) erbcc 符号表（装载序 = LabelTable.loadOrder；事件桶/重名规则在符号层已定）
+        val symbolTable = LabelTable.build(root, sizeConsts = ::sizeConsts)
         val allDefs = symbolTable.nameKeys.flatMap { symbolTable.defsOf(it) }.sortedBy { it.defIndex }
 
         // 2) 语句切片（与 corpus 验证器同口径：prescan + 预处理 + LineParser）
-        val files = SymbolTable.loadOrder(root)
+        val files = LabelTable.loadOrder(root)
         val pre = CorpusValidator.prescan(files)
         val methodNames = pre.funcTypes.keys.mapTo(HashSet()) { it.uppercase() }
         // A16 接线：表达式位用户方法调用降级表（#FUNCTION=INT 才降级；#FUNCTIONS/未知保守不降级）。
@@ -532,14 +562,19 @@ object GoldenPipeline {
             paramRefs: List<String> = params,
         ) {
             // A7：#FUNCTIONS（str 方法）的 RETURNF 走 `_RETS` 字符串通道；类型来源 =
-            // prescan 的 #FUNCTION/#FUNCTIONS 声明（LabelDef 本身无 int/str 之辨）。
-            val returnsStr = pre.funcTypes[def?.key?.uppercase() ?: sigKey.uppercase()] == OperandType.STR
+            // prescan 的 #FUNCTION/#FUNCTIONS/#FUNCTIONF 声明（LabelDef 本身无 int/str 之辨）。
+            // 4.981：#FUNCTIONF（浮点方法）的 RETURNF 走 `_RETF`——漏传会把它按 int 通道
+            // 编译/消费（RETURNF 浮点表达式被截断），与 erbcc 桥（CorpusCompile.kt:646）
+            // 及 CorpusCompileValidator.kt:404-406 的口径必须一致（2026-11-02 审查补）。
+            val funcType = pre.funcTypes[def?.key?.uppercase() ?: sigKey.uppercase()]
+            val returnsStr = funcType == OperandType.STR
+            val returnsFloat = funcType == OperandType.FLOAT
             val fb = try {
-                compiler.compileFunction(FuncSig(sigKey, params.size, isMethod, returnsStr, paramRefs), body, known, exprCalls)
+                compiler.compileFunction(FuncSig(sigKey, params.size, isMethod, returnsStr, paramRefs, returnsFloat = returnsFloat), body, known, exprCalls)
             } catch (e: CompileException) {
                 failures.add("$sigKey [${def?.file ?: "?"}:${def?.lineNo ?: "?"}] 编译失败: ${e.message}")
                 runCatching {
-                    compiler.compileFunction(FuncSig(sigKey, params.size, isMethod, returnsStr, paramRefs), emptyList(), known, exprCalls)
+                    compiler.compileFunction(FuncSig(sigKey, params.size, isMethod, returnsStr, paramRefs, returnsFloat = returnsFloat), emptyList(), known, exprCalls)
                 }.getOrElse { err ->
                     failures.add("$sigKey 空体桩编译也失败: ${err.message} —— 该节不可执行")
                     return
@@ -564,7 +599,9 @@ object GoldenPipeline {
                         isOnly = w.def.isOnly, isPri = w.def.isPri, isLater = w.def.isLater, isSingle = w.def.isSingle,
                         argIntCount = argInt, argStrCount = argStr,
                         returnsStr = pre.funcTypes[w.def.key.uppercase()] == OperandType.STR,
+                        returnsFloat = pre.funcTypes[w.def.key.uppercase()] == OperandType.FLOAT,
                         localSize = w.def.localSize, localsSize = w.def.localsSize,
+                        floatLocalSize = w.def.floatLocalSize,
                         defIndex = w.def.defIndex, position = "${w.def.file}:${w.def.lineNo}",
                     )
                 },
@@ -774,6 +811,13 @@ object GoldenPipeline {
          * 的形态，只能由装置直接落字节（SAVETEXT 的白名单只放 txt/xml/json）。
          */
         seedIoRoot: ((Path) -> Unit)? = null,
+        /**
+         * 语句层输入 sink 注入点（[ProcessRuntime] 的 `inputSink`）。缺省 [NoopInputSink] =
+         * 等待立即取默认值，既有 15 节读数逐字节不变；输入轨迹重放装置
+         * （`core-vm/src/test/kotlin/com/eratw/port/e2e/replay/`）显式传生产 `QueueInputSink`，
+         * 让 WAIT/INPUT 家族真的落等待、由投喂线程推进。
+         */
+        inputSink: InputSink = NoopInputSink,
     ): ProcessRuntime {
         // CSV 数据层（目录缺失 → null，其余分节不受影响）
         val gameData = GameDataLoader.load(gameCsvDir())
@@ -862,8 +906,9 @@ object GoldenPipeline {
             override val clientWidth: Long get() = PC_CLIENT_WIDTH
             override val clientHeight: Long get() = PC_CLIENT_HEIGHT
 
-            // ENUMVARENDSWITH("NAME")=83 对拍（pc-golden-root.txt:544；fixture
-            // GOLDEN_10_XMLMAP.ERB:46）：VarKeys = 系统 31 + 游戏 ERH 52。
+            // ENUMVARENDSWITH("NAME")=92 对拍（pc-golden-root.txt:544，4.981 重落；fixture
+            // GOLDEN_10_XMLMAP.ERB:46）：VarKeys = 系统 31 + 游戏 ERH 61（9 名增量清单见
+            // buildEnumVarNameTable KDoc）。
             override val variableNames: Collection<String>? get() = enumVarNameTable
 
             // FUNC-ENUM 家族（EXISTFUNCTION/EXISTMETH/GETMETH/GETMETHS/ENUMFUNC*）：
@@ -971,6 +1016,8 @@ object GoldenPipeline {
             semConfig = SemConfig(printCPerLine = PC_PRINT_C_PER_LINE.toInt()),
             builtinHost = host,
             graphicsSink = graphics,
+            // 缺省 NoopInputSink（见签名 KDoc）：既有 15 节读数逐字节不变。
+            inputSink = inputSink,
             // GOLDEN_RNG 全靠 RANDOMIZE 语句重播种（GOLDEN_05_DATA.ERB:58,69,79），
             // 进程级 provider 用任意固定值保证装置可复现。
             randSeed = E2E_RAND_SEED,

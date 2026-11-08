@@ -1,15 +1,21 @@
 package com.eratw.port.core.expr
 
+import com.eratw.port.core.err.erbDisplayLine
 import com.eratw.port.core.vars.SystemLayout
 
 /**
  * 解析期错误（带行列号）。
+ *
+ * [line] 是**内部 0 基**行下标（键面与 `ExprToken.line` 同源，不许改基）；
+ * 消息串里给人读的那一个按 [erbDisplayLine] 归一到 1 基 —— 与
+ * `stmt/ParseSupport.kt` 的 `StmtParseException`、[com.eratw.port.core.err.CodeEE.displayLine]
+ * 调的是**同一个函数**（全工程只许一处 `+1`；原版模板 `Lang.cs:3334`/`:950` 吃的也是归一后的 1 基值）。
  */
 class ExprParseException(
     val line: Int,
     val col: Int,
     message: String,
-) : RuntimeException("解析错误(行:$line,列:$col): $message")
+) : RuntimeException("解析错误(行:${erbDisplayLine(line)},列:$col): $message")
 
 /** 解析期标识符解析（变量表/函数表在 M2 才有真实实现，测试注入假实现）。 */
 interface IdentifierResolver {
@@ -26,6 +32,23 @@ interface IdentifierResolver {
      * 参数类型检查（CheckArgumentType）仍属 M2 绑定层，本层不做。TODO(verify)
      */
     fun resolveFunction(name: String): OperandType?
+
+    /**
+     * 该函数是否**可能因实参是浮点而返回浮点**（4.981 fork 的 `FunctionMethod.CanReturnFloat`）。
+     *
+     * 原版判据在解析/装载期就定了结论：`FunctionMethodTerm.GetEraType()`
+     * （spec: FunctionMethodTerm.cs:44-56）在 `method.CanReturnFloat` 为真时逐个看实参，
+     * **任一实参 `GetEraType() == Float` 就返回 `EraType.Float`**，否则 Integer
+     * （同一判据另有 `ResolveEraType`，spec: :20-42）。`POWER` 即此形态：
+     * `PowerMethod` 的 `ReturnType = EraType.Integer` 但 `CanReturnFloat = true`
+     * （spec: FunctionMethodCreator.cs:5418-5436），`GetReturnValue` 按
+     * `HasFloatArg(arguments)`（spec: :13434-13444）分流成 `SingleFloatTerm` /
+     * `SingleLongTerm`（spec: :5470-5477）。
+     *
+     * 默认 false = 老口径（返回类型只看 [resolveFunction]）。生产符号层覆写成本表查询
+     * （[com.eratw.port.core.stmt.BuiltinSymbols.canReturnFloat]）。
+     */
+    fun canReturnFloat(name: String): Boolean = false
 
     /**
      * 该名字能否在**裸标识符**位（不带括号）当零参函数引用。
@@ -310,6 +333,7 @@ class ExprParser(
                 ExprTokenKind.EOL -> return end(termStack, num)
                 ExprTokenKind.STR_LITERAL -> termStack.add(StrLiteral(t.text, t.line, t.col))
                 ExprTokenKind.INT_LITERAL -> termStack.add(IntLiteral(t.intValue, t.line, t.col))
+                ExprTokenKind.FLOAT_LITERAL -> termStack.add(FloatLiteral(t.floatValue, t.line, t.col))
                 ExprTokenKind.FORM_STRING -> termStack.add(
                     FormStringTerm.fromLexerStrForm(
                         t.form ?: throw parseErr("FORM_STRING 缺少词法器 StrForm"),
@@ -349,8 +373,13 @@ class ExprParser(
                         throw parseErr("表达式中不允许 '='")
                     }
                     // 连续比较运算符告警。spec: ExpressionParser.cs:556-559
+                    // （官方键 `Lang.Error.ComparisonOpContinuous`，`Lang.cs:1222`；喂给
+                    // `ParserMediator.Warn` 的是 `GlobalStatic.Process.GetScaningLine()`，
+                    // 位置在 `ScriptPosition.cs:15-17` 就已归一成 1 基 ⇒ 屏上行号比内部下标大 1，
+                    // 这里同样只走 [erbDisplayLine] 这一个出口。告警**本体**仍是移植侧既有形：
+                    // 官方两表不同文（reference 表 :260 / 语料根表 :212）⇒ 按组长裁定不动。）
                     if (operatorCode in COMPARISON_OPS && code2 in COMPARISON_OPS) {
-                        warnings.add("(行:${t.line},列:${t.col}) 连续出现比较运算符")
+                        warnings.add("(行:${erbDisplayLine(t.line)},列:${t.col}) 连续出现比较运算符")
                     }
                     termStack.add(code2)
                     operatorCode = code2
@@ -462,7 +491,7 @@ class ExprParser(
             if (resolver?.canBeReferencedBare(idStr) == false) {
                 throw parseErr("用变量的方式使用函数名\"$idStr\"")
             }
-            return FuncCall(idStr, emptyList(), funcType)
+            return FuncCall(idStr, emptyList(), funcType, line = ident.line, col = ident.col)
         }
         if (inVariableArg) {
             // C# 的回落顺序（spec: ExpressionParser.cs:409-443）：
@@ -508,7 +537,7 @@ class ExprParser(
      */
     private fun functionCall(name: String, args: List<Expr?>, line: Int, col: Int): Expr {
         val resolver = this.resolver
-            ?: return FuncCall(name, args, OperandType.INT)
+            ?: return FuncCall(name, args, OperandType.INT, line = line, col = col)
         val type = resolver.resolveFunction(name)
         if (type == null) {
             if (resolver.resolveVariable(name, null) != null) {
@@ -516,7 +545,18 @@ class ExprParser(
             }
             throw ExprParseException(line, col, "未定义的标识符 '$name'")
         }
-        return FuncCall(name, args, type)
+        // `CanReturnFloat`：任一实参静态是浮点 ⇒ 返回浮点（spec: FunctionMethodTerm.cs:44-56）。
+        // 少了这一步，`POWER(0.95, X)` 被钉成 INT，运行期 `iv(FloatV)` 抛
+        // 「函数参数类型错误：需要数值」（2026-11-03 上报端点 SOURCE_DOWNBASE 行625）。
+        val retType =
+            if (type == OperandType.INT && resolver.canReturnFloat(name) &&
+                args.any { it != null && it.operandType == OperandType.FLOAT }
+            ) {
+                OperandType.FLOAT
+            } else {
+                type
+            }
+        return FuncCall(name, args, retType, line = line, col = col)
     }
 
     // ------------------------------------------------------------------
@@ -600,12 +640,15 @@ class ExprParser(
                 var a1 = p1
                 if (a1 == null) {
                     // spec: VariableParser.cs:160-167 —— RAND 省略下标（非 CompatiRAND 兼容模式）
-                    if (!config.compatiRAND && info.name == "RAND") throw parseErr("RAND 不能省略下标")
+                    if (!config.compatiRAND && info.name == "RAND") {
+                        // 文案逐字对齐官方 zhs（emuera-zhs.xml:344 Error.OmittedRandArg）。
+                        throw parseErr("RAND省略了一个参数")
+                    }
                     a1 = IntLiteral(0L)
                 }
-                // spec: VariableParser.cs:168-170 —— RAND:0 报错
+                // spec: VariableParser.cs:168-170 —— RAND:0 报错；文案 = emuera-zhs.xml:345 Error.RandArgIsZero
                 if (!config.compatiRAND && info.name == "RAND" && a1 is IntLiteral && a1.value == 0L) {
-                    throw parseErr("RAND 的参数不能为 0")
+                    throw parseErr("RAND有一个参数为0")
                 }
                 listOf(a1)
             }
@@ -755,7 +798,29 @@ class ExprParser(
 // 归约工厂 —— OperatorMethodManager.ReduceXxxTerm 的移植
 // ---------------------------------------------------------------------------
 
-private fun typeName(t: OperandType) = if (t == OperandType.INT) "数值型" else "字符串型"
+private fun typeName(t: OperandType): String = when (t) {
+    OperandType.INT -> "数值型"
+    OperandType.STR -> "字符串型"
+    OperandType.FLOAT -> "浮点型"
+}
+
+/**
+ * 官方一元文案（fork-src `OperatorMethod.cs:161` / `:189` 的 `string.Format(trerror.CanNotAppliedUnaryOp.Text,
+ * errMes, OperatorManager.ToOperatorString(op))`）。
+ * 模板逐字取 `emuera-zhs.xml:310`：`无法对{0}使用单相运算符"{1}"`（引号是半角，非全角）。
+ * [typeName] 由调用点给：三个真实类型取 [typeName]（与 zhs xml:303-305 的 数值型/字符串型/浮点型 同形），
+ * 后置一元落浮点时按官方缺陷取「未知类型」（见 [reduceUnaryAfterTerm] 的注释）。
+ */
+private fun canNotAppliedUnaryOp(type: String, op: OperatorCode): String =
+    "无法对${type}使用单相运算符\"${OperatorCode.toOperatorString(op)}\""
+
+/**
+ * 官方二元文案（fork-src `OperatorMethod.cs:244` 的 `string.Format(trerror.CanNotAppliedBinaryOp.Text,
+ * typeName1, typeName2, OperatorManager.ToOperatorString(op))`）。
+ * 模板逐字取 `emuera-zhs.xml:311`：`无法对{0}和{1}使用二相运算符"{2}"进行运算`。
+ */
+private fun canNotAppliedBinaryOp(left: OperandType, right: OperandType, op: OperatorCode): String =
+    "无法对${typeName(left)}和${typeName(right)}使用二相运算符\"${OperatorCode.toOperatorString(op)}\"进行运算"
 
 /** spec: OperatorMethodManager.cs:754-785 */
 internal fun reduceUnaryTerm(op: OperatorCode, o1: Expr): Expr {
@@ -763,7 +828,15 @@ internal fun reduceUnaryTerm(op: OperatorCode, o1: Expr): Expr {
         val vr = o1 as? VarRef ?: throw ExprEvalException("++/-- 只能作用于变量")
         if (vr.isConst) throw ExprEvalException("不能对常量 ${vr.name} 使用 ++/--")
     }
-    if (o1.operandType == OperandType.INT) {
+    if (o1.operandType == OperandType.INT || o1.operandType == OperandType.FLOAT) {
+        // 浮点只支持一元 + / -（fork-src `OperatorMethod.cs:143-149` 的浮点支**只**登记
+        // Plus（原样返回操作数）与 Minus（`new MinusFloat()`）；`!`/`~`/`++`/`--` 都不落
+        // `method` ⇒ 掉到 :152-162 抛 `CodeEE`，类型名 else 链 :157-158 **判了** Float。
+        if (o1.operandType == OperandType.FLOAT &&
+            op != OperatorCode.MINUS && op != OperatorCode.PLUS
+        ) {
+            throw ExprEvalException(canNotAppliedUnaryOp(typeName(o1.operandType), op))
+        }
         // spec: OperatorMethodManager.cs:763-766 —— 一元 + 直接返回操作数本身
         if (op == OperatorCode.PLUS) return o1
         return Unary(op, o1)
@@ -782,13 +855,50 @@ internal fun reduceUnaryAfterTerm(op: OperatorCode, o1: Expr): Expr {
     ) {
         return UnaryAfter(op, o1)
     }
+    // 浮点后置一元：官方缺陷按 ADR-005 原样复刻（路次 g5）。
+    // fork-src `OperatorMethod.cs:165-191` 的 `ReduceUnaryAfterTerm` 比前置支更窄 —— 只有
+    // Integer 一支取 `unaryAfterDic`（:175-179），而 :182-188 的类型名 else 链**只判
+    // Integer 与 String**，漏了 Float ⇒ 浮点掉进 `else` 取 `Error.UnknownType`，上屏
+    // 「无法对未知类型使用单相运算符"++"」；同一件事在前置支（:157-158 判了 Float）却是
+    // 「无法对**浮点型**使用单相运算符"++"」。两支不一致是官方的，不是本仓的。
+    if (o1.operandType == OperandType.FLOAT) {
+        throw ExprEvalException(canNotAppliedUnaryOp("未知类型", op))  // zhs xml:306 UnknownType
+    }
     throw ExprEvalException("运算符 ${OperatorCode.toOperatorString(op)} 不能作用于${typeName(o1.operandType)}")
 }
 
 /** spec: OperatorMethodManager.cs:813-848 */
 internal fun reduceBinaryTerm(op: OperatorCode, left: Expr, right: Expr): Expr {
-    val li = left.operandType == OperandType.INT
-    val ri = right.operandType == OperandType.INT
+    val lt = left.operandType
+    val rt = right.operandType
+    // 浮点参与：算术只放行 `+ - * /`、比较（== != > < >= <=）给 INT(0/1)，其余一律官方二元文案拒。
+    // 登记面（fork-src `OperatorMethod.cs:80-89` 的 binaryFloatFloatDic 与 :91-113 的
+    // binaryMixedFloatDic）两张字典都只有 Plus/Minus/Mult/Div + Equal/NotEqual/Less/Greater/
+    // LessEqual/GreaterEqual 十条，**没有 Mod**（全文件的取余只有 `ModIntInt` 一条，登记 :54、
+    // 实现 :378）⇒ 浮点取余在 fork 落 `ReduceBinaryTerm` 的 :225-245 抛 `CodeEE`。
+    // 路次 g5 按 fork 收紧 `%`：本仓此前把 MOD 一并折成 FLOAT 二元（`7.5 % 2.0 = 1.5`），是偏离。
+    // 混合侧同理：`int % float` / `float % int` 也在 binaryMixedFloatDic 查不到 → 同一支拒。
+    if (lt == OperandType.FLOAT || rt == OperandType.FLOAT) {
+        if (lt == OperandType.STR || rt == OperandType.STR) {
+            // String×Float 两支字典都不收（fork 走同一条类型名报错支）；本仓这条自造文案
+            // 已被 `e2e/FloatCorpusE2ETest.浮点参与字符串拼接解析期硬拒` 按现状钉住，
+            // 拒绝的**实质**与 fork 一致，只措辞不同 ⇒ 本路不动它（见交付回执「与基准差异」）。
+            throw ExprEvalException(
+                "${typeName(lt)} ${OperatorCode.toOperatorString(op)} ${typeName(rt)}：不合法的组合",
+            )
+        }
+        return when (op) {
+            OperatorCode.PLUS, OperatorCode.MINUS, OperatorCode.MULT,
+            OperatorCode.DIV,
+            -> Binary(op, left, right, OperandType.FLOAT)
+            OperatorCode.EQUAL, OperatorCode.NOT_EQUAL, OperatorCode.GREATER,
+            OperatorCode.LESS, OperatorCode.GREATER_EQUAL, OperatorCode.LESS_EQUAL,
+            -> Binary(op, left, right, OperandType.INT)
+            else -> throw ExprEvalException(canNotAppliedBinaryOp(lt, rt, op))
+        }
+    }
+    val li = lt == OperandType.INT
+    val ri = rt == OperandType.INT
     return when {
         li && ri -> Binary(op, left, right, OperandType.INT)
         !li && !ri -> when (op) {
@@ -814,6 +924,12 @@ internal fun reduceTernaryTerm(cond: Expr, ifTrue: Expr, ifFalse: Expr): Expr {
             ifTrue.operandType == OperandType.INT && ifFalse.operandType == OperandType.INT -> OperandType.INT
         cond.operandType == OperandType.INT &&
             ifTrue.operandType == OperandType.STR && ifFalse.operandType == OperandType.STR -> OperandType.STR
+        // 浮点三目（4.981 升版）：任一分支为 FLOAT、另一分支为数值（INT 分支经宽化），
+        // 结果 FLOAT。TODO(verify)：无 C# 证据（1.824 无浮点型）。
+        cond.operandType == OperandType.INT &&
+            ifTrue.operandType != OperandType.STR && ifFalse.operandType != OperandType.STR &&
+            (ifTrue.operandType == OperandType.FLOAT || ifFalse.operandType == OperandType.FLOAT) ->
+            OperandType.FLOAT
         else -> throw ExprEvalException("三目运算符的操作数类型不合法")
     }
     return Ternary(cond, ifTrue, ifFalse, type)

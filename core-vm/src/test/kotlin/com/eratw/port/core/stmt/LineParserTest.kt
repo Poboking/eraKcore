@@ -393,6 +393,46 @@ class LineParserTest {
         assertEquals("FUNCTION", func.keyword)
     }
 
+    @Test
+    fun `LOCALSIZE 的常量名形态折真值 不可折叠不静默零`() {
+        // T5（挖虫波第三批）：原版 `#LOCALSIZE` 的值走
+        // `ExpressionParser.ReduceIntegerTerm(...).Restructure(null)` 必须是 SingleLongTerm
+        // （spec: LogicalLineParser.cs:220-239），宏名 / ERH `#DIM CONST` 名在这一步被折成实数；
+        // 折不出才是 `SharpHasNotValidValue`（level 2，该行不生效，:232-233）。
+        // 旧实现 `(term as? IntLiteral)?.value ?: 0L` 把常量名形态静默折成 0
+        // （语料 2 处 `#LOCALSIZE 人物数量上限`——fromEN/MISC.ERB:1246 与
+        //  口上・メッセージ関連/個人口上/063 Kagerou [影狼]/影狼/M_KOJO_K63_独自関数.ERB:46——全部读成 0），
+        // 既丢真值也不报错（2026-11-01 语料全量扫描：#LOCALSIZE/#LOCALSSIZE 17,109 行，
+        // 字面量 17,107、常量名形态 2、其余形态 0）。
+        val p = LineParser(dimConsts = mapOf("人物数量上限" to 200L))
+        assertEquals(
+            listOf(200L),
+            assertIs<SharpStmt>(p.parseSharpLine("#LOCALSIZE 人物数量上限", 3)).values,
+            "常量名 → 表内真值",
+        )
+        assertEquals(
+            listOf(202L),
+            assertIs<SharpStmt>(p.parseSharpLine("#LOCALSIZE 人物数量上限 + 2", 3)).values,
+            "常量参与的算术式同样折叠",
+        )
+        assertEquals(
+            listOf(100L),
+            assertIs<SharpStmt>(p.parseSharpLine("#LOCALSSIZE 100 ;注释", 3)).values,
+            "字面量形态与行尾注释不受影响（; 之后的原文不参与折叠）",
+        )
+
+        // 不可折叠 ⇒ values 为空（= 该行未生效）+ 带行号的告警，绝不写回 0。
+        val q = LineParser()
+        val bad = assertIs<SharpStmt>(q.parseSharpLine("#LOCALSIZE 没有这个常量", 9))
+        assertEquals(emptyList<Long>(), bad.values, "折不出就不写值，旧口径的 [0] 是静默降级")
+        assertEquals(1, q.warnings.size, "必须留痕，实得：${q.warnings}")
+        assertEquals(9, q.warnings[0].line, "告警带行号")
+        assertTrue(
+            q.warnings[0].message.contains("没有这个常量"),
+            "文案要带上折不出来的原文，实得：${q.warnings[0].message}",
+        )
+    }
+
     // -----------------------------------------------------------------------
     // 全角标识符 / 特殊参数形态
     // -----------------------------------------------------------------------

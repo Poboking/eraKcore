@@ -134,7 +134,24 @@ class GotoTitleRecoveryTest {
         "PRINTL TITLE-END",
     )
 
-    /** 每轮先 `INPUT`（阻塞吃输入队列）再回显 —— 排队输入恢复消费的观测点。 */
+    /**
+     * 每轮先 `INPUT`（阻塞吃输入队列）再打印交付值 —— 排队输入恢复消费的观测点。
+     *
+     * 屏上形状 = **两条**：先一条「被消费的输入值原样回显」的裸行（`42`），再脚本自己
+     * 打的 `GOT=42` / `TITLE-END`。回显行是原版行为，不是移植侧多打的：
+     * `doInputToEmueraProgram` 过完 switch 后无条件 `Print(str)` + `inputed = true` +
+     * `PrintFlush(force: false)`（`EmueraConsole.cs:1280-1282`），而 `RunEmueraProgram`
+     * 先调它、后才 `state = Running` + `process.DoScript()`（`:1094` → `:1096-1097`）
+     * ⇒ 回显必然排在本次交付之后的所有脚本输出**之前**。
+     * 逐条口径（与 [InputEchoTest] 同一条裁决，接线在
+     * [com.eratw.port.core.proc.QueueInputSink.onEchoInput]）：
+     * - `INPUT` 的整数支把交付值写进 `str`（`:1119-1124` 解析成功 / 默认值替换），
+     *   只有 `long.TryParse` 失败那条 `return false` 才跳过回显（`:1125-1128`）；
+     *   本用例提交的是 `42`/`7`/`9` 这类合法整数 ⇒ 必回显；
+     * - 空文本经 `Print` 的空串早退不回显（`:3167-3172`）；
+     * - 这行是普通显示行，正是引擎级 `deleteLine(1)` 的删除对象
+     *   （`Process.cs:2194`/`:2498`/`:2648` 的「先删一行再打无效值临时行」删的就是它）。
+     */
     private val inputBody = listOf(
         "INPUT",
         "PRINTFORML GOT={RESULT}",
@@ -175,7 +192,9 @@ class GotoTitleRecoveryTest {
             assertEquals(StepOutcome.FAILED, failed.outcome, "Normal+栈空 = endNormal 终局（Process.cs:2959-2962）")
             assertEquals("endNormal", failed.handler)
             assertEquals(0, s.inputSink.pendingCount, "第一轮的输入已被脚本里的 INPUT 消费")
-            assertEquals(listOf("GOT=42", "TITLE-END"), s.console.loggedLines())
+            // 「42」这次交付的回显行（`EmueraConsole.cs:1280` 的 `Print(str)`，先于
+            // `:1096-1097` 的 state=Running + DoScript ⇒ 落在 GOT=42 之前）。
+            assertEquals(listOf("42", "GOT=42", "TITLE-END"), s.console.loggedLines())
 
             // 红 B 症状：终局态之后排队/再提交的输入完全不被消费
             assertTrue(s.inputSink.submitInt(7))
@@ -188,8 +207,9 @@ class GotoTitleRecoveryTest {
                 "排队输入不被消费：原版 ConsoleState.Error 门控（EmueraConsole.cs:1094）挡住下一次回车",
             )
             assertEquals(
-                listOf("GOT=42", "TITLE-END"), s.console.loggedLines(),
-                "终局态不重跑 DoScript（EmueraConsole.cs:1094），无新输出",
+                listOf("42", "GOT=42", "TITLE-END"), s.console.loggedLines(),
+                "终局态不重跑 DoScript（EmueraConsole.cs:1094），无新输出 —— 尤其没有第二条回显行：" +
+                    "排队的那条 7 没被交付，`Print(str)`（:1280）就不会为它打行",
             )
         } finally {
             s.close()
@@ -312,13 +332,18 @@ class GotoTitleRecoveryTest {
             // （Process.cs:1059-1064 `if (!state.IsFunctionMethod) vEvaluator.RESULT = 0L`；
             // 移植侧 = ErbProgramCompiler.resultRef 的掉尾清零），不得停在交付值。
             assertEquals(0L, read(s.store, "RESULT"), "普通函数返回掉尾清零（Process.cs:1059-1064）")
-            assertEquals(listOf("GOT=7", "TITLE-END"), s.console.loggedLines(), "第二轮完整重跑（ClearDisplay 后只剩本轮输出）")
+            // 「7」= 这一轮 INPUT 交付那条排队的输入的回显行（`EmueraConsole.cs:1280`
+            // `Print(str)`，在 `:1096` 的 state=Running 之前）⇒ 必须在 GOT=7 之前、且只有一条。
+            assertEquals(listOf("7", "GOT=7", "TITLE-END"), s.console.loggedLines(), "第二轮完整重跑（ClearDisplay 后只剩本轮输出）")
 
             // 重跑 DoScript 之后的终局是新鲜的（粘滞位被 resetToBootState 清过，本轮重新置位）
             val second = s.resumeSystem()
             assertEquals(StepOutcome.FAILED, second.outcome)
             assertEquals("endNormal", second.handler)
-            assertEquals(listOf("GOT=7", "TITLE-END"), s.console.loggedLines(), "终局步本身不产生输出")
+            assertEquals(
+                listOf("7", "GOT=7", "TITLE-END"), s.console.loggedLines(),
+                "终局步本身不产生输出（回显只跟着一次交付走，:1280 在 doInputToEmueraProgram 里）",
+            )
         } finally {
             s.close()
         }
@@ -352,7 +377,10 @@ class GotoTitleRecoveryTest {
                     assertEquals("SYSTEM_TITLE", step.calledFunction)
                 }
                 assertEquals(0, s.inputSink.pendingCount, "第 $v 轮：输入被消费")
-                assertEquals(listOf("GOT=$v", "TITLE-END"), s.console.loggedLines(), "第 $v 轮：完整重跑")
+                // 屏上三条 = 回显行（`EmueraConsole.cs:1280` `Print(str)` 打的是本次交付的
+                // 生效文本，即输入原值 $v）+ 脚本两条。回显行缺失 = 交付没走
+                // doInputToEmueraProgram 的收尾（移植侧接线断在 QueueInputSink.onEchoInput）。
+                assertEquals(listOf("$v", "GOT=$v", "TITLE-END"), s.console.loggedLines(), "第 $v 轮：完整重跑")
                 val terminal = s.resumeSystem()
                 assertEquals(StepOutcome.FAILED, terminal.outcome, "第 $v 轮：终局 FAILED")
                 assertEquals("endNormal", terminal.handler)

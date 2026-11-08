@@ -162,8 +162,99 @@ class VarWriteMethodsTest {
         assertEquals(listOf(0L, 0L, 4L, 4L, 4L), store.vwInt1("D5", 5))
     }
 
+    /**
+     * 第 3 槽（all 标志）留空必须报错，不能静默折成 0。
+     *
+     * 判据：C# 是 `arguments.Count < 3 || arguments[2].GetIntValue(...)`
+     * （spec: FunctionMethodCreator.cs:820）——写了 5 个槽位却把第 3 槽留空，原版在
+     * `arguments[2]` 上裸 NullReferenceException（崩溃折码政策下报 CodeEE）；旧实现折成 0
+     * ⇒ all=false ⇒ 只写引用行，整段区间静默丢失。
+     */
+    @Test
+    fun `VARSETEX 第 3 槽留空报 CodeEE 而非静默当 0`() {
+        val (ctx, store) = vwEnv()
+        vwDeclare(store, "D5", intArrayOf(5))
+        val args: List<Expr?> = listOf(StrLiteral("D5"), IntLiteral(4L), null, IntLiteral(1L), IntLiteral(4L))
+        val e = assertFailsWith<CodeEE> { ctx.callFunctionRef("VARSETEX", args) }
+        assertTrue(e.message!!.contains("第 3 个参数"), "实际：${e.message}")
+        assertEquals(listOf(0L, 0L, 0L, 0L, 0L), store.vwInt1("D5", 5), "报错路径不得留下半写状态")
+        // 只给 2 个实参（Count<3）才是合法的 all=1 形态
+        assertEquals(1L, vwIv(vwRefCall(ctx, "VARSETEX", "D5", 7L)))
+        assertEquals(listOf(7L, 7L, 7L, 7L, 7L), store.vwInt1("D5", 5))
+    }
+
+    /**
+     * 第 1 槽（变量名位）**显式空位**必须当场 CodeEE：2026-11 挖虫波 T6 复核钉。
+     *
+     * 判据：C# 第一句就是 `arguments[0].GetStrValue(exm)`（spec: FunctionMethodCreator.cs:811；
+     * 总账报告记 :797，反编译副本偏移 14 行）——写了 5 个槽位却把首参留空，原版在
+     * `arguments[0]` 上裸 NullReferenceException，崩溃折码政策（specs/verify-notes §12）下报
+     * CodeEE。复核结论：本树 `stringArg`（VarWriteMethods.kt:254-256）在 VARSETEX 的第一步
+     * 即 fail-fast（形状与同批第 3 槽修法一致），代码无需改动 —— 本用例把这条钉住，
+     * 并锁死「报错路径不留半写状态」。
+     */
+    @Test
+    fun `VARSETEX 第 1 槽留空报 CodeEE 且不留半写状态`() {
+        val (ctx, store) = vwEnv()
+        vwDeclare(store, "D5", intArrayOf(5))
+        store.vwSetInt1("D5", 1L, 2L, 3L, 4L, 5L)
+        val args: List<Expr?> =
+            listOf(null, IntLiteral(9L), IntLiteral(0L), IntLiteral(0L), IntLiteral(5L))
+        val e = assertFailsWith<CodeEE> { ctx.callFunctionRef("VARSETEX", args) }
+        assertTrue(e.message!!.contains("第 1 个参数"), "实际：${e.message}")
+        assertEquals(listOf(1L, 2L, 3L, 4L, 5L), store.vwInt1("D5", 5), "报错路径不得留下半写状态")
+    }
+
+    /**
+     * 第 2 槽（**值位**）留空必须报错，不能静默折成 0 / 空串（W5 杂项第 5 条，同族于上面两槽）。
+     *
+     * 判据：C# 在 `arguments.Count > 1` 之后的第一句是 `arguments[1].GetOperandType()`
+     * （spec: FunctionMethodCreator.cs:824，整数分支同型在 :861）——槽位写了、内容留空，
+     * 原版在 null 上取类型 ⇒ 裸 NullReferenceException。旧实现 `?: 0L` / `?: ""` 会**继续写**：
+     * `VARSETEX("D5",,1,0,5)` 把 D5 全段清 0，`VARSETEX("S1",,1,0,5)` 把整段擦成空串 ——
+     * 屏上只看到「值怎么没了」，看不到任何报错，是最难查的一类静默损坏。
+     * 折成 CodeEE 后必须**同时**钉住「报错路径不留半写状态」（同前两槽的判据）。
+     */
+    @Test
+    fun `VARSETEX 第 2 槽留空报 CodeEE 而非静默清值`() {
+        val (ctx, store) = vwEnv()
+        vwDeclare(store, "D5", intArrayOf(5))
+        store.vwSetInt1("D5", 1L, 2L, 3L, 4L, 5L)
+        val intArgs: List<Expr?> =
+            listOf(StrLiteral("D5"), null, IntLiteral(1L), IntLiteral(0L), IntLiteral(5L))
+        val e = assertFailsWith<CodeEE> { ctx.callFunctionRef("VARSETEX", intArgs) }
+        assertTrue(e.message!!.contains("第 2 个参数"), "实际：${e.message}")
+        assertEquals(listOf(1L, 2L, 3L, 4L, 5L), store.vwInt1("D5", 5), "报错路径不得留下半写状态")
+
+        vwDeclare(store, "S1", intArrayOf(5), isStr = true)
+        store.writeStr("S1", longArrayOf(2L), "旧值")
+        val strArgs: List<Expr?> =
+            listOf(StrLiteral("S1"), null, IntLiteral(1L), IntLiteral(0L), IntLiteral(5L))
+        val e2 = assertFailsWith<CodeEE> { ctx.callFunctionRef("VARSETEX", strArgs) }
+        assertTrue(e2.message!!.contains("第 2 个参数"), "实际：${e2.message}")
+        assertEquals("旧值", store.vwStrOf("S1", 2L), "字符串侧同样不得先擦后抛")
+    }
+
+    /**
+     * 值位留空**不等于**「只写 1 个实参」：`VARSETEX("D5")` 由个数闸（minArgs=2）拦下，
+     * `VARSETEX("D5",)` 才是本族的空位。两条都报 CodeEE，但走的是不同的闸 ——
+     * 这条钉住「别把槽位不足折成空位文案」，免得下次统一改判据时把前者带跑。
+     */
+    @Test
+    fun `VARSETEX 实参不足两个由个数闸拦下`() {
+        val (ctx, store) = vwEnv()
+        vwDeclare(store, "D5", intArrayOf(5))
+        store.vwSetInt1("D5", 1L, 2L, 3L, 4L, 5L)
+        val e = assertFailsWith<CodeEE> {
+            ctx.callFunctionRef("VARSETEX", listOf(StrLiteral("D5")))
+        }
+        assertTrue(e.message!!.contains("参数个数"), "实际：${e.message}")
+        assertEquals(listOf(1L, 2L, 3L, 4L, 5L), store.vwInt1("D5", 5))
+    }
+
     @Test
     fun `VARSETEX 二维 all 标志：1 写所有行 0 只写引用行`() {
+
         val (ctx, store) = vwEnv()
         vwDeclare(store, "T2", intArrayOf(2, 4))
         // all=1：忽略第 0 维下标，所有行第 1..2 列 = 8

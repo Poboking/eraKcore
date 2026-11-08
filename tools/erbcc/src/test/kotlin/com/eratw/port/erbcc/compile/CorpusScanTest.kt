@@ -70,8 +70,33 @@ class CorpusScanTest {
     }
 
     @Test
-    fun funcTypesIgnoresNonAdjacentSharpLines(@TempDir dir: Path) {
-        // spec: ErbLoader.cs:413-424 —— '#' 行的 logicalLine2 必须仍是 FunctionLabelLine：
+    fun funcTypesAcceptsForkFloatDeclaration(@TempDir dir: Path) {
+        // fork-src LogicalLineParser.cs:141-183：`#FUNCTIONF` 是第三种 MethodType
+        //（EraType.Float）。同一标签行的第二次声明仍按 :161-176 先到者胜。
+        val scan = scanOne(
+            dir,
+            "c.ERB",
+            """
+            @FLT1
+            #FUNCTIONF
+            	RETURNF 1.5
+            @FLT2
+            #FUNCTIONF
+            #FUNCTION
+            	RETURNF 1.5
+            @FLT3
+            #FUNCTION
+            #FUNCTIONF
+            	RETURN
+            """.trimIndent(),
+        )
+        assertEquals(OperandType.FLOAT, scan.funcTypes["FLT1"], "#FUNCTIONF → FLOAT")
+        assertEquals(OperandType.FLOAT, scan.funcTypes["FLT2"], "同块先到者胜（FUNCTIONF 已接受）")
+        assertEquals(OperandType.INT, scan.funcTypes["FLT3"], "同块先到者胜（FUNCTION 已接受）")
+    }
+
+    @Test
+    fun funcTypesIgnoresNonAdjacentSharpLines(@TempDir dir: Path) {        // spec: ErbLoader.cs:413-424 —— '#' 行的 logicalLine2 必须仍是 FunctionLabelLine：
         // 普通行（:481-485 解析非 null 并经 addLine :508 更新 logicalLine2）使归属失效，
         // 函数中间的散落 #FUNCTION[S] 原版报 InvalidSharp（:415-418）。
         // 纯注释行不打断归属：ParseLine 对 ';' 行返回 null（LogicalLineParser.cs:387-391，
@@ -121,5 +146,63 @@ class CorpusScanTest {
             "同名两个定义块各自合法声明，生效者为最后装载的块",
         )
         assertTrue(scan.funcTypes.size == 1, "funcTypes 不应有多余条目: ${scan.funcTypes.keys}")
+    }
+
+    @Test
+    fun dimModifierStrippingIsWordLevelAndCaseInsensitive(@TempDir dir: Path) {
+        // A2（挖虫波第三批）：`#DIM` 修饰符按**词**判定、大小写不敏感。
+        // spec: UserDefinedVariableData.cs:54-58 —— 词流由 `WordCollection` 的 IdentifierWord
+        // 给出（词界 = 空白 / `,` / `=` / `;`），关键字比对用 `Config.StringComparison`
+        //（emuera.config:1 IGNORE CASE:YES ⇒ OrdinalIgnoreCase）；:262-263 —— 循环里遇到的
+        // **第一个非关键字**整词才是 Name（loader.md D.8.1「CONSTX 整体是名字」）。
+        // 旧实现三处偏：① `startsWith(mod)` 大小写敏感 ⇒ `#DIM const X` 把 "const" 当名字登记；
+        // ② 词界只认空白；③ 循环后还有 `contains("CHARADATA")` / `startsWith("CONST")`
+        //    两个无词界兜底 ⇒ `CONSTZ` 被误判成 CONST、`CHARADATA_TYPES` 被误判成角色数据变量
+        //    （语料实况 fromEN/DEBUG_TRANSLATIONS.ERB:126-127，本次唯一两处读数差）。
+        val scan = scanOne(
+            dir,
+            "d.ERB",
+            """
+            @F
+            #DIM const X, 5
+            #DIMS CHARADATA_TYPES, 3
+            #DIM CONSTZ, 4
+            #DIM REF_W, 2
+            #DIM CHARADATA BAR, 1000
+            """.trimIndent(),
+        )
+        val vars = scan.privateVars.values.single()
+        assertEquals(
+            setOf("X", "CHARADATA_TYPES", "CONSTZ", "REF_W", "BAR"),
+            vars.keys,
+            "名字必须是「第一个非关键字整词」，不得登记 const/CONST 这类修饰符",
+        )
+        assertTrue(vars.getValue("X").isConst, "`const`（小写）仍是修饰符")
+        assertFalse(vars.getValue("CONSTZ").isConst, "CONSTZ 整词是名字，不是 CONST（cs:262-263）")
+        assertFalse(vars.getValue("REF_W").isConst, "REF_W 整词是名字")
+        assertFalse(
+            vars.getValue("CHARADATA_TYPES").isCharacterData,
+            "CHARADATA_TYPES 整词是名字，contains 兜底把它误判成角色数据变量",
+        )
+        assertTrue(vars.getValue("BAR").isCharacterData, "真写在前面的 CHARADATA 修饰符仍然生效")
+        assertEquals(OperandType.STR, vars.getValue("CHARADATA_TYPES").operandType, "#DIMS ⇒ 字符串")
+    }
+
+    @Test
+    fun dimModifierStrippingAcceptsCommaSeparatedModifier(@TempDir dir: Path) {
+        // 词界不只是空白：`,` / `=` 之后同样是词界（IdentifierWord 的分词口径）。
+        // 旧循环 `head[mod.length].isWhitespace()` 会把 `#DIM CONST,` 之类的形态漏成名字。
+        val scan = scanOne(
+            dir,
+            "e.ERB",
+            """
+            @F
+            #DIM STATIC, 3
+            #DIM NORMAL, 3
+            """.trimIndent(),
+        )
+        val vars = scan.privateVars.values.single()
+        assertFalse("STATIC" in vars.keys, "`STATIC,` 的 STATIC 是关键字而非名字")
+        assertEquals(setOf("NORMAL"), vars.keys)
     }
 }

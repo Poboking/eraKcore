@@ -2,6 +2,7 @@ package com.eratw.port.render
 
 import com.eratw.port.core.host.Alignment
 import com.eratw.port.core.host.CellWidth
+import com.eratw.port.core.host.DisplayDivBlock
 import com.eratw.port.render.displaylist.InlineGraphic
 
 /**
@@ -39,14 +40,22 @@ import com.eratw.port.render.displaylist.InlineGraphic
  *   基准实测 `FOCUS=16776960`，`fixtures/golden/baseline/pc-golden-root.txt:269`），
  *   HTML 的 `bcolor` 可逐段改它（`HtmlManager.cs:131-149` 的 `BColor` → `buttonColor`）。
  *   焦点绘制读它而**不读** [back] —— 原版 `ConsoleStyledString.cs:105-111` 用的是
- *   `base.ButtonColor`；[back] 是控制台背景色（SETBGCOLOR 的行快照），两者不是一回事。
+ *   `base.ButtonColor`；[back] 是行自带底色矩形，两者不是一回事。
  *   TODO(verify)：`Config.FocusColor` 可被配置界面改写（`ConfigDialog.cs:994`），render 侧
  *   目前没有配置入口，恒用默认值；配置层接线时应在装配处逐段写入本字段。
+ * @property back 本 run 自带的底色矩形 `0xRRGGBB`，null = 无自有底色（落在整屏底色上）。
+ *   **HTML div 不走这里**（CONTRACT-HTMLDIV-B1 D4 撤销「染整行」近似）：div 的 `color`
+ *   是覆盖块的矩形底色，随 [RenderLine.divBlocks] 走 `DivOverlayPlanner`（原版染的是
+ *   `ConsoleDivPart.DrawTo` 里的块矩形，ConsoleDivPart.cs:186 的 `DrawBorder` 填充）；
+ *   sink 侧已不再为 div 写行底色，本槽对生产 run 恒 null（字段保留给手装 run 的兜底）。
+ *   `SETBGCOLOR` 不是它——原版背景是控制台级活值 `bgColor`（EmueraConsole.cs:200），
+ *   每帧 `graph.Clear(bgColor)` 清整张画布（`:1816`），经 `ConsoleFeed` 发布进
+ *   `ConsoleScreen.backgroundArgb`，绘制侧整幅铺底，run 不再按行快照背色。
  */
 data class TextRun(
     val text: String,
     val fore: Int,
-    val back: Int,
+    val back: Int?,
     val styleMask: Int,
     val fontName: String,
     val kind: RunKind = RunKind.TEXT,
@@ -122,6 +131,17 @@ data class RenderLine(
     val align: Alignment = Alignment.LEFT,
     val temporary: Boolean = false,
     val noBreak: Boolean = false,
+    /**
+     * 本行内嵌的**零宽覆盖块**（CONTRACT-HTMLDIV-B1 D3，源侧
+     * `core/host/LineBufferConsoleSink.kt` 的 `DisplayLine.divBlocks`，原版
+     * `ConsoleDivPart`）：几何/depth/IsRelative/IsEscaped/子行全量透传，适配层不做
+     * 任何再解析（与 [runs] 的搬运约定同一条）。消费方是 `adapter/DivOverlayPlanner`
+     * —— 按原版逃逸覆盖绘制管线（ConsoleButtonString.cs:165-185 登记、
+     * EmueraConsole.cs:1829-1873 depth 降序、ConsoleDivPart.cs:174-206 块内几何）
+     * 产出绘制清单；正文行绘制路径**不**画它（原版 `ConsoleButtonString.DrawTo`
+     * 对 div 节点整体跳过，ConsoleButtonString.cs:361-364）。
+     */
+    val divBlocks: List<DisplayDivBlock> = emptyList(),
 )
 
 /** 渲染层的数据来源（CONSOLE-2 落地前由测试假实现驱动）。 */
@@ -341,6 +361,13 @@ object Grid {
  *   spec: `EmueraConsole.cs:3247-3291`），本字段只承载 ALIGNMENT CENTER/RIGHT 的整行平移。
  *   默认 0 表示未对齐（LEFT 且无偏移），既有生产者不传即保持原行为。
  * @property temporary 临时行标记（从 [RenderLine.temporary] 透传，spec: `EmueraConsole.cs:2891-2893`）
+ * @property divBlocks 锚在本行**行条**上的零宽覆盖块（CONTRACT-DIV-WIRE W1）：折行时按
+ *   [DisplayDivBlock.anchorCol] 落到「锚列所在的排」（折点边界归前一排 —— 原版零宽节点的
+ *   `PointX + Width <= num` 在 `PointX == num` 时留在本行，PrintStringBuffer.cs:217），
+ *   多块按各自锚列各归各排；PRINTN 并入时两行的块按序拼接（`adapter/ConsoleAdapter.mergedRow`）。
+ *   消费方是 `adapter/DivOverlayPlanner.planFrame` —— 以本行行条顶为锚画覆盖块
+ *   （ConsoleDivPart.cs:178 的 pointY 即原版传给 DrawTo 的行条顶，EmueraConsole.cs:1870）。
+ *   空表 = 本行无块（绝大多数行的常态，零分配）。
  */
 data class DisplayRow(
     val runs: List<TextRun>,
@@ -350,6 +377,7 @@ data class DisplayRow(
     val align: Alignment = Alignment.LEFT,
     val indentCells: Int = 0,
     val temporary: Boolean = false,
+    val divBlocks: List<DisplayDivBlock> = emptyList(),
 )
 
 /**

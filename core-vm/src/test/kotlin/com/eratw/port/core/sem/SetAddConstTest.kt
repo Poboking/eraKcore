@@ -262,7 +262,7 @@ class SetAddConstTest {
     fun `增量赋值与直接赋值同源判界`() {
         val (env, parser) = fixture(DimSpec("MAT", false, intArrayOf(3, 4)))
         val plus = assertFailsWith<CodeEE> { env.runLine(parser, "MAT:0:9 += 1") }
-        assertEquals("变量 MAT 的第 2 维下标 9 越界（长度 4）", plus.message)
+        assertEquals("数组变量\"MAT\"的第2参数(9)超出数组范围", plus.message)
         val plain = assertFailsWith<CodeEE> { env.runLine(parser, "MAT:0:9 = 1") }
         assertEquals(plain.message, plus.message, "plusInt 不得绕过 SetValue 的越界判定")
     }

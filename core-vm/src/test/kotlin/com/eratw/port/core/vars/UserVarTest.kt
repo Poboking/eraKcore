@@ -4,7 +4,10 @@ import com.eratw.port.core.expr.OperandType
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /** 用户变量：#DIM 静态/动态/常量/角色/REF、局部变量按函数隔离、作用域嵌套。 */
@@ -42,13 +45,45 @@ class UserVarTest {
     }
 
     @Test
-    fun `常量变量不可写`() {
+    fun `常量变量的不可写闸在解析期 存储层照官方不拦`() {
+        // B5（2026-11-07）相位搬迁：官方存储层写入口**没有**常量闸 ——
+        // `VariableData.cs:1340-1344` 的 StaticInt1D SetValue 只有 `array[arguments[0]] = value`，
+        // 全文件唯一的 IsConst 读点 `:4089` 是存档装载白名单。拦截全在解析期：
+        // 赋值左值 `ArgumentParser.cs:903-907`（LeftIsConst）、VARSET `:1784-1788`、
+        // SAVEVAR 目标 `:2197-2201`、可变实参位 `ArgumentBuilder.cs:92-105`；
+        // 移植侧同形闸在 `stmt/ArgBuilders.kt`（set :1768 等），由
+        // `proc/CallSharpConstWriteBackTest` 的「常量目标仍在解析期被拒」钉住。
+        // 本用例因此改为钉「解析期闸才是那一道、存储层照官方放行」，断言不放宽：
+        // 原来断言的两条运行时抛点（writeInt / plusInt）现在都必须**真的写进去**。
         val s = VariableStore()
         s.declareUserVar(dim("CONST UC, 3 = 1, 2, 3"))
         assertTrue(s.isConst("UC"))
-        assertFailsWith<CodeEE> { s.writeInt("UC", idx(0), 9) }
-        assertFailsWith<CodeEE> { s.plusInt("UC", idx(0), 1) }
-        assertEquals(1L, s.readInt("UC", idx(0)))
+        s.writeInt("UC", idx(0), 9)
+        assertEquals(9L, s.readInt("UC", idx(0)))
+        // `++`/`--` 走同一条存储写口（plusIntEntry 的 UserVar 分支：readInt + writeInt），同口径。
+        s.plusInt("UC", idx(0), 1)
+        assertEquals(10L, s.readInt("UC", idx(0)))
+    }
+
+    @Test
+    fun `常量初值支持位运算并遵循原版优先级`() {
+        // 语料实形：COMF641 アビリティカード_カードパラメータ.ERH:225-260 的
+        // `#DIM CONST …BIT配列 = 1 << A, 1 << B | 1 << C, …`。
+        val s = VariableStore()
+        s.declareUserVar(dim("CONST UB, 3 = 1 << 2 | 1 << 0, 1 << 3 & 1 << 2, 1 << 2 ^ 1 << 1"))
+        assertEquals(5L, s.readInt("UB", idx(0)))
+        assertEquals(0L, s.readInt("UB", idx(1)))
+        assertEquals(6L, s.readInt("UB", idx(2)))
+    }
+
+    @Test
+    fun `位运算优先级低于位移且一元取反可用`() {
+        val s = VariableStore()
+        // `12 << 1 & 4`：位移先结合 ⇒ (12<<1)&4 = 0；若位运算先结合则是 12 << (1&4) = 12。
+        s.declareUserVar(dim("CONST USHIFT = 12 << 1 & 4, ~0"))
+        assertEquals(2, s.getLength("USHIFT", 0))
+        assertEquals(0L, s.readInt("USHIFT", idx(0)))
+        assertEquals(-1L, s.readInt("USHIFT", idx(1)))
     }
 
     @Test
@@ -346,5 +381,110 @@ class UserVarTest {
         s.enterFunction("F")
         assertEquals(7L, s.readInt("PV", idx(0)))                   // 私有 STATIC 跨调用保持（与标量路径同表）
         s.leaveFunction()
+    }
+
+    // ---------------- 复位链的串表半边（VariableStore.compactStringPool） ----------------
+
+    @Test
+    fun `复位压实串表：存活槽逐字不变、无主条目归还、新写落在小下标`() {
+        val s = VariableStore()
+        s.declareUserVar(dims("TMP, 4"))
+        // 400 次覆盖 ⇒ 池里 400 条「没人再持有」的串（TMP 的 4 格里只剩最后 4 条）。
+        repeat(400) { i -> s.writeStr("TMP", idx((i % 4).toLong()), "无主串$i") }
+        s.writeStr("GLOBALS", idx(5), "跨复活的 GLOBALS")
+        val before = s.pool.distinctCount
+
+        s.resetData()
+        val after = s.pool.distinctCount
+
+        assertTrue(after * 4 < before, "无主条目应整体归还（$before → $after）")
+        // 可观测语义：槽读回的串逐字不变。
+        assertEquals(
+            "跨复活的 GLOBALS", s.readStr("GLOBALS", idx(5)),
+            "GLOBALS 跨复位存活（spec: VariableData.cs:3417-3418）⇒ 其下标必须随压实改写而不是悬空"
+        )
+        assertEquals("", s.readStr("TMP", idx(0)), "static 非全局用户变量由复位链清成默认（无 DEFAULT ⇒ 空串）")
+        assertNull(s.pool.idOf("无主串0"), "无主条目连同反查项一起离开池")
+        // 复位后的新写：驻留在存活项之后的小下标，去重照旧成立。
+        s.writeStr("TMP", idx(1), "复位后新串")
+        val id = s.pool.idOf("复位后新串")
+        assertNotNull(id, "新写的串必须可反查")
+        assertTrue(id!! < after + 2, "新驻留下标接在存活项之后（$id vs 压实后 $after 条）")
+        assertEquals("复位后新串", s.readStr("TMP", idx(1)))
+        s.writeStr("TMP", idx(2), "复位后新串")
+        assertEquals(id, s.pool.idOf("复位后新串"), "同内容仍同一格（压实不破坏驻留去重）")
+    }
+
+    @Test
+    fun `复位后用户 GLOBAL 串与非 static 私有串逐字不变`() {
+        val s = VariableStore()
+        s.declareUserVar(dims("GLOBAL GU, 2 = \"全局初值\""))
+        s.declareUserVar(DimParser.parse("#DIMS", "DYNAMIC PV, 2", true), "F")
+        s.enterFunction("F")
+        s.writeStr("GU", idx(1), "跨复位的用户全局串")
+        s.writeStr("PV", idx(0), "跨复位的私有动态串")
+        repeat(200) { i -> s.writeStr("PV", idx(1), "无主动态$i") }
+
+        s.resetData()
+
+        // 用户 GLOBAL：resetData 不调 resetGlobalValues（spec: VariableEvaluator.cs:1336-1346）⇒ 内容存活。
+        assertEquals("跨复位的用户全局串", s.readStr("GU", idx(1)), "用户 GLOBAL 串槽跨复位存活")
+        assertEquals("全局初值", s.readStr("GU", idx(0)), "没写过的格回 DEFAULT（GLOBAL 不被复位链 setDefault）")
+        // 非 static 私有：resetLocalValues 只 setDefault static（spec: VariableData.cs:3365-3375）⇒ 内容存活。
+        assertEquals("跨复位的私有动态串", s.readStr("PV", idx(0)), "非 static 私有串跨复位存活")
+        assertEquals("无主动态199", s.readStr("PV", idx(1)), "同一张数组里的**另一个**存活槽也逐字不变（它持有的是旧下标 ⇒ 必须随压实改写）")
+        assertNull(s.pool.idOf("无主动态0"), "被后续写入顶掉、复位后无人再持有的串应离开池")
+        s.leaveFunction()
+    }
+
+    @Test
+    fun `静态串变量的 DEFAULT 下标缓存随压实改写（第二次复位仍读得到原串）`() {
+        val s = VariableStore()
+        s.declareUserVar(dims("US, 3 = \"a\", \"b\""))
+        assertEquals("a", s.readStr("US", idx(0)), "首次读触发 data + defaults 两份下标数组")
+        s.resetData()                                            // 第一次压实：data 与 defaults 同批改写
+        repeat(300) { i -> s.writeStr("US", idx(0), "无主第二次$i") }  // data[0] 不再持有 "a"
+        s.resetData()                                            // 第二次复位由 defaults 抄回初值
+        assertEquals("a", s.readStr("US", idx(0)), "defaults 没改写的话这里就是悬空下标（CodeEE）")
+        assertEquals("b", s.readStr("US", idx(1)))
+    }
+
+    @Test
+    fun `复位压实不打断 REF 的数组本体绑定`() {
+        val s = VariableStore()
+        s.declareUserVar(DimParser.parse("#DIMS", "DYNAMIC PV, 2", true), "F")
+        s.declareUserVar(DimParser.parse("#DIMS", "REF SR, 0", true), "F")
+        s.enterFunction("F")
+        val target = s.userVar("PV", "F")!!.rawArray() as IntArray
+        target[0] = s.pool.intern("REF 看得见的串")
+        (s.userVar("SR", "F") as RefUserVar).bindStr(target)
+        repeat(200) { i -> s.writeStr("PV", idx(1), "无主 REF$i") }
+
+        s.resetData()
+
+        val ref = s.userVar("SR", "F") as RefUserVar
+        assertSame(target, ref.targetStr, "REF 绑的就是数组对象本体（spec: ReferenceToken.cs:125-128）⇒ 压实只改元素，不换对象")
+        assertEquals("REF 看得见的串", s.readStr("SR", idx(0)), "经 REF 读回逐字不变")
+        s.writeStr("SR", idx(0), "经 REF 写回")
+        assertEquals("经 REF 写回", s.readStr("PV", idx(0)), "别名双向照旧")
+        s.leaveFunction()
+    }
+
+    @Test
+    fun `复位压实后角色串不复活（旧下标随角色一起作废）`() {
+        val s = VariableStore()
+        s.declareUserVar(dims("JUNK, 2"))
+        s.addPseudoCharacter()
+        s.writeStr("NAME", idx(0), "被删掉的名字")             // C_STR0：单个下标 = 角色位置
+        repeat(100) { i -> s.writeStr("JUNK", idx((i % 2).toLong()), "无主角色串$i") }
+        s.writeStr("GLOBALS", idx(5), "活着的串")
+
+        s.resetData()
+
+        assertNull(s.pool.idOf("被删掉的名字"), "deleteAllCharacters 后角色表没有可达行 ⇒ 不贡献存活项")
+        assertEquals("活着的串", s.readStr("GLOBALS", idx(5)))
+        assertEquals(0, s.characters.count)
+        s.addPseudoCharacter()
+        assertNotEquals("被删掉的名字", s.readStr("NAME", idx(0)), "新角色的名字格从模板/空串起步，绝不复现被压实掉的旧名字")
     }
 }

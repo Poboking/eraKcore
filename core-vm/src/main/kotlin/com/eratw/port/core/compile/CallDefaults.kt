@@ -15,6 +15,11 @@ import com.eratw.port.core.stmt.ParamDefault
  * （与 `FuncLabelStmt.paramRefs` 同一条取舍 —— 那份逐位绑定信息也不落盘）。
  * 装载侧（erbcc / 两个 core-vm 装置）从 `@F(A, B = 2)` 头采集后经本表注入
  * [ErbProgramCompiler.callDefaults]。
+ *
+ * **R7 波 0 起多了一个持久化出口**：本表随 `program.meta` 侧车的 `param-defaults` 段落盘
+ * （`BootMetadata.paramDefaults` 就是本 typealias），供**设备端补丁编译**在拿不到全量函数头时
+ * 复用同一份默认值。容器仍然零改动 —— 「不落盘」的取舍只是从「容器」扩大到了「侧车」。
+ * 语义不变：仍是「编译期补位」，运行期没有任何消费点。
  */
 typealias CallDefaults = Map<String, List<Expr?>>
 

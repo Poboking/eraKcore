@@ -54,9 +54,6 @@ class RealCorpus private constructor(
                 candidates.add(up.resolve(GAME_DIR_NAME).resolve("ERB"))
                 candidates.add(up.resolve("eratw-安卓移植计划").resolve(GAME_DIR_NAME).resolve("ERB"))
             }
-            // 历史主机绝对路径（与 GoldenPipeline.gameCsvDir 同向兜底）
-            candidates.add(Path.of("D:/DSH/eratw-安卓移植计划", GAME_DIR_NAME, "ERB"))
-            candidates.add(Path.of("C:/DSH/eratw-安卓移植计划", GAME_DIR_NAME, "ERB"))
 
             for (c in candidates) {
                 val norm = c.toAbsolutePath().normalize()

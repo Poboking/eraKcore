@@ -16,7 +16,6 @@ import com.eratw.port.core.stmt.VoidArgument
 import com.eratw.port.perf.HeapMeter
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.io.TempDir
-import java.lang.management.ManagementFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -75,24 +74,7 @@ class ErbcStreamAllocProfileTest {
         val program: Program,
     )
 
-    private class AllocMeter private constructor(
-        private val bean: com.sun.management.ThreadMXBean,
-        private val tid: Long,
-    ) {
-        fun read(): Long = bean.getThreadAllocatedBytes(tid)
-
-        companion object {
-            fun open(): AllocMeter? = runCatching {
-                val bean = ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean
-                    ?: return null
-                if (!bean.isThreadAllocatedMemorySupported) return null
-                bean.isThreadAllocatedMemoryEnabled = true
-                val tid = Thread.currentThread().id
-                bean.getThreadAllocatedBytes(tid)
-                AllocMeter(bean, tid)
-            }.getOrNull()
-        }
-    }
+    // 线程分配计数：原私有 AllocMeter 收敛进共享 AllocMeterProbe。
 
     /** 结构计数（每段解码出的条目数）：给「对象数」列提供可复核的分子。 */
     private class Counts(val program: Program) {
@@ -122,7 +104,8 @@ class ErbcStreamAllocProfileTest {
         path: Path,
         retained: Boolean = false,
     ): Profile {
-        val meter = requireNotNull(AllocMeter.open()) { "宿主 JVM 不支持线程分配计数" }
+        val opened = AllocMeterProbe.open()
+        val meter = requireNotNull(opened.meter) { "宿主 JVM 不支持线程分配计数（${opened.failureReason}）" }
         val fileBytes = Files.size(path)
         val marks = ArrayList<StageReading>()
         var prevA = 0L
@@ -263,7 +246,8 @@ class ErbcStreamAllocProfileTest {
 
     @Test
     fun `合成产物：逐段分配读数可加总，且每段都被真正走到`(@TempDir dir: Path) {
-        assumeTrue(AllocMeter.open() != null, "宿主 JVM 不支持线程分配计数：跳过")
+        val opened = AllocMeterProbe.open()
+        assumeTrue(opened.meter != null, "宿主 JVM 不支持线程分配计数：跳过（${opened.failureReason}）")
         val warm = dir.resolve("warm.erbc")
         Files.write(warm, ErbcWriter.encode(mixedProgram(200)))
         ProgramLoader.loadMapped(warm)
@@ -330,7 +314,8 @@ class ErbcStreamAllocProfileTest {
     fun `真实产物：逐段分配读数（前 三个大头）`() {
         val path = realArtifact()
         assumeTrue(path != null, "ERATW_ERBC 未指向可读的 program.erbc：跳过真实产物用例")
-        assumeTrue(AllocMeter.open() != null, "宿主 JVM 不支持线程分配计数：跳过")
+        val opened = AllocMeterProbe.open()
+        assumeTrue(opened.meter != null, "宿主 JVM 不支持线程分配计数：跳过（${opened.failureReason}）")
         val p = profile(path!!)
         report(p, "真实产物")
         assertEquals(p.program.instructionCount * 4, p.program.code.size, "code 数组形状")

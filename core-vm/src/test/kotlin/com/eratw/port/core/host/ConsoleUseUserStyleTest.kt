@@ -341,6 +341,28 @@ class ConsoleUseUserStyleTest {
     }
 
     /**
+     * 布娃娃调色板的真实语句路径：`SETCOLOR` 先改用户样式、随后 `PRINTBUTTON` 在求值前
+     * 把 `UseUserStyle/UseSetColorStyle` 写回真。颜色必须在按钮入缓冲时快照，
+     * 不能等 `toOption()` 再读当前色（那时脚本已经 `RESETCOLOR`）。
+     */
+    @Test
+    fun `SETCOLOR 后 PRINTBUTTON 的颜色进入选项快照_语句级`() {
+        val env = Env()
+        preError(env)
+        run(env, "SETCOLOR 0x123456")
+        run(env, "PRINTBUTTON \"■\", 80000")
+        env.console.newLine()
+        env.console.noteInputWait(
+            InputRequest(type = InputRequest.InputType.INT, form = InputRequest.RequestForm.VALUE, scriptLine = 77L),
+        )
+
+        val opt = env.console.currentOptions().single()
+        assertEquals(80000L, opt.value)
+        assertEquals(0x123456, opt.colorRgb, "PRINTBUTTON 语句层必须把 SETCOLOR 带进按钮快照")
+        assertEquals("■", opt.label)
+    }
+
+    /**
      * PRINTD：窗口内前景回落默认，但字型位与字体名**保留**（`EmueraConsole.cs:487-488`）。
      *
      * 与第 1 组「写假」用例对照：两条轴都压前景，只有 `UseUserStyle` 能压字型位与字体名。

@@ -1,0 +1,10 @@
+# 钉阻塞语义：WAIT 在零提交时永不推进，函数停在等待里（不是 Noop 的「立即返回」）。
+# 期望只有 START 行；若引擎把等待退化成 Noop，AFTER-WAIT-BLOCKS 会出现在增量里 ⇒ 红。
+case: wait_blocks
+target: REPLAY_WAIT_BLOCKS
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:876-895
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1094-1100
+expect: blocked
+--- inputs
+--- expect-console
+START-WAIT-BLOCKS

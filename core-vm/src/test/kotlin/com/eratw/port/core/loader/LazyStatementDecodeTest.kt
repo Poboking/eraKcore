@@ -30,7 +30,6 @@ import com.eratw.port.perf.HeapMeter
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.io.TempDir
-import java.lang.management.ManagementFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -267,7 +266,11 @@ class LazyStatementDecodeTest {
         assertTrue(total > 0, "夹具必须有语句")
         // 片内 2 条：强制跨片（sampleProgram 有几十条语句）
         val src = p.buildSegmentedFlatSource(segmentSize = 2, maxSegments = 4)
-        assertTrue(src.argStreamBase().isEmpty(), "还没建片时参数流为空")
+        // 判据改钉（b6f58a37 窗口契约）：越窗读 argStreamBase 不再静默给空数组，而是当场 error
+        // 点名 —— 旧断言 `isEmpty()` 验的正是被废除的静默兜底（静默空数组会把违例读成「该语句没有实参」）。
+        // 「还没建片」的可观测形态从此是「拒绝读数」，不是「读到空的」。
+        val windowErr = assertFailsWith<IllegalStateException> { src.argStreamBase() }
+        assertTrue("窗口未打开" in windowErr.message.orEmpty(), windowErr.message.orEmpty())
 
         // 3) 同一下标恒同一实例（数据节键 / Vm L1 备忘 / 探针的身份契约）
         for (i in 0 until total) {
@@ -302,10 +305,14 @@ class LazyStatementDecodeTest {
         // 需要扁平池时仍能在池上建（proc 桥的既有入口不变），但**按片惰性**：首次取用才建第一片
         val src = eager.ensureFlatStmtSource()
         assertSame(src, eager.ensureFlatStmtSource(), "从池内树压出来的一次也幂等")
-        assertTrue(src.argStreamBase().isEmpty(), "整池对照档也不在 ensure 时建片")
+        // 判据改钉（b6f58a37 窗口契约，同上例）：ensure 后窗口仍未打开 ⇒ 读数被拒绝而不是读到空数组。
+        val closedWindow = assertFailsWith<IllegalStateException> { src.argStreamBase() }
+        assertTrue("窗口未打开" in closedWindow.message.orEmpty(), closedWindow.message.orEmpty())
         val flat = FlatStatements.encode(eager.statements(), emptyList())
         assertEquals(flat.opAt(0), src.opAt(0), "首次取用建片后 op 对得上")
+        // opAt(0) 已把窗口定位到第 0 片 ⇒ 这里 argStreamBase() 才是契约内的合法读数（片内流，非整池流）。
         val local = src.argStreamBase()
+        assertTrue(local.isNotEmpty(), "窗口打开后参数流必须可读（第 0 片有实参）")
         val slots = flat.headAt(1) - flat.headAt(0)
         assertEquals(slots, src.endAt(0) - src.headAt(0), "第 0 条槽数相同")
         for (k in 0 until slots) {
@@ -402,24 +409,7 @@ class LazyStatementDecodeTest {
     // 2b. 真实产物：惰性 vs 整池的装载账（ERATW_ERBC 动态门）
     // ==================================================================
 
-    private class AllocMeter private constructor(
-        private val bean: com.sun.management.ThreadMXBean,
-        private val tid: Long,
-    ) {
-        fun read(): Long = bean.getThreadAllocatedBytes(tid)
-
-        companion object {
-            fun open(): AllocMeter? = runCatching {
-                val bean = ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean
-                    ?: return null
-                if (!bean.isThreadAllocatedMemorySupported) return null
-                bean.isThreadAllocatedMemoryEnabled = true
-                val tid = Thread.currentThread().id
-                bean.getThreadAllocatedBytes(tid)
-                AllocMeter(bean, tid)
-            }.getOrNull()
-        }
-    }
+    // 线程分配计数：原私有 AllocMeter 收敛进共享 AllocMeterProbe。
 
     private fun realArtifact(): Path? {
         val raw = System.getenv("ERATW_ERBC")?.takeIf { it.isNotBlank() } ?: return null
@@ -432,9 +422,9 @@ class LazyStatementDecodeTest {
     fun `真实产物：压扁即弃后装载不常驻语句树`() {
         val path = realArtifact()
         assumeTrue(path != null, "ERATW_ERBC 未指向可读的 program.erbc：跳过真实产物用例")
-        val meter = AllocMeter.open()
-        assumeTrue(meter != null, "宿主 JVM 不支持线程分配计数：跳过")
-        val m = requireNotNull(meter)
+        val opened = AllocMeterProbe.open()
+        assumeTrue(opened.meter != null, "宿主 JVM 不支持线程分配计数：跳过（${opened.failureReason}）")
+        val m = requireNotNull(opened.meter)
         val fileBytes = Files.size(path!!)
 
         // ---- 档 1：波次 C 的装载形态（压扁即弃）--------------------------------
@@ -501,9 +491,9 @@ class LazyStatementDecodeTest {
     fun `真实产物：取用 1000 条语句只付 1000 条的内存`() {
         val path = realArtifact()
         assumeTrue(path != null, "ERATW_ERBC 未指向可读的 program.erbc：跳过真实产物用例")
-        val meter = AllocMeter.open()
-        assumeTrue(meter != null, "宿主 JVM 不支持线程分配计数：跳过")
-        val m = requireNotNull(meter)
+        val opened = AllocMeterProbe.open()
+        assumeTrue(opened.meter != null, "宿主 JVM 不支持线程分配计数：跳过（${opened.failureReason}）")
+        val meter = requireNotNull(opened.meter)
         val program = ProgramLoader.loadMapped(path!!)
         assertEquals(0, program.materializedStatementCount, "装载返回后不得物化语句")
         val before = HeapMeter.settled()
@@ -557,8 +547,11 @@ class LazyStatementDecodeTest {
      * GC，所以它要的是 **live 高水位**（改前高台 = 段 3 eager 节点表；M-MEM1 扫描化后归属挪到
      * 池重灌，本机复测 195.1 → 92.9 MiB），不是 churn、也不是装载后的终值。
      *
-     * T2-64 波次 C 起高台挪到装载链的 `语句池压扁即弃` 段（扁平池本体 = 进程稳态），
-     * 2026-10-28 本机实测 444.8 MiB（1.416×产物） ⇒ 系数相应从 1.1 抬到 1.45。
+     * T2-64 波次 C 曾把高台挪到装载链的 `语句池压扁即弃` 段（扁平池本体 = 进程稳态），
+     * 2026-10-28 本机实测 444.8 MiB（1.416×产物）⇒ 系数从 1.1 抬到 1.45。
+     * **2026-11-03 该前提已消失**：波次 D 分段惰性扁池 + Android `flatStatements=false` 之后
+     * 装载链不再建整池扁平流，同一夹具在 512 MiB JVM 实测 live 峰值 55–121 MiB ⇒ 系数收到 0.8
+     * （见 `ProgramLoader.estimatedHeapBytes` 的重标节与 `HeapWallProbeTest`）。
      */
     @Test
     fun `真实产物：催过 GC 的解码实时高水位被预检估算包住`() {

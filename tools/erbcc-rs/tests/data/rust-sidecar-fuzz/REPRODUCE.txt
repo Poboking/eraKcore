@@ -1,0 +1,51 @@
+# rust-sidecar-fuzz 复现配方（与 kotlin-vs-rust.tsv 同批入库；畸形档本体不入库）
+#
+# 环境（Haruki 机；整段可直接复制，AGENTS.md §5）
+#   export JAVA_HOME='C:\DSH\eratw-安卓移植计划\.tooling\jdk-17.0.20.1+1'
+#   export PATH="$JAVA_HOME/bin:$PATH"
+#   cd C:/DSH/eratw-android-fixbug-haruki/eratw-android
+#
+# 1) 种子怎么来的（改过 core-vm/** 之后必须重生成，否则 compiler-digest 判据两侧同红 = 基准过期）
+#    tools/erbcc-rs/target/release/erbcc.exe compile ^
+#      --corpus <绝对路径>/tools/erbcc-rs/tests/data/rust-sidecar-fuzz/corpus/ERB ^
+#      --out    <绝对路径>/tools/erbcc-rs/build/sidecar-fuzz/seedgen
+#    然后把产出的 erbc.v1 整份（真拷贝，不许 cp -l 硬链接）拷进
+#      tools/erbcc-rs/tests/data/rust-sidecar-fuzz/seed/erbc.v1/
+#    种子读数：program.erbc 1606 B / sha256 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe9
+#              program.meta 1352 B（40 行：labels 3、files 3、data-sections 1、functions 3、
+#              global-dims 4、private-dims 1、dim-config、macros 1、constants 2、str-constants 1、
+#              load-warnings 1、param-defaults 1、method-types 1、end）
+#              program.stmt.idx 64 B（v2、10 条偏移）、manifest.txt 1293 B（artifact 3 条 + source 4 条）
+#
+# 2) 两侧腿命令（**每档都要两条腿都跑**；`-cp` 的通配必须整体加引号，否则 MSYS 展开成
+#    一串 jar 路径、Java 把第一个 jar 当主类，得出一条假的「Kotlin rc=1」）
+#    # Kotlin 腿
+#    java -Xmx6g "-Dsun.stdout.encoding=UTF-8" "-Dsun.stderr.encoding=UTF-8" \
+#      -cp "tools/erbcc/build/install/erbcc/lib/*" com.eratw.port.erbcc.MainKt \
+#      check --corpus <语料绝对路径> --out <变异产物目录的父级>    # > log 2>&1; echo RC=$?
+#    # Rust 腿
+#    tools/erbcc-rs/target/release/erbcc.exe check --corpus <同上> --out <同上>
+#    --out 传的是**产物目录的父级**（里面要有 erbc.v1/）；--corpus 必须与产物登记的同一路径，
+#    否则源 sha 判据先红（那就不是在比深判据了）。
+#
+# 3) 变异怎么造（本闸的机器可读形态是 tests/sidecar_fuzz_diff.rs 里的 all_mutants()；
+#    手工最短配方举例：把 functions 计数改小 1 ⇒ Kotlin 拒、Rust 放行）
+#    mkdir -p build/sidecar-fuzz/mut/sc/functions-minus1/erbc.v1
+#    cp tests/data/rust-sidecar-fuzz/seed/erbc.v1/* build/sidecar-fuzz/mut/sc/functions-minus1/erbc.v1/
+#    sed 's/^functions 3$/functions 2/' \
+#      tests/data/rust-sidecar-fuzz/seed/erbc.v1/program.meta \
+#      > build/sidecar-fuzz/mut/sc/functions-minus1/erbc.v1/program.meta
+#    # 然后按 2) 跑两条腿；两侧结论应当是：
+#    #   Kotlin rc=1  META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 18 行：期望 global-dims，实际 function
+#    #   Rust   rc=0  （头部三行照旧自洽，读不到第 18 行之后）
+#
+# 4) 重生成对照表（禁手抄；两列都是真跑读数）
+#    cd tools/erbcc-rs
+#    cargo test --test sidecar_fuzz_diff dump_verdicts -- --ignored --nocapture > 新表
+#    # 只先验变异是否改到了（跳过 Kotlin 腿）：ERATW_SIDECAR_FUZZ_RUSTONLY=1 同上一条命令
+#    # 全量两腿复验（110 档 × 2 腿，实测 ~200 s）：ERATW_SIDECAR_FUZZ_JVM=1 cargo test --test sidecar_fuzz_diff
+#
+# 5) 纪律
+#    畸形档本体只落 tools/erbcc-rs/build/sidecar-fuzz/（用完清，别留几百 MB）；
+#    全量语料的 program.meta 有 49 MB，逐档矩阵不吃它（中档语料只到 1.4 KB 侧车），
+#    锚点档在语料尺上的等价形态见交付报告。

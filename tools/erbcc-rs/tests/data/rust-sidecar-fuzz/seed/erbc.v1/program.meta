@@ -1,0 +1,40 @@
+format-version 1
+engine "erbcc 0.1.0-SNAPSHOT"
+program-sha256 "924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe9"
+labels 3
+labelset "SC_ALPHA" 1
+label "SC_L1" 0
+labelset "SC_DATA" 0
+labelset "SC_METH" 0
+files 3
+file "SC_ALPHA" "SC_A.ERB"
+file "SC_DATA" "SC_B.ERB"
+file "SC_METH" "SC_C.ERB"
+data-sections 1
+datasec 3 (((str "D-ONE" -1 -1)) ((str "D-TWO" -1 -1)))
+functions 3
+function 0 1 "SC_ALPHA" "SC_ALPHA" 0 0 0 0 0 "SC_A.ERB:2"
+function 1 2 "SC_DATA" "SC_DATA" 0 0 0 0 0 "SC_B.ERB:1"
+function 2 3 "SC_METH" "SC_METH" 2 2 0 0 0 "SC_C.ERB:1"
+global-dims 4
+global-dim "SC_GLOBALS.ERH" 0 "#DIM SC_G_VAR, 3"
+global-dim "SC_GLOBALS.ERH" 1 "#DIMS SC_G_STR"
+global-dim "SC_GLOBALS.ERH" 2 "#DIM CONST SC_G_CONST = 42"
+global-dim "SC_GLOBALS.ERH" 3 "#DIMS CONST SC_G_SC = \"SC-STR-CONST\""
+private-dims 1
+private-dim "SC_ALPHA" "SC_LOCAL" 0 0 0 0 0 0 1 1 2 - -
+dim-config 0
+macros 1
+macro "SC_G_MACRO" "7"
+constants 2
+const "SC_G_CONST" 42
+const "SC_G_MACRO" 7
+str-constants 1
+str-const "SC_G_SC" "SC-STR-CONST"
+load-warnings 1
+load-warn "SC_A.ERB" 0 "ERB 函数外 #DIM 无效：原版 InvalidSharp（ErbLoader.cs:413-423，warn 1）丢弃，全局用户变量只从 ERH 装载（Process.cs:309/:313）：#DIM SC_OUTSIDE, 2（SC_A.ERB:0）"
+param-defaults 1
+param-default "SC_METH" (- (int 7 0 27))
+method-types 1
+method-type "SC_METH" I
+end

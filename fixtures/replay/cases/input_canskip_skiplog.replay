@@ -1,0 +1,15 @@
+# SKIPLOG 1 = Process.SKIPLOG → Console.MesSkip = true（Process.cs:1830-1833）。
+# 脚本自身置跳过态，于是 INPUT 42, 0, 1 的 canSkip 快速路径立即取默认值：
+# **零提交**也要出 INPUT=42（这条钉的是「MesSkip 来自脚本」那一支，与
+# input_canskip 的「MesSkip 来自提交」互补）。
+case: input_canskip_skiplog
+target: REPLAY_INPUT_CANSKIP_SKIPLOG
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc/Process.cs:1830-1833
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:853-866
+--- inputs
+--- expect-console
+START-INPUT-CANSKIP-SKIPLOG
+INPUT=42
+END-INPUT-CANSKIP-SKIPLOG
+--- expect-vars
+RESULT:0 = 42

@@ -1,0 +1,8 @@
+; 探针语料 A（变体 p3_funcadd：在 IFA_ONE 之前新增一个函数 —— defIndex/函数表全体位移）
+@IFA_ZERO
+	PRINTFORML A0-STR
+@IFA_ONE(ARG, ARG:1, ARGS)
+	PRINTFORML A1-STR {ARG} {ARG:1} %ARGS%
+@IFA_TWO
+	PRINTFORML A2-STR
+	CALL IFA_ONE, 1, 2, "A-CALL-LIT"

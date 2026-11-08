@@ -34,9 +34,18 @@ import kotlin.test.assertTrue
  * 钉在原地）。尺子本身修在 core 一处（`GameSession.scriptFontPixelSize` 同时做
  * `builtinHost.fontSize`），**本文件守的是「闭合」这一半**。
  *
+ * ## 4.981 起的机制变迁（2026-11-05 补记）
+ *
+ * 4.981 语料删掉了脚本侧 `HTML_PRINTC_MANAGER`（4.981 全树 grep 零命中），指令网格改由
+ * 引擎语句 `HTML_PRINTC` 排版（`QOL_USERCOM.ERB:108` 直接交裸按钮 HTML）——排格权威随之
+ * 从脚本搬到 core，见 `core/sem/StatementExecutor.padHtmlColumn` 的 KDoc。本文件因此不再
+ * 描述主网格的现行机制，但**不失效**：语料还有自带 `<shape param='Npx'>` 的行
+ * （自定义角色菜单、`CHARALIST_DT` 的 img/div 覆盖行），这些行的 px→格闭合仍是
+ * 渲染层的责任，本文件的闭合读数继续钉着那半边。
+ *
  * ## 夹具
  *
- * 真机 110 列档：字号 41 / 行高 43（`view/PageFitter` 一档），脚本 px 基准 = 生效配置 18。
+ * 真机 110 列档：字号 41 / 行高 43（旧 page-fit 一档，值保留作夹具），脚本 px 基准 = 生效配置 18。
  * `HTML_STRINGLEN(…,1)` 建模成 `格数 × 半角步进`，缺省步进 9 = 配置字号的一半 —— 随包像素体
  * 与黄金基线同值（`pc-golden-root.txt:253`：199 个 `=` 填满 1797px ⇒ 9.03 @ 18px 字号），
  * 同口径也钉在 `core/fn/FnWidthSingleSourceTest`。[量宽尺的实际步进在真实字体带宽内照样闭拢]
@@ -76,7 +85,7 @@ class QolButtonGridClosureTest {
     @Test
     fun `随机型字号变化仍然每枚占满整格`() {
         // 自适应的根据：补齐折成的格数 = ceil(PAD × F/18 ÷ (F/2 × 1.04))，**F 在分子分母同时出现、
-        // 整个约掉** ⇒ 从 `PageFitter.MIN_READABLE_FONT_PX`（30）到平板那一档（60+），同一枚按钮
+        // 整个约掉** ⇒ 从旧 page-fit 的最小可读字号（30）到平板那一档（60+），同一枚按钮
         // 占的列数必须一模一样。字号这一把尺与机型无关，靠的就是「量宽也吃配置字号」这条修正。
         for (fontPx in 30..64 step 2) {
             for (label in labels) {

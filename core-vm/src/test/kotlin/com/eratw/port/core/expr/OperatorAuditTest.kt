@@ -443,20 +443,20 @@ class OperatorAuditTest {
     }
 
     @Test
-    fun `字符串大于等于与小于等于复刻官方bug`() {
-        // 原版：GreaterEqualStrStr :321-337 与 LessEqualStrStr :357-373 的判据**都写成** `c < 0`
-        //       （:331 / :367）⇒ 「>=」实际是「<」、「<=」实际是「严格小于」（相等时泄漏为 0）。
-        //       Expr.kt:299-303 的 KDoc 记录该结论已由 m1-verify1824 对照官方源码确认为
-        //       官方 bug（specs/verify-notes.md §1），按 ADR-005 原样复刻。移植侧读数：Expr.kt:314-315。
+    fun `字符串大于等于与小于等于按4_981序数`() {
+        // 4.981：GreaterEqualStrStr 为 `c >= 0`（OperatorMethod.cs:547）、
+        //       LessEqualStrStr 为 `c <= 0`（:578）⇒ 序数比较，与整数版同形。
+        //       移植早期按 1.824 的 `c < 0`（OperatorMethodManager.cs:331/:367）误移植成反向/相等泄漏，
+        //       MODERN-T5 已校准回正（specs/verify-notes.md §1）。
         // 语料在用性：IF/SIF 条件里未命中「字符串操作数的 >= / <=」
         //   （COMMON.ERB:1827 等命中只是 CASE ">=" 的字符串字面量）⇒ 零命中，只钉桩。
-        assertEquals(0L, evi(listOf(s("a"), op(">="), s("a"))))   // 应为 1，原版给 0
-        assertEquals(1L, evi(listOf(s("a"), op(">="), s("b"))))   // 应为 0，原版给 1
-        assertEquals(0L, evi(listOf(s("b"), op(">="), s("a"))))
-        assertEquals(0L, evi(listOf(s("a"), op("<="), s("a"))))   // 应为 1，原版给 0（相等泄漏）
+        assertEquals(1L, evi(listOf(s("a"), op(">="), s("a"))))
+        assertEquals(0L, evi(listOf(s("a"), op(">="), s("b"))))
+        assertEquals(1L, evi(listOf(s("b"), op(">="), s("a"))))
+        assertEquals(1L, evi(listOf(s("a"), op("<="), s("a"))))
         assertEquals(1L, evi(listOf(s("a"), op("<="), s("b"))))
         assertEquals(0L, evi(listOf(s("b"), op("<="), s("a"))))
-        // 数值版不受该 bug 影响（走 :303-319 / :339-355）
+        // 数值版（OperatorMethod.cs 的 IntInt 族，本来即正确）
         assertEquals(1L, evi(listOf(i(3), op(">="), i(3))))
         assertEquals(1L, evi(listOf(i(3), op("<="), i(3))))
     }

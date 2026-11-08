@@ -272,7 +272,9 @@ class ConsoleStyleWiringTest {
         // 段样式在入缓冲时快照（ConsoleStyledString.cs:26-43），取的必须是 sink 那份活状态：
         // 打印用的当前色与 GETCOLOR 的当前色同源，否则「画出来的」和「问出来的」会分叉。
         assertEquals(h.i("GETCOLOR").toInt(), seg.foreColor)
-        assertEquals(h.i("GETBGCOLOR").toInt(), sink.lines().last().backColor)
+        // 背景不随段快照：GETBGCOLOR 读的是控制台活值 bgColor（FunctionMethodCreator.cs:3695
+        // `defaultColor ? Config.BackColor : Console.bgColor`），渲染层整屏清色（EmueraConsole.cs:1816）。
+        assertEquals(h.i("GETBGCOLOR").toInt(), sink.backgroundColor)
         assertEquals(h.i("GETSTYLE").toInt(), seg.styleMask)
         assertEquals(h.s("GETFONT"), seg.fontName)
 
@@ -284,8 +286,10 @@ class ConsoleStyleWiringTest {
         val next = sink.lines().last().segments.last()
         assertEquals(PC_FORE.toInt(), next.foreColor)
         assertEquals(h.i("GETCOLOR").toInt(), next.foreColor, "默认色有两份常量")
-        assertEquals(PC_BACK.toInt(), sink.lines().last().backColor)
-        assertEquals(h.i("GETBGCOLOR").toInt(), sink.lines().last().backColor)
+        // RESETBGCOLOR → 未显式设置（FunctionIdentifier.cs:1515 落 Config.BackColor，由
+        // 查询/渲染层回落），GETBGCOLOR 问回默认黑。
+        assertEquals(null, sink.backgroundColor)
+        assertEquals(PC_BACK, h.i("GETBGCOLOR"))
     }
 
     @Test
@@ -325,12 +329,14 @@ class ConsoleStyleWiringTest {
         assertEquals("Saitamaar", dSeg.fontName, "D 回落只动前景色")
         // 读出侧不受窗口影响：GETCOLOR 读 userStyle.Color 本体（FunctionMethodCreator.cs:3662）。
         assertEquals(0xFF0000, sink.foregroundColor)
-        // 背景色不回落：原版 bgColor 是独立字段（EmueraConsole.cs:200），不在 StringStyle 里。
+        // 背景色不回落：原版 bgColor 是独立字段（EmueraConsole.cs:200），不在 StringStyle 里，
+        // D 窗口照常生效——落控制台活值，渲染层整屏清色（:1816），不随段快照。
         sink.setBackColor(0, 255, 0)
         sink.setUseSetColorStyle(false)
         sink.printLine("背景")
         sink.setUseSetColorStyle(true)
-        assertEquals(0x00FF00, sink.lines().last().backColor)
+        assertEquals(0x00FF00, sink.backgroundColor)
+        assertEquals(null, sink.lines().last().backColor)
         // 未 SETCOLOR 时 D 窗口与普通打印同值（userStyle.Color == defaultStyle.Color 分支，
         // EmueraConsole.cs:483-486），色相同无差异。
         sink.resetForeColor()

@@ -5,9 +5,12 @@ import com.eratw.port.render.Grid
 import com.eratw.port.render.RenderLine
 import com.eratw.port.render.RunKind
 import com.eratw.port.render.TextRun
+import com.eratw.port.render.view.ScreenLayout
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotSame
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -349,6 +352,26 @@ class LineFolderTest {
         }
     }
 
+    /**
+     * 玩家反馈「红魔馆一层地图残缺」的回归钉：地图整行是 **128 半角格**
+     * （`ERB/COLOREDMAPS/DRAW_COLOREDMAP.ERB:10` 的 `#DIMS COLORCOLUMNS,128`；
+     * `COLOREDMAP_03.ERB` 的 `@COLOREDMAP_KOUMAKAN_1` 每行 64 个全角字 = 128 格）。
+     * 会话列数低于 128 时这一行被折成「主行 + 18 格尾巴行」—— 屏上就是地图右侧缺了一块。
+     * 现行缺省档 [ScreenLayout.DEFAULT_COLUMNS] = 136 下必须一行放下。
+     */
+    @Test
+    fun `128 格地图行在 110 列档折出 18 格尾巴行_在缺省 136 列档一行放下`() {
+        val mapRow = "花".repeat(64)
+        assertEquals(128, Grid.cells(mapRow), "64 个全角字 = 128 格（`DRAW_COLOREDMAP.ERB:76` 的 FOR COLUMN,0,128）")
+        val narrow = LineFolder(clientWidth = 110).fold(line(text(mapRow)))
+        assertEquals(2, narrow.size, "110 列档：主行 + 尾巴行（玩家截图里的形态）")
+        assertEquals(110, narrow[0].cells)
+        assertEquals(18, narrow[1].cells, "尾巴行 128 - 110 = 18 格")
+        val default = LineFolder(clientWidth = ScreenLayout.DEFAULT_COLUMNS).fold(line(text(mapRow)))
+        assertEquals(1, default.size, "缺省 136 列档：整行放下")
+        assertEquals(128, default[0].cells)
+    }
+
     @Test
     fun `非法宽度直接拒绝`() {
         val err = runCatching { LineFolder(clientWidth = 0) }.exceptionOrNull()
@@ -402,5 +425,41 @@ class LineFolderTest {
             legacyBar += if (ch in ' '..'~' || ch in '｡'..'ﾟ') 1 else 2
         }
         assertEquals(198, legacyBar, "旧口径同值：198 格而不是近似表的 99 格")
+    }
+
+    // ------------------------------------------------------------------
+    // 零复制帧路（2026-10-31 OOM 报告：发布期栈顶 TextRun.copy → FoldPiece.toRun）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `未拆分且无 TAB 的 run 整只复用不产生新实例`() {
+        val run = text("0123456789")
+        val rows = LineFolder(clientWidth = 10).fold(line(run))
+        assertEquals(1, rows.size)
+        assertSame(run, rows[0].runs[0], "文本未脱钩时 toRun 必须原样返回入参 run（免分配）")
+    }
+
+    @Test
+    fun `拆分后的两半都是新实例且文本正确`() {
+        val run = text("0123456789")
+        // 手算：10 字符宽 4 → 4+4+2 三行（PrintStringBuffer.cs:414-496 的前缀判式）。
+        val rows = LineFolder(clientWidth = 4).fold(line(run))
+        assertEquals(3, rows.size)
+        assertEquals(listOf("0123"), texts(rows[0]))
+        assertEquals(listOf("4567"), texts(rows[1]))
+        assertEquals(listOf("89"), texts(rows[2]))
+        assertNotSame(run, rows[0].runs[0], "左半已原地截断，不得复用原 run")
+        assertNotSame(run, rows[2].runs[0], "尾半是新建件，不得复用原 run")
+    }
+
+    @Test
+    fun `TAB 展开改变文本时仍按新文本落行`() {
+        val run = text("a\tb")
+        val rows = LineFolder(clientWidth = 20).fold(line(run))
+        assertEquals(1, rows.size)
+        // TAB 按 8 空格展开（StringMeasure.cs:57-62）；Kernel 的 TAB_EXPANSION 是 private，这里按字面钉。
+        assertEquals(listOf("a        b"), texts(rows[0]))
+        // 文本已被展开替换（新串实例）→ 不得复用原 run（复用会丢 TAB 展开）。
+        assertNotSame(run, rows[0].runs[0])
     }
 }

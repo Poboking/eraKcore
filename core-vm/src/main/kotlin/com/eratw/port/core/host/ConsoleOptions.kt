@@ -14,6 +14,17 @@ package com.eratw.port.core.host
 enum class OptionOrigin { EXPLICIT, HTML, AUTO_TEXT }
 
 /**
+ * 选项在右栏里的**显式视觉类型**，由引擎在冻结快照时一次判定，UI 不再二次猜标签。
+ *
+ * - [TEXT]：普通文字按钮（即使脚本给它设过颜色，也只按默认按钮外观显示）；
+ * - [COLOR_SWATCH]：整颗按钮的标签就是一个纯色块字形，颜色是按钮的数据本身。
+ *
+ * 这个字段是识别口径的单一真源：`ShellUi` 的色格、`LeanOptionFilter` 的保留判据、
+ * `MainActivity` 的选项指纹都只读它，避免三处各自扫标签后分叉。
+ */
+enum class OptionVisual { TEXT, COLOR_SWATCH }
+
+/**
  * 引擎在**进入一次输入等待**时冻结下来的一个选项。
  *
  * 与 `OptionButtonScanner` 的旧产物不同：这里没有正则、没有“扫日志尾部 N 行”，
@@ -26,7 +37,7 @@ enum class OptionOrigin { EXPLICIT, HTML, AUTO_TEXT }
  *   value 为准**，不从标签里的 `[N]` 前缀反推 —— 原版允许 `[27] 示例` 的按钮提交 `227`
  *   （地图 `MAIN_MAP*100+LOCAL` 形态，`DRAW_MAP.ERB:467`），前缀只是屏上印的字。
  * @property label 按钮上印的字（已去 HTML 标签、已折空白；可能为空）。标签前缀是否剥掉
- *   取决于它与 [value] 是否一致，见 [LineBufferConsoleSink] 的 `cleanOptionLabel`。
+ *   取决于它与 [value] 是否一致，见 [LineBufferConsoleSink] 的 `describeOption`。
  * @property origin 按钮来源（见 [OptionOrigin]；仅诊断/徽标，不参与可点性）
  * @property lineSerial 按钮所在显示行的单调序号（UI 按它做行优先排序）
  * @property startCol 行内起始半角格（行优先排序的第二关键字）
@@ -40,6 +51,24 @@ enum class OptionOrigin { EXPLICIT, HTML, AUTO_TEXT }
  *   同一个编号 ⇒ 右侧栏并成一枚；屏上两颗不同的按钮即使 [value] 相同也是两个编号 ⇒ 两枚都留。
  *   右侧栏的去重键是它、**不是 [value]**（[ConsoleOptionFilter.prefer] 的口径说明）。
  *   `-1` = 身份未知（手工构造的本类型），永不与别的候选合并。
+ * @property printsOwnNumber **这颗按钮在屏上自己印了编号**：标签开头的 `[N]` 与 [value] 一致
+ *   （`[100] - 睁开眼睛`、`[400] - OPTION` 一族），出快照时那个编号被剥下来交给 [ordinal] 显示，
+ *   所以 [label] 里已经看不到它。判的是**数值按钮**（[value] 是 `Long`）：字符串值按钮不印自己的
+ *   编号（`qol_MAP.ERB:178` 的 `PRINTBUTTON "地图切换", TOSTR(BUTTON切替中)` 标签里就没有数字）。
+ *   编号印在名字**末尾**（`移动[400]`）时这里是 false —— 编号还留在 [label] 原文里，
+ *   不必另说一句。屏上印的数与提交值对不上时同样是 false：地图格子印的是本地图内的号，
+ *   提交值却是 `MAIN_MAP*100+LOCAL`（`MOVEMENTS/DRAW_MAP.ERB:467`），那不是按钮自己的编号。
+ *   消费点是显示层的「更精简的游戏选项」（`LeanOptionFilter`），可点性判定不看它。
+ * @property colorRgb 按钮打印时的显式前景色（`0xRRGGBB`）；普通文字按钮和色块按钮都保留。
+ *   null = 原按钮没有 `SETCOLOR` / HTML 显式色，右栏保持默认外观。是否色块只看 [visual]。
+ *
+ *   为什么必须由引擎快照带出：颜色是 `StringStyle` 在按钮对象创建时的快照，等脚本
+ *   `RESETCOLOR` 之后 UI 才来读，当前色已经回落默认值。布娃娃系统的 128 色调色板正是
+ *   `SETCOLOR COLOR_PALETTE:i` → `PRINTBUTTON "■", 80000+i` → `RESETCOLOR`
+ *   （`MOB_SYSTEM.ERB:274-285`），右栏若只拿 label 会得到 128 个同形 `■`。
+ *   普通按钮（选中的页签、当前部件名等）保留颜色只用于底色；不会混进色块通道。
+ * @property visual 引擎在快照时判定的显式视觉类型（[OptionVisual]）。UI、精简过滤和指纹
+ *   都只读这一项，不再从标签/颜色二次推断。
  */
 data class ConsoleOption(
     val value: Any,
@@ -51,9 +80,90 @@ data class ConsoleOption(
     val generation: Long = 0L,
     val ordinal: Int? = null,
     val groupId: Int = -1,
+    val printsOwnNumber: Boolean = false,
+    val colorRgb: Int? = null,
+    val visual: OptionVisual = OptionVisual.TEXT,
 ) {
     /** 点这枚候选要提交给输入队列的文本：数值 = 十进制串，字符串 = 原串。 */
     val submitValue: String get() = value.toString()
+
+    /** 这枚候选是不是色块：引擎在快照时已按 [OptionVisual] 判定，UI 不再扫标签。 */
+    val isColorSwatch: Boolean get() = visual == OptionVisual.COLOR_SWATCH
+}
+
+/**
+ * 原版用来画色块的字符（布娃娃调色板用 `■`；其余是同类 UI 的常见实心块）。
+ *
+ * 这是**共享判据**：它只回答「这个标签是不是纯色块字形」；单个色块是否真的属于
+ * 调色板，还要由 [paletteSwatchMask] 再看同一行有没有连续 8 枚以上。
+ * 只认纯字形（允许中间夹空白/零宽排版字符），`■ 说明` 这类正常标题不算。
+ */
+fun isColorBlockLabel(label: String): Boolean {
+    var sawGlyph = false
+    for (ch in label) {
+        if (ch.isWhitespace() || ch in COLOR_BLOCK_IGNORABLE) continue
+        if (ch !in COLOR_BLOCK_GLYPHS) return false
+        sawGlyph = true
+    }
+    return sawGlyph
+}
+
+private val COLOR_BLOCK_GLYPHS = setOf(
+    '■', '●', '◆', '▲', '▼', '★', '♥', '♦', '█', '▇', '◼', '⬛',
+)
+
+/** 字体/排版层可能插在色块旁的零宽字符，不改变「这是一个纯色块字形」的事实。 */
+private val COLOR_BLOCK_IGNORABLE = setOf(
+    '\uFE0E', '\uFE0F', '\u200B', '\u200C', '\u200D', '\u2060',
+)
+
+/** 真正的调色板至少要有这么多枚连续色块；单个/少量彩色字形只是普通按钮。 */
+const val PALETTE_MIN_SWATCH_RUN = 8
+
+/**
+ * 标出真正属于调色板的色块：同一 [ConsoleOption.lineSerial] 上**连续至少 [minRun] 枚**
+ * [ConsoleOption.isColorSwatch] 才算；短游程、跨行拼凑和单个色块都不算。
+ *
+ * 返回与 [options] 等长的布尔数组。UI 的密集色格入口与精简选项过滤共用这一条判据，
+ * 避免两边各自猜「多少枚算调色板」而在边界上分叉。
+ */
+fun paletteSwatchMask(
+    options: List<ConsoleOption>,
+    minRun: Int = PALETTE_MIN_SWATCH_RUN,
+): BooleanArray {
+    val mask = BooleanArray(options.size)
+    if (options.isEmpty() || minRun <= 0) return mask
+    var lineStart = 0
+    while (lineStart < options.size) {
+        val serial = options[lineStart].lineSerial
+        var lineEnd = lineStart
+        while (lineEnd < options.size && options[lineEnd].lineSerial == serial) lineEnd++
+        markPaletteRuns(options, lineStart, lineEnd, minRun, mask)
+        lineStart = lineEnd
+    }
+    return mask
+}
+
+private fun markPaletteRuns(
+    options: List<ConsoleOption>,
+    start: Int,
+    end: Int,
+    minRun: Int,
+    mask: BooleanArray,
+) {
+    var i = start
+    while (i < end) {
+        if (!options[i].isColorSwatch) {
+            i++
+            continue
+        }
+        var runEnd = i + 1
+        while (runEnd < end && options[runEnd].isColorSwatch) runEnd++
+        if (runEnd - i >= minRun) {
+            for (k in i until runEnd) mask[k] = true
+        }
+        i = runEnd
+    }
 }
 
 /**

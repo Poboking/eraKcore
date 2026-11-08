@@ -1,0 +1,45 @@
+format-version 1
+engine "erbcc 0.1.0-SNAPSHOT"
+program-sha256 "28cb86808befa07a24b92a3003ebeadc598ee82c785524dd86037c60f40af87b"
+labels 7
+labelset "AUDIT_A1" 0
+labelset "AUDIT_A2" 0
+labelset "AUDIT_A3" 0
+labelset "AUDIT_A4" 0
+labelset "AUDIT_A5" 0
+labelset "AUDIT_A6" 0
+labelset "AUDIT_T1" 0
+files 7
+file "AUDIT_A1" "A1_UNBOUND.ERB"
+file "AUDIT_A2" "A2_KEYWORD.ERB"
+file "AUDIT_A3" "A3_RELATION.ERB"
+file "AUDIT_A4" "A4_DIMWARN.ERB"
+file "AUDIT_A5" "A5_TYPEMISMATCH.ERB"
+file "AUDIT_A6" "A6_PRIVWARN.ERB"
+file "AUDIT_T1" "T1_TYPES.ERB"
+data-sections 0
+functions 7
+function 0 1 "AUDIT_A1" "AUDIT_A1" 0 0 0 0 0 "A1_UNBOUND.ERB:1"
+function 1 2 "AUDIT_A2" "AUDIT_A2" 0 0 0 0 0 "A2_KEYWORD.ERB:1"
+function 2 3 "AUDIT_A3" "AUDIT_A3" 0 0 0 0 0 "A3_RELATION.ERB:1"
+function 3 4 "AUDIT_A4" "AUDIT_A4" 0 0 0 0 0 "A4_DIMWARN.ERB:3"
+function 4 5 "AUDIT_A5" "AUDIT_A5" 0 0 0 0 0 "A5_TYPEMISMATCH.ERB:1"
+function 5 6 "AUDIT_A6" "AUDIT_A6" 0 0 0 0 0 "A6_PRIVWARN.ERB:1"
+function 6 7 "AUDIT_T1" "AUDIT_T1" 0 0 0 0 0 "T1_TYPES.ERB:1"
+global-dims 3
+global-dim "T1_GLOBALS.ERH" 0 "#DIM AUDIT_T_INT, 3"
+global-dim "T1_GLOBALS.ERH" 1 "#DIMS AUDIT_T_STR"
+global-dim "T1_GLOBALS.ERH" 2 "#DIM AUDIT_T_ARR, 3, 3"
+private-dims 4
+private-dim "AUDIT_A2" "AUDIT_LOCAL_VAR" 0 0 0 0 0 0 1 1 5 - -
+private-dim "AUDIT_A2" "AUDIT_KEY" 1 0 0 0 0 0 1 1 1 - -
+private-dim "AUDIT_A5" "AUDIT_SVAR" 1 0 0 0 0 0 1 1 1 - -
+private-dim "AUDIT_A5" "AUDIT_IVAR" 0 0 0 0 0 0 1 1 1 - -
+dim-config 0
+macros 0
+constants 0
+str-constants 0
+load-warnings 2
+load-warn "A4_DIMWARN.ERB" 0 "ERB 函数外 #DIM 无效：原版 InvalidSharp（ErbLoader.cs:413-423，warn 1）丢弃，全局用户变量只从 ERH 装载（Process.cs:309/:313）：#DIM AUDIT_DW_A, AUDIT_NO_SUCH_MACRO（A4_DIMWARN.ERB:0）"
+load-warn "A4_DIMWARN.ERB" 1 "ERB 函数外 #DIM 无效：原版 InvalidSharp（ErbLoader.cs:413-423，warn 1）丢弃，全局用户变量只从 ERH 装载（Process.cs:309/:313）：#DIM AUDIT_DW_B, 2, 2, 2, 2, 2（A4_DIMWARN.ERB:1）"
+end

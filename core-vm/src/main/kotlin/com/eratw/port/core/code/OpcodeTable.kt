@@ -2,10 +2,12 @@
 // flow -> display -> variable -> call -> input -> io -> data -> debug -> other 分段，段内按语句名升序连续编号。
 // 校验：OpcodeTableTest 直接解析 specs/isa.yaml，断言名字/数量/别名一一对应。
 //
-// 198..243 是**手维护扩展区**（isa.yaml 不覆盖，OpcodeTableTest 逐条锁死名字与顺序）：
+// 198..245 是**手维护扩展区**（isa.yaml 不覆盖，OpcodeTableTest 逐条锁死名字与顺序）：
 // 198..201 编译器扩展（CALLFORM/GOTOFORM/#FUNCTIONS 等运行期名字解析），
-// 202..243 栈码组（T2-21：表达式降级的落地目标）。两者都进 NAMES/BY_NAME，
+// 202..243 栈码组（T2-21：表达式降级的落地目标），244 浮点返回（_RETF，4.981 升版），
+// 245 运行期字符串调用（_CALL_STR，WIRE-1/WIRE-2）。全部进 NAMES/BY_NAME，
 // 保证反汇编可读、文本汇编可写回（asm(disasm(p)) 往返）。
+// 逐操作数的池引用分类（拼接平移/装载判界共用）在 OpcodeRelocation，不在本文件。
 package com.eratw.port.core.code
 
 /**
@@ -30,16 +32,23 @@ package com.eratw.port.core.code
  * | kind=other | 172..197 | 26 |
  * | 编译器扩展 | 198..201 | 4 |
  * | 栈码组 | 202..243 | 42 |
- * | **合计** | 0..243 | 244 |
+ * | 浮点返回追加段 | 244 | 1 |
+ * | 运行期字符串调用追加段 | 245 | 1 |
+ * | **合计** | 0..245 | 246 |
  *
- * 下划线开头的名字是 VM 内部指令（0..28）、编译器扩展指令（198..201）或栈码（202..243），
- * 不对应任何 ERB 语句（isa.yaml 中 JUMP/CALL 等也是语句别名，直接复用会撞名）；29..197 的
- * 名字与 isa.yaml 的 `name` 字段逐字相同（169 条）。ERB 书写用的是 `aliases`，映射见
- * [StatementAliases]。
+ * 下划线开头的名字是 VM 内部指令（0..28）、编译器扩展指令（198..201）、栈码（202..243）
+ * 或末尾追加段（244..245），不对应任何 ERB 语句（isa.yaml 中 JUMP/CALL 等也是语句别名，
+ * 直接复用会撞名）；29..197 的名字与 isa.yaml 的 `name` 字段逐字相同（169 条）。
+ * ERB 书写用的是 `aliases`，映射见 [StatementAliases]。
  *
  * 198..201 是 `core.compile` 追加的**编译器扩展指令**，202..243 是**栈码组**（T2-21），
- * 两者合起来是 [EXTENSION_OPS]，都不是 isa.yaml 语句：它们有独立的操作数语义与 VM 分支，
- * 但同样进 [NAMES]/[BY_NAME] 以保证反汇编可读、文本汇编可写回（`asm(disasm(p))` 往返）。
+ * 244..245 是只许末尾追加的扩展码；三者合起来是 [EXTENSION_OPS]，都不是 isa.yaml 语句：
+ * 它们有独立的操作数语义与 VM 分支，但同样进 [NAMES]/[BY_NAME] 以保证反汇编可读、
+ * 文本汇编可写回（`asm(disasm(p))` 往返）。
+ *
+ * **操作数语义不在本表汇总**：逐槽的池引用分类（拼接时平移哪些、装载时判界哪些）
+ * 唯一真源是 [OpcodeRelocation]（规约 = specs/erbc-format.md §5.6b）。追加操作码必须
+ * 同时在那里登记，否则类初始化即抛。
  */
 object Opcode {
 
@@ -611,10 +620,10 @@ object Opcode {
     /** int 栈：l r → l*r。 */
     const val _STK_MUL = 214
 
-    /** int 栈：l r → l/r；r=0 → CodeEE「除数为 0」，MIN_VALUE/-1 → CodeEE「除算溢出：…」。 */
+    /** int 栈：l r → l/r；r=0 → CodeEE「除数为0的除法运算」（官方 DivideByZero），MIN_VALUE/-1 → CodeEE「除算溢出：…」。 */
     const val _STK_DIV = 215
 
-    /** int 栈：l r → l%r；r=0 → CodeEE「除数为 0」（MIN_VALUE%-1 不抛，同 `_MOD`）。 */
+    /** int 栈：l r → l%r；r=0 → CodeEE「除数为0的除法运算」（MIN_VALUE%-1 不抛，同 `_MOD`）。 */
     const val _STK_MOD = 216
 
     /** int 栈：v → -v。 */
@@ -665,21 +674,22 @@ object Opcode {
     /** String 栈：l r → (compare(l,r) < 0)。 */
     const val _STK_SLT = 232
 
-    /** String 栈：l r → (compare(l,r) < 0)；**官方 bug 原样复刻**（`<=` 应判 `c <= 0`）。 */
+    /** String 栈：l r → (compare(l,r) <= 0)（4.981 OperatorMethod.cs:578）。 */
     const val _STK_SLE = 233
 
     /** String 栈：l r → (compare(l,r) > 0)。 */
     const val _STK_SGT = 234
 
-    /** String 栈：l r → (compare(l,r) < 0)；**官方 bug 原样复刻**（`>=` 应判 `c >= 0`，方向整个反了）。 */
+    /** String 栈：l r → (compare(l,r) >= 0)（4.981 OperatorMethod.cs:547）。 */
     const val _STK_SGE = 235
 
     /** String 栈：l r → l+r。 */
     const val _STK_CONCAT = 236
 
     /**
-     * 栈：s n → s.repeat(n)；n<0 → CodeEE「负数(N)不能与字符串相乘」，
-     * n>=10000 → CodeEE「重复次数(N)不能大于等于 10000」，空串或 n==0 → ""。
+     * 栈：s n → s.repeat(n)；n<0 → CodeEE「字符串无法与负值(N)进行相乘运算」（官方
+     * MultiplyNegativeToStr），n>=10000 → CodeEE「字符串无法与超过10000的值(N)进行相乘运算」
+     * （官方 Multiply10kToStr），空串或 n==0 → ""。
      * 两种书写 `s * n` 与 `n * s` 降级到同一条指令（求值序由发码方按静态类型对齐）。
      */
     const val _STK_SREPEAT = 237
@@ -702,25 +712,90 @@ object Opcode {
     /** String 栈：s → ∅；s 写入帧槽 a（`SlotAddr` 编码）。 */
     const val _STK_POP_SLOT_S = 243
 
-    /** 最后一条已定义的操作码（= 栈码组末条）。 */
-    const val MAX_OPCODE = _STK_POP_SLOT_S
+    /**
+     * a=**表达式池下标**（NONE = 无返回值）—— `#FUNCTION`(浮点声明) 的返回通道，
+     * 4.981 升版路次 [g2-returnf-float]。
+     *
+     * 与 [_RET]/[_RETS] 的差别只有一个：本移植的帧槽**没有浮点格**（`frameInts`/`frameStrs`
+     * 两列），所以浮点返回值不经槽交回，而是就地求值 `a` 指向的表达式后记进
+     * [VirtualMachine.floatResult]（口径同 [_RETS] 的 [VirtualMachine.stringResult]）。
+     * 求值发生在**被调帧内、拆帧之前** —— 与原版 `RETURNF` 的 `DoInstruction` 同序
+     * （fork-src `Instraction.Child.cs:3737-3746`：先 `term.GetValue(exm)` 再 `state.ReturnF(ret)`）。
+     *
+     * 语义依据（取证级 A，源 = fork 仓库 qirchen421/emuera.sk@48494165，本机检出
+     * `<work-root>/vendor/emuera-skia`；1.824 快照的 `SingleTerm` 只有 long/str 两支，浮点支只在 fork）：
+     * * 载体是 `ProcessState.MethodReturnValue`（`Process.State.cs:760`），`RETURNF` **不写 RESULTF**
+     *   （`Process.State.cs:762-789` 的 `ReturnF` 只弹帧 + 置载体；`Process.cs` 的调用侧
+     *   在进帧前把残留值清 null）。
+     * * 载体的浮点态 = `SingleFloatTerm`（`Term.cs:108-141`：`fValue: double`、
+     *   `GetFloatValue` 直接交出、`GetIntValue` 是 `(long)fValue` 但**消费侧走不到**，见下）。
+     * * 消费侧按**运行时项类型**取值、不符即静默零值（`UserDefinedMethodTerm.cs:19-38`）：
+     *   `GetIntValue` 要求 `SingleLongTerm`、`GetStrValue` 要求 `SingleStrTerm`、
+     *   `GetFloatValue` 要求 `SingleFloatTerm`，否则分别得 `0` / `""` / `0.0`；
+     *   载体为 null（无 `RETURNF`、掉尾）时按**声明类型**给默认项（同文件 `:39-49`）。
+     *   ⇒ 本条指令在非浮点调用位（[_RET]/[_RETS] 的槽）落 `0` / `""`，浮点位与 null 落 `0.0`。
+     * * 类型不符只是**解析期警告**、运行期不改值（`Instraction.Child.cs:3705-3732`，
+     *   浮点函数返整数表达式那一支是「auto-promote, no warning」的注释体 `:3729-3732`）
+     *   ⇒ 编译器不得为此报错；整数/字符串表达式落 `RETURNF` 到浮点函数按上面第二条容错。
+     */
+    const val _RETF = 244
+
+    /**
+     * a=帧内 str 槽（整串 `NAME(实参…)` / `NAME, 实参…` / `NAME` 原文）、
+     * b=标志位（bit31 TRY、bit30 JUMP、bit28 STR_RET；**低位不解释为 argc**，argc 运行期定）、
+     * c=返回槽（TRYC 变体作命中标志槽）—— `TRYCALLSTR`/`TRYCCALLSTR` 的运行期字符串调用通道
+     *（WIRE-1/WIRE-2，契约 C-CALL-STR-OPCODE@1）。
+     *
+     * 与 [_CALL_BY_NAME] 的差别只有一个：目标函数名与实参都在**运行期**由 `a` 槽整串解析
+     * （`VmHost.resolveRuntimeCall`），故 `b` 的低位不再是编译期常量实参数。语义依据
+     * `specs/isa.yaml:2542`（CALLS 族：TRYCALLSTR/TRYCCALLSTR）—— fork-src
+     * `Instraction.Child.cs:3950-4066` 在本机缺失，语义以 isa.yaml 为准。
+     */
+    const val _CALL_STR = 245
+
+    /**
+     * a=**表达式池下标**、b=目标槽、c=跳转偏移（单位=指令条数，相对**下一条指令**）——
+     * `_EVAL_INT` + `_JUMP_IF_FALSE` 的**融合超指令**（MODERN-T1）。
+     *
+     * 语义逐字等价于两条指令的序列 `_EVAL_INT a,b,0` 后接 `_JUMP_IF_FALSE b,c,0`：
+     * 求值 `a` → 写入 `b`（仍写，帧槽/临时槽布局不变）→ 结果为 0 时跳 `pc+1+c`、否则 `pc+1`；
+     * 求值异常仍在同一 pc 转 CodeEE（同一条源码行）。唯一有意的差异是 `executedSteps`
+     * 每对融合指令少记 1（一次分派替代两次），方向单调、无膨胀。
+     *
+     * 融合范围（编译器侧，保守 v1）：IF / SIF / ELSEIF / WHILE 四处条件位，且条件降级后
+     * 必须是 INT 且非字面量（字面量仍走 `_SET_INT`/`_SET_STR` + `_JUMP_IF_FALSE`，逐字节不变）。
+     * 等价性锚：`FunctionIdentifier.cs:3023-3027`（WHILE）、`:3072-3078`（SIF）、
+     * `:3128-3141`（IF/ELSEIF —— 求值一次、非零进分支体）。
+     */
+    const val _EVAL_INT_JZ = 246
+
+    /** 最后一条已定义的操作码（= 编译器扩展追加段末条；栈码组末条是 [_STK_POP_SLOT_S]）。 */
+    const val MAX_OPCODE = _EVAL_INT_JZ
 
     /** 最后一条 ERB 语句的操作码（isa.yaml 的 169 条语句占 29..197）。 */
     const val MAX_STATEMENT_OPCODE = 197
 
-    /** 编译器扩展指令的编号区间（198..201，见 [_CALL_BY_NAME]…[_RETS]）。 */
+    /**
+     * 编译器扩展指令的编号区间（198..201，见 [_CALL_BY_NAME]…[_RETS]）。
+     *
+     * 区间不随后续追加扩张：4.981 的 [_RETF]（244）按「只许末尾追加、不得重排」钉在
+     * 栈码组之后，归 [EXTENSION_OPS] 覆盖。
+     */
     val COMPILER_EXTENSION_OPS: IntRange = _CALL_BY_NAME.._RETS
 
     /** 栈码组编号区间（202..243，T2-21）。 */
     val STACK_OPS: IntRange = _STK_PUSH_IMM.._STK_POP_SLOT_S
 
     /**
-     * 全部**非 isa.yaml 语句**的操作码区间（198..243 = 编译器扩展 + 栈码组）。
+     * 全部**非 isa.yaml 语句**的操作码区间（198..246 = 编译器扩展 + 栈码组 + 浮点返回追加段
+     * + 运行期字符串调用追加段 + 条件位融合附加段）。
      *
      * 语义与改造前一致：`isExtension` 回答「这不是 169 条 ERB 语句之一，操作数语义由
      * [Opcode] 各常量的 KDoc 单独定义」。需要区分两类时用 [isStackOp]。
+     *
+     * 末位随「只许末尾追加」的新扩展码一起后移（[_RETF]、[_CALL_STR]、[_EVAL_INT_JZ]），栈码组区间 [STACK_OPS] 不动。
      */
-    val EXTENSION_OPS: IntRange = _CALL_BY_NAME.._STK_POP_SLOT_S
+    val EXTENSION_OPS: IntRange = _CALL_BY_NAME.._EVAL_INT_JZ
 
     // ------------------------------------------------------------------
     // 调用指令 b 操作数的标志位（CMP-57：单一真源）
@@ -747,10 +822,30 @@ object Opcode {
      */
     const val STR_RET_FLAG = 0x10000000
 
-    /** [_CALL]/[_CALL_BY_NAME] 的 b 去掉 try/尾跳/CALLF/str-ret 位后的实参数。 */
-    const val ARG_COUNT_MASK = (TRY_FLAG or JUMP_FLAG or CALLF_FLAG or STR_RET_FLAG).inv()
+    /**
+     * [_CALL] 的 b 操作数 bit27 = DIRECT 直调标志（M2 dispatch ISA，ABI-3 候选；
+     * 实树核验 bit27 空闲：四标志位 bit31/30/29/28 已占）。
+     *
+     * 置位 = `a` 是**最终执行入口**的物理下标，VM 不得再查 functionDispatch 表
+     * （查表会把被覆盖的前实现弹回链尾胜者，CALL_SUPER 链即成环）。发射方：
+     * 链接器回填 CALL_SUPER 目标（[com.eratw.port.core.patch.CallSentinels] 的
+     * super 哨兵决议）；无 Mod 产物恒不置位，取指快路径只多一次位与。
+     * 实装序：掩码先扩（本文件），链接器再发射，VM 消费随后（dispatch 查表落地时
+     * 同一点位生效）——当前 VM 未查 dispatch，直调物理下标的行为与此位语义一致。
+     */
+    const val DIRECT_CALL_FLAG = 0x08000000
 
-    /** 操作码 -> 名字（反汇编与错误信息用；下标即操作码，0..243 连续无空洞）。 */
+    /**
+     * [_CALL]/[_CALL_BY_NAME] 的 b 去掉 try/尾跳/CALLF/str-ret/DIRECT 位后的实参数。
+     *
+     * bit27 在 M2 起 = DIRECT 直调标志，**必须**排除在实参数之外——不扩掩码，
+     * 旧 VM 会把 DIRECT 位当 2^24 个实参（ModuleDescriptorTest 的掩码钉随本改动
+     * 从「仍含 bit27」改为「已排除 bit27」，契约事实变了钉跟着改）。
+     */
+    const val ARG_COUNT_MASK =
+        (TRY_FLAG or JUMP_FLAG or CALLF_FLAG or STR_RET_FLAG or DIRECT_CALL_FLAG).inv()
+
+    /** 操作码 -> 名字（反汇编与错误信息用；下标即操作码，0..[MAX_OPCODE] 连续无空洞）。 */
     val NAMES: Array<String> = arrayOf(
         "_NOP", "_HALT", "_SET_INT", "_SET_STR", "_MOV_INT", "_MOV_STR",
         "_ADD", "_SUB", "_MUL", "_DIV", "_MOD", "_NEG",
@@ -796,9 +891,14 @@ object Opcode {
         "_STK_CONCAT", "_STK_SREPEAT", "_STK_I2S",
         "_STK_JZ_POP", "_STK_JNZ_POP", "_STK_JZ_KEEP",
         "_STK_POP_SLOT_I", "_STK_POP_SLOT_S",
+        // 末尾追加段（244 `_RETF`、245 `_CALL_STR`、246 `_EVAL_INT_JZ`）：新扩展码只许加在这里，
+        // 栈码组的编号与顺序不动。
+        "_RETF",
+        "_CALL_STR",
+        "_EVAL_INT_JZ",
     )
 
-    /** 名字 -> 操作码（内部指令 + 169 条语句的规范名 + 4 条编译器扩展 + 42 条栈码）。 */
+    /** 名字 -> 操作码（内部指令 + 169 条语句的规范名 + 4 条编译器扩展 + 42 条栈码 + 1 条浮点返回 + 1 条运行期字符串调用 + 1 条条件位融合）。 */
     val BY_NAME: Map<String, Int> = buildMap {
         for ((i, n) in NAMES.withIndex()) put(n, i)
     }
@@ -1170,6 +1270,32 @@ object StatementAliases {
         StatementAlias("STOPSOUND", Opcode.STOPSOUND, 0, "STOPSOUND"),
         StatementAlias("THROW", Opcode.THROW, 0, "THROW"),
         StatementAlias("UPDATECHECK", Opcode.UPDATECHECK, 0, "UPDATECHECK"),
+        // ---- 4.981 上游自改 emuera 新增的语句名 ----
+        // 这 8 个名字在 `specs/isa.yaml` 里是**独立条目**（177 条 vs 169 个独立语句槽），
+        // 但没有自己的标记码（kind 升序连续编号 29..197 已满；`OpcodeTableTest` 的
+        // `opcodeOf` 走「规范名 → 别名集合唯一操作码」回退）。这里给它们登记别名，
+        // `StatementAliases.resolve` 才能把这些书写名映射到同族操作码。
+        // 该 opcode 只服务 `ErbProgramCompiler.emitStatementMarker` 的区间校验
+        // （Vm.kt:1192 判 `29..197`），运行期身份仍是语句池里的 FunctionCode 名
+        // （ErbWriter.stmtHead 落的是 `s.code.name`，扁平池落 `code.ordinal`）。
+        // 因此同族语句复用同一操作码是安全的：TINPUTNF/TINPUTSNF 用 TINPUT/TINPUTS 的码，
+        // HTML_PRINTC/HTML_PRINTLC 用 HTML_PRINT 的码，TRYCALLSTR 族用 CALL 的码。
+        // 依据：eraTW4.981 自改说明「画蛇又添足版自改emuera相关说明.txt」:17-18、:34-41、:274-276。
+        StatementAlias("TINPUTNF", Opcode.TINPUT, 1, "TINPUT"),
+        StatementAlias("TINPUTSNF", Opcode.TINPUTS, 1, "TINPUTS"),
+        StatementAlias("TEXT_BGC_ON", Opcode.SETBGCOLOR, 1, "SETBGCOLOR"),
+        StatementAlias("TEXT_BGC_OFF", Opcode.RESETBGCOLOR, 0, "RESETBGCOLOR"),
+        StatementAlias("DISABLE_INPUT_MACRO", Opcode.DO_NOTHING, 0, "DO_NOTHING"),
+        StatementAlias("ENABLE_INPUT_MACRO", Opcode.DO_NOTHING, 1, "DO_NOTHING"),
+        StatementAlias("HTML_PRINTC", Opcode.HTML_PRINT, 1, "HTML_PRINT"),
+        StatementAlias("HTML_PRINTLC", Opcode.HTML_PRINT, 2, "HTML_PRINT"),
+        StatementAlias("TRYCALLSTR", Opcode.CALL, 1, "CALL"),
+        StatementAlias("TRYCCALLSTR", Opcode.CALL, 2, "CALL"),
+        // SETIMAGELAYERL 是行锚定版 SETIMAGELAYER（spec: Instraction.Child.cs:4161-4209），
+        // 复用 display 段的 SETBGIMAGE(89)；SEQUENCEINPUT 是 method（spec: Creator.Method.cs:9690-9705），
+        // 复用 other 段的 DO_NOTHING(168)。二者只在 marker 区间校验里用，运行期身份仍是语句池名。
+        StatementAlias("SETIMAGELAYERL", Opcode.SETBGIMAGE, 1, "SETBGIMAGE"),
+        StatementAlias("SEQUENCEINPUT", Opcode.DO_NOTHING, 2, "DO_NOTHING"),
     )
 
     /** 名字（别名或规范名）-> 语句；名字唯一。 */

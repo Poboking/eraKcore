@@ -155,6 +155,14 @@ object EmueraConfigParser {
         store: ConfigStore,
         fix: Boolean,
         analysisMode: Boolean,
+        /**
+         * 值段切分策略（B8）。false = 主文件链口径：`Split(':')` 按**所有**冒号切、值取
+         * 第 2 段，值含冒号被截（仅 TextEditor 按 `ConfigData.cs:548-563` 重拼）——官方
+         * 怪癖原样保留。true = 覆盖表通道：只在**首个**冒号处切，首冒号之后的全文都是值
+         * （这张表的值本就来自文件原文/`toOverrideMap`，摊平成 `key:value` 行再全冒号重析
+         * 会把值里的冒号凭空截掉，纯移植侧自伤，没有任何原版依据）。
+         */
+        splitValueOnFirstColon: Boolean = false,
         resolve: (String) -> ConfigItem?,
     ): ConfigFileLoadResult {
         val records = ArrayList<ConfigLineRecord>(file.lines.size)
@@ -170,7 +178,13 @@ object EmueraConfigParser {
                 records += ConfigLineRecord(lineNo, rawLine, ConfigLineStatus.COMMENT)
                 continue // ConfigData.cs:529-532；注意没有 Trim，行首空格的 `;` 不算注释
             }
-            val parts = text.split(':') // ConfigData.cs:534 —— Split(new char[1]{ ':' })，按**所有**冒号切
+            val parts = if (splitValueOnFirstColon) {
+                // B8：覆盖表通道只在首个冒号处切一次；无冒号行与全冒号口径同样落 NO_SEPARATOR。
+                val cut = text.indexOf(':')
+                if (cut < 0) emptyList() else listOf(text.substring(0, cut), text.substring(cut + 1))
+            } else {
+                text.split(':') // ConfigData.cs:534 —— Split(new char[1]{ ':' })，按**所有**冒号切
+            }
             if (parts.size < 2) {
                 records += ConfigLineRecord(lineNo, rawLine, ConfigLineStatus.NO_SEPARATOR)
                 continue // ConfigData.cs:535-538
@@ -358,11 +372,16 @@ object EmueraConfigParser {
      * 再按 `upperEnLabel` 在 `REPLACE` 组补一次匹配 —— **主文件链不享受这条放宽**
      * （[loadGameFile] 仍只认 `GAME` 组，spec: `ConfigData.cs:539`），只有覆盖表这条
      * 移植侧形状需要它。值取 `parts[1]` 再 `Trim()` —— 与 [toOverrideMap] 成对，
-     * 所以宿主表走这条路与走三层链**读到的值相同**；差异只有两处，逐条登记在交付报告：
+     * 所以宿主表走这条路与走三层链**读到的值相同**；差异逐条登记：
      *   * `EditorArgument`：原版把它的值按**未 Trim** 的原文直写（spec: `ConfigData.cs:566`），
      *     表里的值已被宿主 Trim 过；
      *   * `fixed` 层的**钉位**：表是值快照，表达不了 `Fixed` 标志（spec: `ConfigData.cs:493` 的
-     *     `fix: true` 与 `:573-576`），所以走这条路的条目全部不钉。
+     *     `fix: true` 与 `:573-576`），所以走这条路的条目全部不钉；
+     *   * **值含冒号**（B8 修正）：主文件链按 `ConfigData.cs:534` 把所有冒号当分隔符、值取
+     *     第 2 段，只有 TextEditor 按 `:548-563` 重拼——那是官方截断怪癖，原样保留；本通道
+     *     的行是由 [toOverrideMap] **摊平再造**的移植侧形状，再造再碎会把值里的冒号凭空截掉
+     *     （`C:\tools\ed.exe --arg:x` 之外的一切含冒号值都会丢尾段），故本通道只在**首个**
+     *     冒号处切一次、首冒号后全文为值（`splitValueOnFirstColon`），往返无损。
      */
     fun loadOverrideMap(
         store: ConfigStore,
@@ -375,6 +394,12 @@ object EmueraConfigParser {
         store,
         fix,
         analysisMode,
+        // B8：摊平只是行形状，值段**不得**再按全冒号切碎重析——覆盖表的值本就来自文件原文
+        // （[toOverrideMap] 收的就是重拼/截断后的最终 `rawValue`），值含冒号（`C:\a`、
+        // 时间串 `12:30` 一类）在旧实现会被凭空截掉、只剩首个冒号到次个冒号之间那一段。
+        // 本通道改为首个冒号处切一次，首冒号后的全文都是值。主文件链不受影响（官方截断
+        // 与 TextEditor 特判照旧，spec: ConfigData.cs:534、:548-563）。
+        splitValueOnFirstColon = true,
         resolve = { key ->
             // 覆盖表可以带 REPLACE 组的键（宿主把 `_Replace.csv` 并进同一张快照后，
             // [toOverrideMap] 写出的就是 GAME + REPLACE 两组英文标签）。主文件链只认
@@ -486,6 +511,12 @@ object EmueraConfigParser {
      * 行切分用 `ReadLine` 口径：**末尾的换行不产生空行**（`"a\n"` ⇒ 1 行而不是 2 行）。
      * 这条直接影响装载链报告里的行数读数，见 [ConfigChainLayer.lineCount] 的语料实测值。
      *
+     * 换行符认 `\r\n` / `\r` / `\n` **三种**（[splitReadAllLines]）：原版 `EraStreamReader.Open`
+     * 是 `File.ReadAllLines(...)`（`MinorShift.Emuera.Sub/EraStreamReader.cs:52`），.NET 的
+     * 行定义包含**单独的 CR**。只认 `\n` 会让一份 CR 换行的 `emuera.config` 塌成一行：
+     * 首个键带着整份文件当值（多半解析失败 ⇒ 本层中止），其后所有键静默回出厂值 ——
+     * 屏上没有任何提示，玩家只看到「设置没生效」。
+     *
      * @return null 表示「读不动」：不存在或解码失败，一律按原版 `return false` 静默跳过
      *   （spec: `ConfigData.cs:514-522`）
      */
@@ -516,12 +547,38 @@ object EmueraConfigParser {
                     .toString()
             }.getOrNull() ?: return null
         }
-        val lines = text.split('\n').map { it.removeSuffix("\r") } // 前置剥 \r，行文本不含行尾符
-        return if (lines.isNotEmpty() && lines.last().isEmpty() && text.endsWith("\n")) {
-            lines.dropLast(1) // ReadLine 口径：文件以换行结尾时不产生尾随空行
-        } else {
-            lines
+        return splitReadAllLines(text)
+    }
+
+    /**
+     * `File.ReadAllLines` 的行切分（`MinorShift.Emuera.Sub/EraStreamReader.cs:52`）：
+     * `\r\n` / `\r` / `\n` 都是行尾，行文本不含行尾符；**文件末尾的换行不产生尾随空行**，
+     * 空文件给 0 行（`ReadAllLines` 对 0 字节文件返回空数组，不是「一个空行」）。
+     *
+     * 与 [ConfigFile.stripBom] 的分工：本函数只切行，BOM 由调用方在第 0 行剥。
+     */
+    private fun splitReadAllLines(text: String): List<String> {
+        if (text.isEmpty()) {
+            return emptyList()
         }
+        val out = ArrayList<String>()
+        var start = 0
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (c == '\r' || c == '\n') {
+                out += text.substring(start, i)
+                if (c == '\r' && i + 1 < text.length && text[i + 1] == '\n') {
+                    i++ // CRLF 算一个行尾
+                }
+                start = i + 1
+            }
+            i++
+        }
+        if (start < text.length) {
+            out += text.substring(start)
+        }
+        return out
     }
 
     /** 定位 + 读出一层；读不到的层只带 [ConfigLayerPresence]，不带行。 */

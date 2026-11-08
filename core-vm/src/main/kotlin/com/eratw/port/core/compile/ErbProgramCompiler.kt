@@ -23,6 +23,7 @@ import com.eratw.port.core.expr.Unary
 import com.eratw.port.core.expr.UnaryAfter
 import com.eratw.port.core.expr.VarRef
 import com.eratw.port.core.fn.Builtins
+import com.eratw.port.core.patch.CallSentinels
 import com.eratw.port.core.stmt.AssignStmt
 import com.eratw.port.core.stmt.Argument
 import com.eratw.port.core.stmt.BlockRole
@@ -156,7 +157,8 @@ private class VarArgSite(val target: String, val position: Int, val evalPc: Int,
  * - **marker 编码**（[marker]）：`op = 语句操作码（29..197）`、`a = 语句池下标`
  *   （[CodeBuilder.statement]，按身份追加、严禁去重——契约 C2）、`b = 0`、`c = SlotAddr.NONE`。
  *   运行期由 VM 主循环（契约 C4）取回**同一个 `Statement` 实例**交给语句层。
- * - **掉尾 RESULT 清零**：合成一条 `RESULT = 0` 赋值语句投进池（spec: Process.cs:1060-1063），
+ * - **掉尾 RESULT 清零（仅非方法函数）**：合成一条 `RESULT = 0` 赋值语句投进池
+ *   （spec: Process.cs:1059-1065，`#FUNCTION`/`#FUNCTIONS` 方法不清），
  *   `_RET` 本身仍从 VM 临时槽取值。
  *
  * ## 其余模型
@@ -206,9 +208,61 @@ class ErbProgramCompiler(
      * 见 `RealCorpusCompile` / `GoldenPipeline` / `CorpusCompile` 的装配点。
      */
     val callDefaults: CallDefaults = emptyMap(),
+    /**
+     * R7-C1 补丁编译注入（CONTRACT-R7-C §2/C1；跨界最小注入，组长授权 2026-11-01）：
+     * 预建的带基线 [CodeBuilder]（六个基线参数见 CodeBuilder KDoc）。null = 旧路径
+     * （自建零基线 builder，既有路径逐位不变）。消费面只经 [b] 间接抵达发射与 [build]
+     * 的产出，本类其他方法不读该参数（注入面最小化，验收按 diff 逐行审）。
+     */
+    codeBuilder: CodeBuilder? = null,
+    /**
+     * R7-C1 补丁编译注入：base 侧函数名（大写键）→ 绝对函数下标的解析回调。
+     * 只在 [build] 的 `_CALL` 回填处消费，查找顺序钉死为**先内后外**三层：
+     *
+     * 1. `b.functionIndex`（补丁自身已声明的函数；返回值已含 functionBase 偏移）；
+     * 2. 本回调（只解析 base 名；未命中返回负值即可，不抛）；
+     * 3. 两处都未命中 ⇒ [CompileException]「未定义的函数」编译期拒绝——静默放行会把
+     *    `_CALL` 的 a 留在占位 0，是 R7 不变量 I2 要堵的「调到错函数」错位形态。
+     *
+     * null = 旧路径（无外部解析面，行为与改前逐位相同）。
+     */
+    val externalFunctionIndex: ((String) -> Int)? = null,
+    /**
+     * R7-D2 注入（短路位 I6-④ 判据面；最小注入纪律同 [codeBuilder]/[externalFunctionIndex]：
+     * 缺省 null = 旧路径，erbcc 全量与既有装置不传，行为逐位不变）。
+     *
+     * 保持 `FuncCall` 原节点（运行期重入通道）的用户方法调用在**补位之后**经此上报：
+     * 上报点 = [padRuntimeCalls] 的 userConsumed 分支（分类 = METHOD_INT/STR/UNKNOWN，
+     * 内建与未知名不报）；上报形态 = 补位后的节点 + 调用方签名。probe 遍与正式遍各跑
+     * 一次 [padRuntimeCalls] ⇒ 同一调用点上报两次，消费方按（调用方, 名字, 行）去重。
+     *
+     * 消费方 = [com.eratw.port.core.compile.PatchCompiler] 的 I6-④ 空侧车判据：这类
+     * 调用点的实参省略不产生 `callArgs` 记录（callRefs 扫描覆盖不到），省略位在运行期
+     * 重入绑定时按原版 `Arguments[i] == null` 跳过（spec: ProcessState.cs:437）——
+     * 全量路径（callDefaults 全）会编译期补位而补丁不会 = 静默错值。
+     */
+    val keptUserCallSink: ((FuncCall, FuncSig) -> Unit)? = null,
+    /**
+     * 条件位融合开关（MODERN-T1，缺省开）：IF / SIF / ELSEIF / WHILE 的「INT 表达式求值 +
+     * 跳假」发射成一条 [Opcode._EVAL_INT_JZ] 超指令。`-Deratw.perf.noEvalJumpFuse=true`
+     * 关掉 —— 关态逐字节回到 `evalTemp` + `emitJumpIfFalse` 的旧序列（A/B 与反向证明用）。
+     * 融合只改指令流，不改任何可观察语义（编码与等价性见 `Opcode._EVAL_INT_JZ` 的 KDoc）。
+     */
+    private val fuseEvalJump: Boolean = !java.lang.Boolean.getBoolean("eratw.perf.noEvalJumpFuse"),
+    /**
+     * **Mod 包编译档**（D-3 kojo 派发覆盖契约，era-arch §16）：true = 保留
+     * `CALL SUPER(...)` / `TRYCALL SUPER(...)` 表面语法，编译成 `_CALL.a` 的 super 哨兵
+     * （[CallSentinels.CALL_SUPER_SENTINEL] / [CallSentinels.TRY_CALL_SUPER_SENTINEL]），
+     * 由链接器回填「本函数的前一同名实现」+ DIRECT 位；同档内 `@SUPER` 定义被拒绝。
+     *
+     * 缺省 false = 原版/base 编译档：`SUPER` 仍是**普通函数名**（与引入前逐位一致；
+     * 4.980/4.981 语料 `@SUPER` / `CALL SUPER` 各 0 处）。之所以按档而不是按名字全局保留：
+     * 语料本来可以定义 `@SUPER`，全局保留会改变普通语料的编译结果。
+     */
+    val allowSuperCalls: Boolean = false,
 ) {
 
-    private val b = CodeBuilder()
+    private val b: CodeBuilder = codeBuilder ?: CodeBuilder()
 
     /**
      * 语句树规范折叠器（MEM-OPT）。折叠发生在 [emitStatementMarker]（唯一入池口），
@@ -283,6 +337,15 @@ class ErbProgramCompiler(
         if (key in declaredNames) {
             throw CompileException(sig.name, -1, "函数重复声明: ${sig.name}")
         }
+        // Mod 包编译档：SUPER 是 CALL SUPER 的表面语法，不得同时充当用户函数名
+        // （两义会让「定义 @SUPER」与「调用上一实现」在同一名字上静默串味）。
+        if (allowSuperCalls && key == CallSentinels.SUPER_CALL_NAME) {
+            throw CompileException(
+                sig.name,
+                -1,
+                "SUPER 是 Mod 保留名（CALL SUPER 的调用链语法，era-arch §16 / D-3）：Mod 包内不得定义同名函数",
+            )
+        }
         // pass 1：探测 maxArgc（暂存区大小）
         val probe = FunctionPass(sig, statements, knownFunctions, tempBase = 0, out = CodeBuilder(), exprCalls = exprCalls)
         probe.run()
@@ -297,11 +360,26 @@ class ErbProgramCompiler(
         val index = b.declareFunction(sig.name, entryPc, sig.arity, sig.arity, sig.paramNames)
         declaredNames.add(key)
         varArgSites.addAll(pass.varArgSites)
-        // spec: Process.cs:1060-1063 —— 掉尾（无 RETURN/RETURNF）的函数先把 RESULT 清 0 再 _RET。
+        // spec: Process.cs:1059-1065 —— 掉尾（无 RETURN/RETURNF）时，只有**非方法**函数先清
+        // RESULT 再返回（`if (!state.IsFunctionMethod) vEvaluator.RESULT = 0L`）；`#FUNCTION` /
+        // `#FUNCTIONS` 方法掉尾保留函数体内最后一次 RESULT 写入（方法返回值另走 ReturnF 通道）。
+        // 语料依赖后者：M_KOJO_K70_01_イベント.ERB:6087 `CALLF M_KOJO_K70_KOSUZUBOOM()` 后
+        // :6088 直接 `RAND:RESULT`，而被调 #FUNCTIONS 在 RESULT=5 后落尾。
         // 契约 C1/C3：RESULT 是具名变量，不得落到 VM 槽 —— 投一条合成的 `RESULT = 0`
         // 赋值语句进语句池，由语句层 execAssign 写 VariableStore；`_RET` 仍从帧内临时槽取值。
-        emitStatementMarker(b, synthAssign(resultRef(), OperatorCode.ASSIGNMENT, IntLiteral(0), -1, "RESULT = 0"))
-        b.emit(Opcode._RET, SlotAddr.NONE, 0, 0, -1)   // 落到函数尾的兜底返回
+        if (!sig.isMethod) {
+            emitStatementMarker(b, synthAssign(resultRef(), OperatorCode.ASSIGNMENT, IntLiteral(0), -1, "RESULT = 0"))
+        }
+        // 4.981 浮点方法（路次 g2-returnf-float）的掉尾走浮点通道：原版掉尾 = `Return(0)` →
+        // `IsFunctionMethod` 分支转 `ReturnF(null)`（fork-src Process.ScriptProc.cs:77-82 +
+        // Process.State.cs:467-475）⇒ `MethodReturnValue` 留 null ⇒ 消费侧按声明类型给默认项 =
+        // 0.0（UserDefinedMethodTerm.cs:39-49）。本侧用 `_RETF NONE` 表达同一件事，
+        // 且**只改浮点位**：int/str 方法的掉尾兜底 `_RET` 一位未动。
+        if (sig.returnsFloat) {
+            b.emit(Opcode._RETF, SlotAddr.NONE, 0, 0, -1)
+        } else {
+            b.emit(Opcode._RET, SlotAddr.NONE, 0, 0, -1)   // 落到函数尾的兜底返回
+        }
         val slotCount = maxOf(sig.arity, pass.maxTemp + 1)
         b.setFunctionSlots(index, slotCount)
         // 标签表升格导出：name → (下标, pc)。下标 = _JUMP_DYN 的 a 操作数；pc 供
@@ -367,8 +445,11 @@ class ErbProgramCompiler(
         canonicalizer.release()
         for (fb in compiled) {
             for (r in fb.callRefs) {
-                val idx = b.functionIndex(r.target)
-                if (idx < 0) {
+                // 先内后外三层（见 externalFunctionIndex 的 KDoc）：补丁自身函数优先，
+                // 其次 base 解析回调，两处都没有 = 编译期拒绝（不留占位下标）。
+                val idx = b.functionIndex(r.target).takeIf { it >= 0 }
+                    ?: externalFunctionIndex?.invoke(r.target)
+                if (idx == null || idx < 0) {
                     throw CompileException(fb.sig.name, r.line, "未定义的函数: ${r.target}")
                 }
                 b.patch(r.pc, 1, idx)
@@ -538,7 +619,7 @@ class ErbProgramCompiler(
     }
 
     /**
-     * 系统变量 RESULT 的引用（掉尾清零用）。spec: Process.cs:1060-1063
+     * 系统变量 RESULT 的引用（非方法函数掉尾清零用）。spec: Process.cs:1059-1065
      *
      * **必须带 1 个下标**（A15-E2E 任务 1；spec: diagnosis §2）：RESULT 在 registry 是
      * 1 维整数数组（SystemLayout.kt:25 `int1D` → Storage.G_INT1，VarDef.kt:115
@@ -808,6 +889,14 @@ class ErbProgramCompiler(
                 else -> when (lowered.operandType) {
                     OperandType.INT -> out.emit(Opcode._EVAL_INT, out.expr(lowered), dstRaw, 0, line)
                     OperandType.STR -> out.emit(Opcode._EVAL_STR, out.expr(lowered), dstRaw, 0, line)
+                    // 浮点（4.981 升版）：本作**不新增浮点操作码/浮点槽**，浮点值只在
+                    // 「内建调用的实参」位被求值（`TOINT(expr * 0.7)` 的整个 FuncCall 作为
+                    // INT 表达式进表达式池，运行期实参经 Expr.toValue 得 FloatV）。
+                    // 直接落在整型落点（`X = 0.7` / `IF 0.7`）一律显式失败，不静默截断 ——
+                    // 语料 4,229 处浮点写法全部经 TOINT/比较，无裸落点。TODO(verify)：无 C# 证据。
+                    OperandType.FLOAT -> throw CompileException(
+                        sig.name, line, "浮点表达式不能直接用于整型上下文（需 TOINT 转换）",
+                    )
                 }
             }
             drainRetTemps(mark)
@@ -824,6 +913,52 @@ class ErbProgramCompiler(
         private fun evalTempPc(e: Expr, line: Int): Pair<Int, Int> {
             val t = alloc()
             return t to evalExprTo(e, local(t), line)
+        }
+
+        /**
+         * 条件位「求值 + 跳假」的唯一发射口（MODERN-T1 融合点）。
+         *
+         * 开态（缺省）：条件降级后是 INT 且非字面量时，发一条 [_EVAL_INT_JZ]（表达式下标 a、
+         * 目标槽 b、相对偏移 c），旧序列的两条指令压成一条；字面量/字符串/浮点仍走旧形态
+         * （字面量融合无收益，字符串条件原样保持，浮点照旧显式失败）。
+         * 关态：逐字节回到 [evalTemp] + [emitJumpIfFalse]。
+         *
+         * 分配序与 [evalTemp] 一致（先 `alloc` 再 `lowerExpr`）：帧槽数/临时槽复用与改造前
+         * 完全相同，产物只在指令流上少一条。降级新增的返回临时槽按 [pendingRets] 在消费
+         * 指令发射后归还（口径同 [evalExprTo]）。
+         */
+        private fun evalJumpIfFalse(e: Expr, line: Int): Fixup {
+            if (!fuseEvalJump) {
+                val c = evalTemp(e, line)
+                val fix = emitJumpIfFalse(local(c), line)
+                free(c)
+                return fix
+            }
+            val t = alloc()
+            val mark = pendingRets.size
+            val lowered = lowerExpr(e)
+            if (lowered !is IntLiteral && lowered !is StrLiteral && lowered.operandType == OperandType.INT) {
+                val pc = out.emit(Opcode._EVAL_INT_JZ, out.expr(lowered), local(t), 0, line)
+                drainRetTemps(mark)
+                free(t)
+                return Fixup(pc, 3)
+            }
+            // 非融合形态与 [evalExprTo] 的后半段逐字同形（字面量 / 字符串 / 浮点错误）。
+            when (lowered) {
+                is IntLiteral -> out.emit(Opcode._SET_INT, local(t), out.constant(lowered.value), 0, line)
+                is StrLiteral -> out.emit(Opcode._SET_STR, local(t), out.string(lowered.value), 0, line)
+                else -> when (lowered.operandType) {
+                    OperandType.INT -> error("INT 条件应已走融合分支")
+                    OperandType.STR -> out.emit(Opcode._EVAL_STR, out.expr(lowered), local(t), 0, line)
+                    OperandType.FLOAT -> throw CompileException(
+                        sig.name, line, "浮点表达式不能直接用于整型上下文（需 TOINT 转换）",
+                    )
+                }
+            }
+            drainRetTemps(mark)
+            val fix = emitJumpIfFalse(local(t), line)
+            free(t)
+            return fix
         }
 
         // ---- 主循环 -------------------------------------------------------
@@ -991,6 +1126,42 @@ class ErbProgramCompiler(
                         // 字符串临时（STR 表达式自然落字符串槽；INT 表达式落整数槽，
                         // `_RETS` 读 getStr 得 "" —— 与原版 ReturnF(longTerm) 后消费侧
                         // GetStrValue→"" 同口径，SuperUserDefinedMethodTerm.cs:33-38）。
+                        //
+                        // 4.981 第三通道：`returnsFloat` 的浮点位（[_RETF]，路次 g2-returnf-float）。
+                        // 判据与 int/str 两条**同一条**：按被调方法的**声明类型**选通道
+                        // （原版 `RETURNF` 的 DoInstruction 不看声明，只看 `func.Argument` 的项类型，
+                        // fork-src Instraction.Child.cs:3737-3746；通道差异发生在消费侧的项类型
+                        // 匹配，UserDefinedMethodTerm.cs:19-38）—— 本移植把「消费侧按声明类型取
+                        // 对应通道」提前到发射点，与 `returnsStr` 的既有口径同形。
+                        //
+                        // **浮点值不进帧槽**：帧槽只有整型列/字符串列（Vm.kt 的 frameInts/frameStrs），
+                        // 所以 `_RETF` 的 a 是**表达式池下标**，运行期在被调帧内求值后落
+                        // `VirtualMachine.floatResult` 寄存器。
+                        if (sig.returnsFloat) {
+                            val e = s.value
+                            if (e != null && e.operandType == OperandType.FLOAT) {
+                                // 浮点表达式：降级（嵌套用户方法调用要按原版求值序前移），再交 `_RETF`。
+                                // mark/drain 口径与 evalExprTo 一致（新分配的被调帧内返回临时
+                                // 在本条值指令发射后归还）。
+                                val mark = pendingRets.size
+                                val lowered = lowerExpr(e)
+                                out.emit(Opcode._RETF, out.expr(lowered), 0, 0, s.line)
+                                drainRetTemps(mark)
+                            } else {
+                                // 无参 → 原版 `ReturnF(null)`，消费侧按声明类型给默认项 = 0.0
+                                // （isa.yaml:1861 + UserDefinedMethodTerm.cs:39-49）⇒ `_RETF NONE`。
+                                // 类型不符（整数/字符串表达式落进浮点方法）在原版只是**解析警告**
+                                // （fork-src Instraction.Child.cs:3725-3732，整数表达式那一支还显式
+                                // 注释「Int to Float: auto-promote, no warning」），运行期消费侧
+                                // `GetFloatValue` 对非 `SingleFloatTerm` **静默得 0.0**
+                                // （UserDefinedMethodTerm.cs:31-35）⇒ 本侧同样不报错，且表达式
+                                // **仍要求值**（副作用不丢：`RETURNF RAND(...)` 一类照样抽号），
+                                // 只是求值结果按原版被丢弃、返回落 NONE。
+                                if (e != null) free(evalTemp(e, s.line))
+                                out.emit(Opcode._RETF, SlotAddr.NONE, 0, 0, s.line)
+                            }
+                            return
+                        }
                         val t = s.value?.let { evalTemp(it, s.line) }
                         val src = t?.let { local(it) } ?: SlotAddr.NONE
                         if (sig.returnsStr) {
@@ -1033,17 +1204,13 @@ class ErbProgramCompiler(
         // ---- IF 家族 --------------------------------------------------------
 
         private fun compileIf(s: IfStmt) {
-            val c = evalTemp(s.condition, s.line)
-            val fix = emitJumpIfFalse(local(c), s.line)
-            free(c)
+            val fix = evalJumpIfFalse(s.condition, s.line)
             scopes.add(IfScope().apply { pending!!.add(fix) })
         }
 
         /** SIF：条件为假跳过紧随的一条语句（主循环负责补跳）。spec: isa.yaml SIF。 */
         private fun compileSif(s: IfStmt) {
-            val c = evalTemp(s.condition, s.line)
-            sifFixup = emitJumpIfFalse(local(c), s.line)
-            free(c)
+            sifFixup = evalJumpIfFalse(s.condition, s.line)
         }
 
         private fun compileElseIf(s: ElseIfStmt) {
@@ -1058,9 +1225,7 @@ class ErbProgramCompiler(
             // 旧实现把 pending 置 null 后 `error("unreachable")` 抛 IllegalStateException，
             // 会让整段函数编译中断（审计 finding 1）。
             val pending = sc.pending ?: ArrayList<Fixup>().also { sc.pending = it }
-            val c = evalTemp(s.condition, s.line)
-            pending.add(emitJumpIfFalse(local(c), s.line))
-            free(c)
+            pending.add(evalJumpIfFalse(s.condition, s.line))
         }
 
         private fun compileElse(s: ElseStmt) {
@@ -1088,6 +1253,17 @@ class ErbProgramCompiler(
          * missJump：目标缺失时要跳到 catch 体首的 `_JUMP`（动态 TRYC 与静态 CALL 系缺失）；
          * 常量 GOTO 缺失（TRYCGOTO）原版直接跳过、不跳 catch（FunctionIdentifier.cs:3685-3693），
          * 传 null。
+         *
+         * **动态 TRYC 没有「空名」这一支**（ENGFIX-2 拆除 521c42c3 自造的空名守卫）：
+         * 空串函数名与普通未命中同形 —— oracle：动态名运行期只走
+         * `text = FuncnameTerm.GetStrValue(exm)` → `CalledFunction.CallFunction(process, text, func)`
+         * （spec: FunctionIdentifier.cs:3574-3575，对 `text` 无任何空串特判）；
+         * `CallFunction` 查不到即 `return null`（spec: CalledFunction.cs:93-105，同样无空串特判）；
+         * `calledFunction == null && isTry` → `state.JumpTo(func.JumpToEndCatch)`
+         * （spec: FunctionIdentifier.cs:3577-3588），而 TRYC 头的 `JumpToEndCatch` 由 CATCH 行
+         * 赋值（spec: ErbLoader.cs:1339-1348），运行期 `runScriptProc` 先 `ShiftNextLine()` 再执行
+         * （spec: Process.cs:988-993）⇒ 落点 = **CATCH 行的下一行 = catch 体首行**。
+         * 装载期开块口径同：`ErbLoader.cs:1339-1341` 只按 FunctionCode 判配对，不看名字是否为空。
          */
         private fun bindTrycMiss(code: FunctionCode, line: Int, missJump: Fixup?) {
             if (code !in TRYC_CODES) {
@@ -1229,12 +1405,11 @@ class ErbProgramCompiler(
                 free(c2)
             } else {
                 // CORE-01：字符串 TO **不走**运算符重载。原版 CaseExpression.cs:62-70 是一段独立的
-                // 区间判定（`compare(lo, Is) <= 0` 成立才判 `compare(Is, hi) <= 0`），而运算符版的
-                // 字符串 `>=`/`<=` 带两处官方 bug（Expr.kt strCompare / specs/verify-notes.md §1：
-                // `>=` 完全反向、`<=` 相等泄漏）。旧实现把这两个运算符接进区间判定 ⇒ 命中集合
-                // 整体取反（`CASE "a" TO "c"` 配 "b" 永不命中，`CASE "m" TO "z"` 配 "a" 反命中）。
-                // bug 本体按 ADR-005 原样保留，区间判定改走 [strCaseRange]（`!(a > b)` 表达 `<=`，
-                // 短路保序与原版一致）。
+                // 区间判定（`compare(lo, Is) <= 0` 成立才判 `compare(Is, hi) <= 0`）。移植早期把
+                // 字符串 `>=`/`<=` 运算符接进区间判定，而运算符当时按 1.824 复刻成了反向/相等泄漏
+                // ⇒ 命中集合整体取反（`CASE "a" TO "c"` 配 "b" 永不命中，`CASE "m" TO "z"` 配 "a" 反命中）。
+                // 区间判定改走 [strCaseRange]（`!(a > b)` 表达 `<=`，短路保序与原版一致）；
+                // 运算符判据已于 MODERN-T5 校准回 4.981（OperatorMethod.cs:547/:578）。
                 // 目标只求值一次（见 [compileCaseNormal] 的字符串分支说明）。
                 val c = evalTemp(strCaseRange(selectTargetRead(sc, line), l, r, line), line)
                 sc.hitJumps.add(emitJumpIfTrue(local(c), line))
@@ -1469,9 +1644,7 @@ class ErbProgramCompiler(
 
         private fun compileWhile(s: WhileStmt) {
             val headPc = out.here()
-            val c = evalTemp(s.condition, s.line)
-            val exit = emitJumpIfFalse(local(c), s.line)
-            free(c)
+            val exit = evalJumpIfFalse(s.condition, s.line)
             scopes.add(LoopScope(headPc, LoopScope.Kind.WHILE, listOf(exit)))
         }
 
@@ -1906,7 +2079,10 @@ class ErbProgramCompiler(
                     base
                 } else {
                     val padded = padOmittedArgs(e.name, args)
-                    if (padded === args) base else base.copy(args = padded)
+                    val out = if (padded === args) base else base.copy(args = padded)
+                    // R7-D2：保持节点的用户方法调用上报（缺省 sink = null 时零开销，行为不变）。
+                    keptUserCallSink?.invoke(out, sig)
+                    out
                 }
             }
             is Binary -> {
@@ -2133,7 +2309,8 @@ class ErbProgramCompiler(
                 }
                 if (ch) ReturnStmt(vs, s.args, s.line, s.raw) else s
             }
-            // RETURNFORM 同理（RETURNF 仍编 `_RET`，其表达式在编译期已求值，不必重写）。
+            // RETURNFORM 同理（RETURNF 的三条通道 `_RET`/`_RETS`/`_RETF` 都在编译期就地发射并
+            // 求值表达式，其语句本体不入池，故不必重写）。
             is ReturnFStmt -> {
                 val v0 = s.value
                 if (s.code == FunctionCode.RETURNFORM && v0 != null) {
@@ -2171,6 +2348,26 @@ class ErbProgramCompiler(
         private fun lowerPoolInstruction(s: InstructionStmt): Statement {
             if (s is PrintDataStmt || s is DataStmt || s is DataListStmt) return s
             val rebuild = poolInstructionRebuilder(s) ?: return s
+            // 语句位内建「方法」（FunctionIdentifier.cs:584-604 的 METHOD_Instruction）：
+            // 原版求值的是整个 methodTerm，FunctionMethod 拿到**未求值的 AExpression 列表**，
+            // 由方法体自己按序决定何时求值。典型是 DataTableCellSetMethod
+            // （FunctionMethodCreator.cs:2568-2619）：先求 args[0]/[4]/[1]/[2]，只有
+            // `dataRow != null && Columns.Contains(列名)` 成立才碰 args[3]；列名为空 ⇒
+            // 直接 return -3，value 位的用户 #FUNCTION 根本不会被求值。
+            //
+            // 对声明了 evalRef 的内建（= 需要裸 Expr 实参的方法），这里**不能**走
+            // lowerArgument —— 它会把参数层所有用户方法 FuncCall 降成前导 _CALL +
+            // 返回哨兵，副作用实参在进方法体之前就被求值，短路语义被抹掉。改为只做
+            // 缺省实参补位（padRuntimeCalls 不发射指令），实参保持 Expr 形态，运行期
+            // 经 EvalContext.callFunctionRef 的引用路径交回方法体按需求值。
+            // 表达式位本来就走这条路（lowerFuncCall 对 BUILTIN 保持原节点），此处把
+            // 语句位与表达式位对齐，不是新语义。
+            if (s is MethodStmt && Builtins.registry.needsExprArgs(s.methodName)) {
+                val a = s.args as? MethodArgument ?: return s
+                val term = a.methodTerm ?: return s
+                val kept = padRuntimeCalls(term)
+                return if (kept === term) s else rebuild(MethodArgument(kept))
+            }
             val args = lowerArgument(s.args)
             return if (args === s.args) s else rebuild(args)
         }
@@ -2478,6 +2675,46 @@ class ErbProgramCompiler(
             // 在执行 CALL/JUMP 语句时按当前帧 isMethod 抛 CodeEE。PARTIAL(16) 方法体/SIF 后
             // 禁用同理属语句层（spec: EmueraConsole.cs:2216-2219、:3049-3052）。
             when {
+                // ---- CALLSTR 族（TRYCALLSTR / TRYCCALLSTR）：运行期整串解析 ----
+                // [_CALL_STR]（契约 C-CALL-STR-OPCODE@1）：a=整串槽（由 _EVAL_STR 写入）、
+                // b=bit31 try | bit30 jump（低位不解释 argc）、c=返回槽（TRYC 作命中标志槽）。
+                // 实参与目标名都在串内、运行期解析（VmHost.resolveRuntimeCall），故此处
+                // **不**发射实参求值指令、也**不**登记 callArgs 表（运行期由 onRuntimeCallArgs 投递）。
+                code in CALLSTR_CODES -> {
+                    val nameTerm = (args as? SpCallArgument)?.funcNameTerm
+                        ?: throw CompileException(sig.name, line, "$code 缺少函数名字符串表达式")
+                    // 运行期实参暂存区：argc 运行期才定，本函数预留 R0..R(STAGE-1)，
+                    // probe/正式两遍共同推进 maxArgc（决定 tempBase ⇒ 帧槽数下界）。
+                    if (maxArgc < RUNTIME_CALL_STAGE_SLOTS) maxArgc = RUNTIME_CALL_STAGE_SLOTS
+                    if (!isTryc) {
+                        // TRYCALLSTR（纯 TRY）：命中调用、未命中跳过本行 —— c=NONE、bit31 置位。
+                        val nameT = evalTemp(nameTerm, line)
+                        out.emit(
+                            Opcode._CALL_STR, local(nameT),
+                            TRY_BIT or (if (isJump) JUMP_BIT else 0), SlotAddr.NONE, line,
+                        )
+                        free(nameT)
+                    } else {
+                        // TRYCCALLSTR（TRYC）：两步式（口径同 FORM 系的 TRYC 分支）——
+                        //   _CALL_STR 整串槽, (bit31 try|bit30 jump), c=hitFlag
+                        //   _JUMP_IF_TRUE hitFlag → try 体首
+                        //   _JUMP → catch 体首（missJumps，CATCH 行回填）
+                        // 空串/空白名不特判：与 [bindTrycMiss] 的 oracle 同形（未命中 = 进 catch 体）。
+                        val nameT = evalTemp(nameTerm, line)
+                        val flag = alloc()
+                        out.emit(
+                            Opcode._CALL_STR, local(nameT),
+                            TRY_BIT or (if (isJump) JUMP_BIT else 0), local(flag), line,
+                        )
+                        free(nameT)
+                        val hit = emitJumpIfTrue(local(flag), line)
+                        free(flag)
+                        val missJump = emitJumpAlways(line)
+                        patch(listOf(hit), out.here())   // try 体首 = 跳越跳转之后的第一条指令
+                        bindTrycMiss(code, line, missJump)
+                    }
+                }
+
                 // ---- 静态 $标签（GOTO / TRYGOTO / TRYCGOTO）：函数内绝对跳转 ----
                 label != null && code in STATIC_LABEL_CODES -> {
                     // GOTO 实参可能是 "$TAIL"（词法原样）；$标签行 的 name 已被 lexer 剥过 $，
@@ -2546,6 +2783,9 @@ class ErbProgramCompiler(
                         //   _JUMP_IF_TRUE hitFlag → try 体首（换算=跳越跳转之后那条，用 out.here()
                         //     取，契约 R1 严禁硬编码 +1）
                         //   _JUMP → catch 体首（missJumps，CATCH 行回填）
+                        // 空串名不特判（ENGFIX-2 拆掉 521c42c3 的空名守卫）：oracle 里动态名只经
+                        //   GetStrValue → CallFunction → null → isTry → JumpTo(JumpToEndCatch)，
+                        //   即空名与普通未命中同形 = 进 catch 体首（oracle 注见 [bindTrycMiss]）。
                         // 命中标志已由 VM 实现（Vm.kt `_CALL_BY_NAME` :418-435）：try=1 且 c≠NONE 时
                         //   命中 setInt(c,1) 且 retDst 改传 SlotAddr.NONE（ERB 调用结果归 RESULT，不占槽），
                         //   未命中 setInt(c,0) 后 pc++。
@@ -2565,6 +2805,44 @@ class ErbProgramCompiler(
                 // ---- 静态函数名（CALL / JUMP / TRYCALL / TRYJUMP / TRYCCALL / TRYCJUMP）----
                 else -> {
                     val target = label.uppercase()
+                    if (allowSuperCalls && target == CallSentinels.SUPER_CALL_NAME) {
+                        if (isJump) {
+                            throw CompileException(
+                                sig.name, line,
+                                "$code SUPER 不开放：super 是调用链语义，不支持跳转",
+                            )
+                        }
+                        if (isTryc) {
+                            throw CompileException(
+                                sig.name, line,
+                                "$code SUPER 不开放：TRYCCALL 需要命中标志槽，super 哨兵无此语义",
+                            )
+                        }
+                        // 默认值**不补**：被覆盖方的签名在模块编译期不可见（M2-5 导出才带
+                        // 默认值），缺省实参由 Mod 作者写全 —— 与本文件对 CALLFORM 家族的口径
+                        // 一致。真实调用点参数（position/bucket/name）照常登记，运行期绑定不变。
+                        val staged = stageArgs(rowArgs, line)
+                        val pc = out.emit(
+                            Opcode._CALL,
+                            if (isTry) {
+                                CallSentinels.TRY_CALL_SUPER_SENTINEL
+                            } else {
+                                CallSentinels.CALL_SUPER_SENTINEL
+                            },
+                            staged.argc,
+                            SlotAddr.NONE,
+                            line,
+                        )
+                        out.declareCallArgs(pc, staged.args)
+                        return
+                    }
+                    // RELINE 没有任何编译期特判（ENGFIX-2 拆掉 e83c1f57 的 CLEARLINE 重写）：
+                    // 它是**语料自带的用户函数** `@Reline(LineCountTag,ClearOrStore)`
+                    // （三版语料同址：ERB/魔改内容/Misc.ERB:29，体 = 按栏位记 LINECOUNT /
+                    // 依记录清行，Misc.ERB:29-41），走下面的普通静态绑定即可；
+                    // skia 反编译全树（unpacked/skia-decompiled，307 个 .cs）0 处 RELINE 字面量，
+                    // 「skia 魔改内建」这个前提不成立。语料缺失该名时由 [emitStaticTargetNotFound]
+                    // 复刻原版行级 NotDefinedFunc（oracle 注见该方法）。
                     if (!isTryc) {
                         if (!isTry) {
                             // **非 TRY 的常量函数名缺失**：原版行级 NotDefinedFunc
@@ -2776,6 +3054,14 @@ class ErbProgramCompiler(
                 return
             }
             val isStr = fc.operandType == OperandType.STR
+            // 4.981 浮点方法（路次 g2-returnf-float）：**不降级**。帧槽只有整型列/字符串列，
+            // 降级产物（哨兵 `#EXPR_RET#<k>` 读整型槽）会把浮点返回值压成整数、且把落点写错成
+            // `RESULT`（而不是 `RESULTF`）。保持原 `FuncCall` 节点即走运行期重入通道
+            // （[com.eratw.port.core.proc.ProcessRuntime.invokeUserMethod] 的第三通道，取
+            // `VirtualMachine.floatResult`），与原版同形：`METHOD_Instruction.DoInstruction`
+            // 求值**整个 methodTerm** 后按项类型三分（fork-src Instraction.Child.cs:613-629，
+            // 浮点支 `:626` 写 RESULTF），语句层 `sem/StatementExecutor.kt:789-800` 已接第三支。
+            if (fc.operandType == OperandType.FLOAT) { marker(s); return }
             val staged = stageArgs(fc.args, s.line, s.methodName)
             val ret = alloc()                       // 调用方帧的匿名返回槽（契约 C1）
             emitCall(s.methodName, staged.argc, s.line, local(ret), strRet = isStr, callArgs = staged.args)
@@ -2897,6 +3183,8 @@ private val TRY_CODES = setOf(
     FunctionCode.TRYCCALL, FunctionCode.TRYCJUMP, FunctionCode.TRYCGOTO,
     FunctionCode.TRYCCALLFORM, FunctionCode.TRYCJUMPFORM, FunctionCode.TRYCGOTOFORM,
     FunctionCode.TRYCALLF, FunctionCode.TRYCALLFORMF,
+    // 4.981 上游新增：目标串查不到时静默跳过本行（TRYCCALLSTR 转配对 CATCH）。
+    FunctionCode.TRYCALLSTR, FunctionCode.TRYCCALLSTR,
 )
 
 /**
@@ -2909,6 +3197,7 @@ private val TRY_CODES = setOf(
 private val TRYC_CODES = setOf(
     FunctionCode.TRYCCALL, FunctionCode.TRYCJUMP, FunctionCode.TRYCGOTO,
     FunctionCode.TRYCCALLFORM, FunctionCode.TRYCJUMPFORM, FunctionCode.TRYCGOTOFORM,
+    FunctionCode.TRYCCALLSTR,
 )
 
 /**
@@ -2920,6 +3209,31 @@ private val TRYC_CODES = setOf(
  * fixtures/golden/GOLDEN_03_FLOW.ERB:158-166 即 `TRYCGOTO` 自带内层 CATCH 的嵌套装法）。
  */
 private val TRYC_OPENERS: Set<FunctionCode> = TRYC_CODES
+
+/**
+ * CALLSTR 族（`TRYCALLSTR` / `TRYCCALLSTR`，4.981 上游新增）—— 运行期整串「函数名[实参表]」
+ * 调用（WIRE-1/WIRE-2，契约 C-CALL-STR-OPCODE@1）。这两条走 [_CALL_STR] 通道，与 FORM 系的
+ * 「函数名表达式 + 独立实参表」有本质差别：目标函数名与实参都在**运行期**由同一串解析
+ *（见 Vm 的 `_CALL_STR` 分派）。
+ *
+ * 语义依据 `specs/isa.yaml:2542`（CALLS 族）；fork-src `Instraction.Child.cs:3950-4066`
+ * 在本机缺失，语义以 isa.yaml 为准。
+ */
+private val CALLSTR_CODES = setOf(
+    FunctionCode.TRYCALLSTR, FunctionCode.TRYCCALLSTR,
+)
+
+/**
+ * 含 `_CALL_STR` 的函数预留的**运行期实参暂存区槽数**（帧内 R0..R(STAGE-1)）。
+ *
+ * `_CALL_STR` 的 argc 运行期才定，编译期推不出；为让 VM 能把实参写进调用方当前帧的
+ * 类型桶槽，本函数帧必须预留一段实参区。取值在语料实测最大形参数之上留余量
+ *（本机 `eratw-画蛇添足版eratw4.980/ERB` 扫描到的最大 `@函数名(...)` 头部形参为 50 个位置实参）。
+ *
+ * 该值经 probe/正式两遍共同推进 FunctionPass 的 maxArgc（决定正式遍 tempBase，进而决定
+ * 帧槽数下界）。运行期实参数若超过本上界，VM 就地以 CodeEE 显式失败（不静默写坏相邻帧）。
+ */
+private const val RUNTIME_CALL_STAGE_SLOTS = 64
 
 /**
  * TRY{CALL,JUMP,GOTO}LIST 块头（契约 R10-D）：后接 `FUNC …` 行直至 `ENDFUNC`，禁止嵌套。

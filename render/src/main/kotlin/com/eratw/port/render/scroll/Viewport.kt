@@ -42,6 +42,26 @@ import com.eratw.port.render.DisplayRow
  * 主动回底线的两条入口不变（点击 [snapToBottomForTap]、按键
  * `InputSession.snapToBottomForKeyDown`），仍与原版一致 —— 拽回只由**玩家自己的动作**决定。
  *
+ * ## 2026-11-04 追记（补丁页滚动错位修复：缩短弹底在逻辑行口径上回归）
+ * 「只夹取」救了地图页，却把所有 CLEARLINE 菜单页依赖的 PC 语义一起丢了。「更新日志」
+ * （`ERB/fromEN/NEW_UPDATE/PatchNotes/PatchNotes.ERB`，入口 `UpdateMenus.ERB:308`）的排版是
+ * era 经典「空行垫底 + 差量清行」：`:16-20` 先打 100 行空行再记 `nLineCount = LINECOUNT` 基线，
+ * `:49` 每帧 `CLEARLINE LINECOUNT - nLineCount` 增量清行后重画菜单；翻页、进出详情（`:117`、
+ * `:119-121`）全靠它。脚本整套导航都在赌「重画之后视口回到最新内容」：PC 的
+ * `verticalScrollBarUpdate` 在 `num < 0` 时无条件 `Value = count` 弹回底部
+ * （spec: `EmueraConsole.cs:2557-2564`），且 WinForms 连续重绘让每次 CLEARLINE 的收缩都被
+ * 下一帧看见（该函数挂在 `RefreshStrings` 里，spec: `EmueraConsole.cs:1781`）。玩家只要上翻过
+ * 一点点（读完一屏详情、看过列表顶部），重画后视口仍锚在旧偏移上 —— 菜单上方垫着 100 行
+ * 空行，锚点落进空行区、菜单悬在视口上方，正是真机报的「打开补丁页后画面错位、要滑好几下」。
+ * **修法**：[sync] 的 [LogBuffer] 版本（生产路径）在**逻辑行**净减少超过
+ * [LOGICAL_SHRINK_SNAP_THRESHOLD] 时弹回底部 —— [LogBuffer.logicalLines] 与原版
+ * `displayLineList.Count` / `LINECOUNT` 同口径（spec: `EmueraConsole.cs:2971-2978`），同一页
+ * 重印清多少补多少、净值恰为 0（qol_MAP.ERB:34-44 每周期整屏 CLEARLINE + 等量重印），不会
+ * 重蹈 2026-10-29 的地图拽回；补丁页从详情返回则是几十行的真实收缩，弹底成立。阈值本身是
+ * 平台观感取舍（铁律 9）：2026-10-29 记录的「消息行、末尾空行归属」抖动以 1~2 行计，被阈值
+ * 吸收；代价是净减 1~3 行的真实收缩不弹 —— 这类场景本就伴随玩家点击（[snapToBottomForTap]
+ * 已弹底），可接受。折行口径的 [sync]（Int 版本）保持只夹取，作 uipreview/直驱测试路径。
+ *
  * ## 能上翻到哪里（M11-B DEV-01 改：上界收紧，滚到顶不再空屏）
  * 原版滚动条 `Minimum` 为默认值 0（spec: `MainWindow.cs:1797-1805` 只显式设 `LargeChange = 1` 与 `Maximum`），
  * 滚轮与翻页键把 `Value` 夹在 `[Minimum, Maximum]`（spec: `MainWindow.cs:1276-1287`、`MainWindow.cs:1383-1397`），
@@ -102,6 +122,9 @@ class Viewport(heightLines: Int) {
     var offsetFromEnd: Int = 0
         private set
 
+    /** 上一次经 [sync] 的 [LogBuffer] 版本对齐时的逻辑行数；-1 = 尚未对齐过（首帧不判弹底）。 */
+    private var lastLogicalLines: Long = -1L
+
     /** 是否贴底 —— 原版 `window.ScrollBar.Value == window.ScrollBar.Maximum`（spec: `EmueraConsole.cs:1738`、`EmueraConsole.cs:1804`）。 */
     val atBottom: Boolean
         get() = offsetFromEnd == 0
@@ -121,9 +144,11 @@ class Viewport(heightLines: Int) {
         get() = retainedLines > 0
 
     /**
-     * 与缓冲对齐。行数没变早退；变多时 [offsetFromEnd] 守恒（原版的 `Value += num`）；
-     * 变少时**只夹取、不归零** —— 这一支有意偏离原版 `verticalScrollBarUpdate`，取舍与出处见类文档
-     * 「缩短不再拽回」。
+     * 与缓冲对齐（**仅几何口径**：不知道逻辑行数，不触发弹底判据；uipreview/直驱测试用）。
+     * 行数没变早退；变多时 [offsetFromEnd] 守恒（原版的 `Value += num`）；
+     * 变少时**只夹取、不归零** —— 折行行数天然摆动、不能当收缩信号，取舍与出处见类文档
+     * 「缩短不再拽回」；逻辑行净收缩的弹底在生产路径（[sync] 的 [LogBuffer] 版本）判，
+     * 见类文档 2026-11-04 追记。
      */
     fun sync(retainedLines: Int) {
         val num = retainedLines - this.retainedLines
@@ -140,8 +165,20 @@ class Viewport(heightLines: Int) {
         clampOffset()
     }
 
-    /** [sync] 的 [LogBuffer] 版本。 */
+    /**
+     * [sync] 的 [LogBuffer] 版本（生产路径，`ConsoleScreen.refresh` 每帧走这里）。
+     * 先按**逻辑行**判弹底：相对上一次对齐净减少超过 [LOGICAL_SHRINK_SNAP_THRESHOLD] 时
+     * [offsetFromEnd] 归零 —— PC `num < 0` 支 `Value = count` 的直译
+     * （spec: `EmueraConsole.cs:2557-2564`）；为什么能在逻辑行口径上安全回归、阈值为什么是 3，
+     * 见类文档「缩短不再拽回」的 2026-11-04 追记。然后再做折行几何对齐。
+     */
     fun sync(buffer: LogBuffer) {
+        val logical = buffer.logicalLines
+        val prev = lastLogicalLines
+        lastLogicalLines = logical
+        if (prev >= 0L && prev - logical > LOGICAL_SHRINK_SNAP_THRESHOLD) {
+            offsetFromEnd = 0
+        }
         sync(buffer.size)
     }
 
@@ -202,6 +239,7 @@ class Viewport(heightLines: Int) {
     fun onCleared() {
         retainedLines = 0
         offsetFromEnd = 0
+        lastLogicalLines = -1L
     }
 
     /** 反算 WinForms `ScrollBar.Value`（供真机绑定与调试面板对照，spec: `EmueraConsole.cs:2546` 的 `Maximum`）。 */
@@ -297,5 +335,13 @@ class Viewport(heightLines: Int) {
 
         /** PageUp / PageDown 的固定步长 10 行（spec: `MainWindow.cs:1381`，`int num2 = 10`）。 */
         const val PAGE_STEP = 10
+
+        /**
+         * 逻辑行净收缩弹底的阈值：相对上一次对齐逻辑行减少**超过**它才归零偏移。
+         * 依据与取舍见类文档「缩短不再拽回」的 2026-11-04 追记 —— 同页重印的「末行归属」
+         * 抖动以 1~2 行计（2026-10-29 真机反馈的根因），3 足以吸收；真实 CLEARLINE 菜单页
+         * 的收缩（如补丁页从详情返回，PatchNotes.ERB:49）以几十行计。
+         */
+        const val LOGICAL_SHRINK_SNAP_THRESHOLD = 3
     }
 }

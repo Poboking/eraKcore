@@ -43,6 +43,7 @@ eraKcore 起源于一个很朴素的需求：想在 Android 上原生地玩 EraT
 | `core-vm` | ERA 语义虚拟机：ERB 字节码执行、变量与角色系统、存档读写、内建函数、SFMT 随机数 |
 | `render` | 纯 JVM 渲染层：字形缓存、文本网格、按钮命中区、显示列表、图形层 |
 | `tools/erbcc` | ERB / ERH → `erbc.v1` 字节码容器编译器 |
+| `tools/erbcc-rs` | erbcc 的 Rust 侧实现（Cargo 工程），由 `tools/erbcc` 的 Gradle 对拍脚本接线 |
 | `tools/vmdbg` | 面向 agent 的无交互调试 CLI：call / trace / where / var / disasm / sweep / ledger |
 | `tools/uipreview` | 桌面渲染预览：驱动真实的 core-vm + render，浏览器查看画面 |
 | `tools/fontsubset` | 字体子集再生成脚本（Python），维护 `render/src/main/resources/fonts` |

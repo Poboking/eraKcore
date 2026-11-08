@@ -895,7 +895,7 @@ object PerfBaseline {
             sb.appendLine("## 8. 复跑")
             sb.appendLine()
             sb.appendLine("```bash")
-            sb.appendLine("source D:/DSH/eratw-安卓移植计划/.tooling/env.sh")
+            sb.appendLine("source <work-root>/.tooling/env.sh")
             sb.appendLine("cd <worktree>/eratw-android")
             sb.appendLine("ERATW_CORPUS=\"\$ERATW_CORPUS\" ./gradlew :core-vm:perfBaseline")
             sb.appendLine("# 报告：core-vm/build/perf-report.md")

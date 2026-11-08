@@ -278,6 +278,23 @@ class TextMetrics(
         return advance.toInt()
     }
 
+    /**
+     * 单码位前进量（**未截断的 Float 像素**）；回退链没有任何表覆盖它时返回 null。
+     *
+     * 与 [advancePixels] 的差别只在取整：那条给位图拼接用的整数像素，本条给
+     * [FontWidthRuler] 的比例字体排版用 —— 字符画的微调空格只有 1.12px，
+     * 截断成 1px 再逐字累加会让整幅画每行差出好几个像素。换算公式仍是
+     * `design * size / unitsPerEm`（FontAdvanceTable.advancePixels），
+     * 与本类其余读数同一条来源，不另造一张表。
+     *
+     * 出处语义同 [measure]：null = 缺表或该码位缺行，调用方必须**如实退化到等宽网格**，
+     * 不许把退化值当真实度量宣称（契约 §0.5）。
+     */
+    fun advancePixelsExact(codePoint: Int, fontName: String, sizePx: Int): Float? {
+        val size = normalizeSize(sizePx)
+        return firstAdvance(catalog.chainFor(fontName), codePoint, size)
+    }
+
     /** 单码位 lsb（像素，向零截断）；没有度量表或缺行时给 0（§3 的 lsb 只随 advance 出行）。 */
     fun lsbPixels(codePoint: Int, fontName: String, sizePx: Int): Int {
         val size = normalizeSize(sizePx)

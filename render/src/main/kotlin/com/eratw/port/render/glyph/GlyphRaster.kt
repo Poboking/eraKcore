@@ -28,6 +28,18 @@ class RasterizedGlyph(
  * 字形光栅化器：`:render` 侧的抽象边界。Android 真实现（平台字体度量 + 字形图集）后续由
  * `:render-canvas` 注入；本波只提供确定性假实现 [StaticGlyphRaster]。
  *
+ * ## 缺字回落：后端必须实现同一条链
+ *
+ * 真机后端不许自带第二套「缺字往哪一族找」：族级回落链的唯一权威是
+ * [com.eratw.port.render.font.GlyphFallback]（成员与顺序由 `chainFor` 定义，
+ * 首命中由 `resolve` 短路，全落空回请求族）。[GlyphCache] 的回退链是另一层：**raster 级**
+ * 两跳（请求族 → [defaultFontName] → 方框），与族级链不是同一件事 —— 注入的
+ * `defaultFontName` 必须是「该后端自己的默认族」，族级链仍由 `GlyphFallback` 回答。
+ * 两者的分工见 [GlyphCache] 的「分桶口径」。
+ *
+ * 每个后端落地时必须跑 `GlyphRasterConformance`（`render/src/test` 里的可复用抽象套件），
+ * 把下面六条契约逐条钉住 —— 不许为了好过而放宽断言。
+ *
  * ## 契约
  *
  * 1. **不许抛**：字体不可用、码位缺字、内部异常一律返回 null，由 [GlyphCache] 走回退链。

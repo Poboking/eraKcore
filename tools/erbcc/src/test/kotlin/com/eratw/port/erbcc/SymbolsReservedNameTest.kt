@@ -39,7 +39,7 @@ class SymbolsReservedNameTest {
         // spec: IdentifierDictionary.cs:270-273 → zhs:873 VarConflictReservedWord
         for (n in expect) {
             assertEquals("变量名\"$n\"为Emuera的保留字", Symbols.checkUserVarName(n), "保留字 $n")
-            assertEquals(Symbols.NameKind.RESERVED, Symbols.nameKind(n))
+            assertEquals(NameKind.RESERVED, Symbols.nameKind(n))
         }
     }
 
@@ -100,7 +100,7 @@ class SymbolsReservedNameTest {
 
     @Test
     fun `ERH 里 DIM 撞系统名被拒且不中止链`() {
-        val erh = SymbolTable.collectErhSymbols(
+        val erh = LabelTable.collectErhSymbols(
             """
             #DIM CONST IS 1
             #DIM CONST FLAG 1
@@ -120,7 +120,7 @@ class SymbolsReservedNameTest {
 
     @Test
     fun `ERH 里 DEFINE 撞保留名是链级错误`() {
-        val erh = SymbolTable.collectErhSymbols(
+        val erh = LabelTable.collectErhSymbols(
             """
             #DEFINE IS 1
             #DEFINE AFTER 2
@@ -140,7 +140,7 @@ class SymbolsReservedNameTest {
 
     @Test
     fun `跨文件宏重名留痕并中止`() {
-        val got = SymbolTable.collectErhSymbols(
+        val got = LabelTable.collectErhSymbols(
             """
             #DEFINE DUP 2
             #DEFINE LATER 3
@@ -157,7 +157,7 @@ class SymbolsReservedNameTest {
 
     @Test
     fun `跨文件全局声明重名只留痕不中止`() {
-        val got = SymbolTable.collectErhSymbols(
+        val got = LabelTable.collectErhSymbols(
             """
             #DIM CONST SHARED = 7
             #DIM CONST OTHER = 8
@@ -174,7 +174,7 @@ class SymbolsReservedNameTest {
 
     @Test
     fun `诊断模式下整份文件逐条留痕`() {
-        val got = SymbolTable.collectErhSymbols(
+        val got = LabelTable.collectErhSymbols(
             """
             #DEFINE DUP 1
             #DEFINE DUP 2
@@ -194,7 +194,7 @@ class SymbolsReservedNameTest {
 
     private fun dim(line: String): Pair<DimSpec?, String?> {
         var reason: String? = null
-        val spec = SymbolTable.parseDimSpec("DIM", line, isPrivate = false) { reason = it }
+        val spec = LabelTable.parseDimSpec("DIM", line, isPrivate = false) { reason = it }
         return spec to reason
     }
 

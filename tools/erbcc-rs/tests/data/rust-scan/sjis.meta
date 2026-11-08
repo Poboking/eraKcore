@@ -1,0 +1,17 @@
+disk_count=7
+union_count=7
+index_on_disk=0
+index_total=0
+index_missing_on_disk=0
+disk_not_in_index=7
+strategy_all_files=7
+strategy_all_binary=1
+strategy_index_files=0
+strategy_index_binary=0
+strategy_union_files=7
+strategy_union_binary=1
+strategy_engine_files=7
+strategy_engine_binary=1
+encoding_UTF8=4
+encoding_ShiftJIS=3
+rename_count=0

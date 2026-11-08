@@ -1,5 +1,6 @@
 package com.eratw.port.core.image
 
+import com.eratw.port.boot.CorpusProfile
 import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.EvalContext
 import com.eratw.port.core.expr.Value
@@ -10,8 +11,9 @@ import com.eratw.port.core.host.FileOps
 import com.eratw.port.core.host.GraphicsBuffer
 import com.eratw.port.core.host.GraphicsPool
 import com.eratw.port.core.host.unsignedArgb
+import com.eratw.port.core.save.SaveConfig
+import com.eratw.port.core.save.SaveWiring
 import com.eratw.port.core.vars.VariableStore
-import org.junit.jupiter.api.Assumptions
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.zip.CRC32
@@ -20,6 +22,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -27,9 +30,17 @@ import kotlin.test.assertTrue
  *
  * - 合成用例**手写 PNG 字节**（签名 + IHDR + PLTE + tRNS + IDAT(zlib) + IEND，块 CRC 用
  *   `java.util.zip.CRC32` 生成），不依赖 Android / ImageIO / 任何外部库；
- * - 真实语料用例走 `ERATW_CORPUS`（从环境变量路径向上找 `resources`），目录不在时
- *   `Assumptions.assumeTrue` 跳过；期望像素由 Windows System.Drawing 读同一文件取得
- *   （GDI+ 是原版 `Utils.LoadImage` 的 oracle）。
+ * - 真实语料用例经 [corpusResources] 找 `resources`：`ERATW_GAMEDIR` 优先、回落 `ERATW_CORPUS`，
+ *   判根统一走 `CorpusProfile.detect`（读 `ERB/DIM.ERH` 的 `#DIM CONST NOW_VERSION`）；
+ *   环境变量未设 / 根不含 `emuera.config` / 找不到 `resources` 一律 **AssertionError 判红**
+ *   （与 `core/config/ConfigChainTest.kt:554-570` 同一把尺；旧写法是 `assumeTrue` 跳过 —— 假闸已拆）；
+ *   期望像素由 Windows System.Drawing 读同一文件取得（GDI+ 是原版 `Utils.LoadImage` 的 oracle）。
+ *
+ * 真实语料的钉值**按根两列**（`when (profile)` 穷尽枚举，2026-11-05 mediafix 路两根实扫实读）：
+ * - `resources` 下 `.png` 总数：4.980 = 592、4.981 = 149（4.981 把大批 PNG 换成 webp 后只剩这些）；
+ * - 位深 1 的 PNG 条数：4.980 = 0、4.981 = 3（`剧本自定义附件/Xray_source/横向断面/space*.png`）；
+ * - 三个色型抽样文件的尺寸与像素：**两根同值、实读**（三个文件在两根下逐字节相同）。
+ * 旧叙述里那句「149 个 PNG / 146 个 8 位 / 3 个位深 1」是 4.981 单列口径，仅作历史。
  *
  * 覆盖契约 PNG-DECODE：色型 0/2/3/4/6、过滤 0..4、位深 8、调色板 tRNS、多 IDAT、
  * 坏签名 / 截断 / 坏 zlib、非 PNG 回落为 0、GSAVE 文本载体不回退。
@@ -356,6 +367,35 @@ class PngDecoderTest {
         assertEquals(1, buf.pixelAt(0, 0))
     }
 
+    /**
+     * 解码像素的所有权（2026-10-30，真机 512 MiB 挡）。
+     *
+     * 旧写法 `IntArray(w*h) + arraycopy` 让每张图在 Dalvik 堆上同时存在两份：本作语料的立绘
+     * 工作表单张 8000×4000 = 122 MiB，2× = 244 MiB 瞬时，而 `largeHeap` 一共 512 MiB。
+     * 调用方交进来的都是刚解出来、没人引用的数组 ⇒ 长度恰好时接管。
+     */
+    @Test
+    fun `解码像素被缓冲接管，不再拷第二份`() {
+        val src = IntArray(6) { it + 1 }
+        val buf = GraphicsBuffer(2)
+        assertTrue(buf.createFromArgb(3, 2, src))
+        assertSame(src, buf.pixels, "长度 == w*h ⇒ 同一份数组（再拷一份就是真机那 122 MiB × 2 的来源）")
+    }
+
+    @Test
+    fun `长度不等时仍新建一份且守住 pixels 等于 w 乘 h`() {
+        val src = IntArray(9) { it + 1 }
+        val buf = GraphicsBuffer(3)
+        // 超长：按旧口径截断进**新**数组，缓冲里不留调用方那份（它还可能被别人持有）。
+        buf.createFrom(2, 1, src)
+        assertEquals(2, buf.pixels.size, "pixels 长度恒 == width * height（下游按它索引）")
+        assertTrue(intArrayOf(1, 2).contentEquals(buf.pixels))
+        assertFalse(src === buf.pixels, "长度不等时不许接管")
+        // 短于 w*h：补零，仍不越界（缺像素比崩屏好）。
+        buf.createFrom(3, 1, intArrayOf(7))
+        assertTrue(intArrayOf(7, 0, 0).contentEquals(buf.pixels))
+    }
+
     // ==================================================================
     // GCREATEFROMFILE / GLOAD 接线
     // ==================================================================
@@ -410,6 +450,9 @@ class PngDecoderTest {
         val ops = PngTestFileOps()
         ops.binaries["sav/img0007.png"] = pngBytes(1, 1, 2, listOf(byteArrayOf(1, 2, 3)))
         val ctx = pngCtx(ops)
+        // 路径 = {Config.SavDir}img{index:0000}.png（spec: FunctionMethodCreator.cs:9471-9474）；
+        // SavDir 由 UseSaveFolder 决定（spec: Config.cs:471-481），条目表出厂 false（ConfigData.cs:97）⇒ 显式装 YES
+        SaveWiring.install(ctx.store, SaveConfig(useSaveFolder = true), 20)
 
         assertEquals(1L, pngCall(ctx, "GLOAD", 17, 7))
         assertEquals(1L, pngCall(ctx, "GWIDTH", 17))
@@ -429,7 +472,7 @@ class PngDecoderTest {
         assertEquals(1L, pngCall(ctx, "GSAVE", 10, 0))
         // 生产宿主（RootedBuiltinHost）同一路径也能读到 UTF-8 字节；文本载体不是 PNG 签名，
         // 必须回落 readText，而不是把文本当坏 PNG 直接判 0。
-        ops.binaries["sav/img0000.png"] = ops.texts.getValue("sav/img0000.png").toByteArray(Charsets.UTF_8)
+        ops.binaries["img0000.png"] = ops.texts.getValue("img0000.png").toByteArray(Charsets.UTF_8)
 
         val before = pngPool(ctx).get(10).pixels.copyOf()
         assertEquals(1L, pngCall(ctx, "GLOAD", 17, 0))
@@ -455,30 +498,61 @@ class PngDecoderTest {
     }
 
     // ==================================================================
-    // 真实语料（ERATW_CORPUS 缺失时跳过）
+    // 真实语料（按根取列；根缺失 / 不完整一律判红，不跳过）
     // ==================================================================
 
     @Test
-    fun `真实语料 592 个 PNG 全量解码`() {
-        val resources = findCorpusResources()
-        Assumptions.assumeTrue(resources != null, "未找到语料 resources 目录（设置 ERATW_CORPUS）")
-        val root = resources ?: return
+    fun `真实语料全量 PNG 解码（按根取列）`() {
+        val (resources, profile) = corpusResources()
 
-        val files = root.walkTopDown()
+        val files = resources.walkTopDown()
             .filter { it.isFile && it.extension.equals("png", ignoreCase = true) }
             .toList()
-        assertTrue(files.size > 500, "只发现 ${files.size} 个 PNG（语料实测约 592 个）")
+        // 遍历口径不变（walkTopDown 全扫）；总数按根取列，两根实扫读数见类 KDoc。
+        assertEquals(
+            when (profile) {
+                CorpusProfile.V4_980 -> 592
+                CorpusProfile.V4_981 -> 149
+            },
+            files.size,
+            "resources 下 .png 总数（$profile 实扫）",
+        )
+
+        val bitDepth1 = files.filter { f ->
+            f.readBytes()[24] == 1.toByte() // IHDR 位深字节（8 字节签名 + 4 长度 + 4 "IHDR"）
+        }
+        // 4.980 语料里没有位深 1 的 PNG（实扫 0）；4.981 有 3 个，是新增的 Xray 插件素材
+        // （剧本自定义附件/Xray_source/横向断面/space*.png，60x60 调色板图）。解码器按设计只支持
+        // 8 位（PngDecoder 的 KDoc / parseHeader 位深校验），这 3 个应被明确拒绝而非静默错解。
+        assertEquals(
+            when (profile) {
+                CorpusProfile.V4_980 -> 0
+                CorpusProfile.V4_981 -> 3
+            },
+            bitDepth1.size,
+            "位深 1 的 PNG 条数（$profile 实扫）",
+        )
+        if (bitDepth1.isNotEmpty()) {
+            assertTrue(bitDepth1.all { it.name.startsWith("space") }, "位深 1 应恰为 Xray_source 的 3 个 space*.png")
+        }
 
         var decoded = 0
         for (f in files) {
+            if (f in bitDepth1) {
+                assertFailsWith<PngDecodeException>("位深 1 应按设计拒绝：${f.path}") {
+                    PngDecoder.decode(f.readBytes())
+                }
+                continue
+            }
             val img = PngDecoder.decode(f.readBytes())
             assertTrue(img.width > 0 && img.height > 0, "尺寸非法：${f.path}")
             assertEquals(img.width * img.height, img.pixels.size, "像素数不符：${f.path}")
             decoded++
         }
-        assertEquals(files.size, decoded)
+        assertEquals(files.size - bitDepth1.size, decoded)
 
         // 三种色型各抽一个文件，像素值由 System.Drawing（GDI+，原版 LoadImage 的 oracle）读出。
+        // 三个文件在两根语料下逐字节相同（md5 一致，2026-11-05 实读）⇒ 尺寸与像素两根同值，保留单一常量。
         val rgb = files.firstOrNull { it.name == "im_av_green.png" }
         val palette = files.firstOrNull { it.name == "pngベース.png" }
         val rgba = files.firstOrNull { it.name == "13_extra.png" }
@@ -726,21 +800,44 @@ private fun pngPool(ctx: BuiltinEvalContext): GraphicsPool =
     ctx.store.aux.slot("gfx") { GraphicsPool() }
 
 /**
- * 从 `ERATW_CORPUS` 向上最多 4 层找 `resources` 目录。
+ * 语料 `resources` 目录 + 认出来的根版本档，供上面的真实语料用例按根取列。
  *
- * 语料根有两种形态：`ERATW_CORPUS=<游戏根>`（本波闸门口径）或 `<游戏根>/ERB`
- * （bootSmoke 口径），都在这里兼容；不写死任何盘符。
+ * 口径（与 `core/config/ConfigChainTest.kt:554-570` 同一把尺，mediafix 波 2026-11-05 拆掉静默跳过）：
+ *   * `ERATW_GAMEDIR`（游戏根，显式给出即权威）优先，回落 `ERATW_CORPUS`（闸门口径指向 `ERB` 子树），
+ *     从该路径起向上最多 4 段找 `resources`；不写死任何盘符；
+ *   * 两个变量都没设 / 目录不含 `emuera.config` / 找不到 `resources` ⇒ **AssertionError 判红**，
+ *     并把已认到的证据打进消息。旧实现返回 null 让调用方 `assumeTrue` 跳过 —— 那会让这道闸静默失效；
+ *   * 判根用 `CorpusProfile.detect`：未登记的 `NOW_VERSION` 由它自己抛 AssertionError。
  */
-private fun findCorpusResources(): File? {
-    val env = System.getenv("ERATW_CORPUS")?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-    var dir: File? = File(env)
+private fun corpusResources(): Pair<File, CorpusProfile> {
+    val gameDirEnv = System.getenv("ERATW_GAMEDIR")?.trim()?.takeIf { it.isNotEmpty() }
+    val corpusEnv = System.getenv("ERATW_CORPUS")?.trim()?.takeIf { it.isNotEmpty() }
+    val start = gameDirEnv ?: corpusEnv
+        ?: run {
+            // 公开仓无外部语料/样本：按公开适配口径跳过（上游为硬判红）。
+            org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_GAMEDIR / ERATW_CORPUS：跳过PNG 语料判据")
+            throw AssertionError("unreachable")
+        }
+    var dir: File? = File(start)
+    var resources: File? = null
     repeat(4) {
-        val d = dir ?: return null
+        val d = dir ?: return@repeat
         if (d.isDirectory) {
             val res = File(d, "resources")
-            if (res.isDirectory) return res
+            if (res.isDirectory && resources == null) resources = res
         }
         dir = d.parentFile
     }
-    return null
+    val res = resources
+        ?: throw AssertionError(
+            "$start 向上 4 段都没有 resources 目录（已认到：ERATW_GAMEDIR=${gameDirEnv ?: "-"}、" +
+                "ERATW_CORPUS=${corpusEnv ?: "-"}）：语料根不完整，判红不降级",
+        )
+    val gameRoot = res.parentFile
+        ?: throw AssertionError("$res 没有父目录：语料根形态不符")
+    assertTrue(
+        File(gameRoot, "emuera.config").isFile,
+        "语料根 $gameRoot 下没有 emuera.config：它不是游戏根（resources 的上一级必须是游戏根）",
+    )
+    return res to CorpusProfile.detect(gameRoot.toPath())
 }

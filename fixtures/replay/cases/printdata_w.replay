@@ -1,0 +1,16 @@
+# PRINTDATAW：数据节只有一个 DATALIST 组（组内两项），组数 = 1 使随机挑选
+# （:273 GetNextRand(count)）唯一确定；组内两项按「项间换行、组尾再换行」输出
+# （:293-316），随后 W 后缀发起一次 ReadAnyKey。
+# 期望顺序：PD1 / PD2 / AFTER-PRINTDATAW。
+case: printdata_w
+target: REPLAY_PRINTDATAW
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:231-317
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:293-316
+--- inputs
+submit
+--- expect-console
+START-PRINTDATAW
+PD1
+PD2
+AFTER-PRINTDATAW
+END-PRINTDATAW

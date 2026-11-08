@@ -1,5 +1,6 @@
 package com.eratw.port.core.image
 
+import com.eratw.port.boot.CorpusProfile
 import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.EvalContext
 import com.eratw.port.core.expr.Value
@@ -10,7 +11,6 @@ import com.eratw.port.core.host.FileOps
 import com.eratw.port.core.host.GraphicsPool
 import com.eratw.port.core.host.unsignedArgb
 import com.eratw.port.core.vars.VariableStore
-import org.junit.jupiter.api.Assumptions
 import java.io.ByteArrayOutputStream
 import java.io.File
 import kotlin.test.Test
@@ -22,24 +22,31 @@ import kotlin.test.assertTrue
 /**
  * webp 解码器与 `GCREATEFROMFILE` / `GLOAD` 接线的单测（路次 h-image-rest）。
  *
- * 期望值来源（**全部由本路 2026-10-21 用 Python 直接读语料文件头解出，未跑反编译器**）：
- * 语料根（画蛇添足版 4.980）下 `.webp` 共 **2548** 个（resources 目录下 2547 个，另有 1 个在
- * `resources` 之外的分片目录），顶层段分布：
+ * 期望值来源**按根两列**（由 [corpusResources] 判根后 `when (profile)` 穷尽取列）：
+ * - 4.981 一列 = 2026-11-01 本路 Python 直接读文件头的旧普查（history：当时语料只有 4.981）；
+ * - 4.980 一列 = 2026-11-05 mediafix 路本机全量 JVM 普查实读（`[webp-census]` 打印行 + 两根 Python
+ *   头解析交叉验证）。闸口径（AGENTS.md §5）指向 4.980，这一列缺了就恒红。
  *
- * | 容器形态 | 语料条数 | 本移植侧结果 |
- * |---|---|---|
- * | `VP8X` + `VP8 ` + `ALPH`（有损 + 独立 alpha） | 1036 | 不支持 → [WebpDecodeException] → 函数 0 |
- * | `VP8 ` 裸容器（有损） | 831 | 同上 |
- * | `VP8L` 裸容器（无损） | 569 | 容器/头支持，**位流层实测 125 个解通**（见 [语料全量成败清单]） |
- * | `VP8X` + `VP8L`（无损） | 77 | 同上，实测 2 个解通 |
- * | `VP8X` + `VP8 `（有损、无 ALPH） | 26 | 不支持 → 0 |
- * | `VP8X` + `ANIM`/`ANMF`（动画） | 9 | 复刻原版：画布尺寸空白图 → 函数 1 |
- * | 合计 | 2548 | 成功 136（125 + 2 + 9），失败 2412 |
+ * 语料根下 `.webp` 顶层段分布（条数 / 本移植侧解通数）：
  *
- * 有损合计 1036 + 831 + 26 = **1893**；无损合计 569 + 77 = **646**；顶层 `ALPH` 段共 1036 个，
- * 全部与有损位流配对，语料里**没有**「无损 + ALPH」的实例。动画文件 9 个（`ANIM` 段 9、`ANMF` 段 9），
- * 全部 `VP8X` 且 ALPHA 标志置位，画布尺寸 450x600 x8、600x600 x1，都落在
- * `resources/剧本自定义附件/K97/` 下。
+ * | 容器形态 | 4.980 | 4.981 | 本移植侧结果 |
+ * |---|---|---|---|
+ * | `VP8X` + `VP8 ` + `ALPH`（有损 + 独立 alpha） | 1036 | 1576 | 不支持 → [WebpDecodeException] → 函数 0 |
+ * | `VP8X` + `VP8 `（有损、无 ALPH） | 26 | 47 | 同上 |
+ * | `VP8 ` 裸容器（有损） | 831 | 18 | 同上 |
+ * | `VP8L` 裸容器（无损） | 569 / 解通 125 | 1143 / 解通 458 | 容器/头支持，位流层解通数见 [语料全量成败清单] |
+ * | `VP8X` + `VP8L`（无损） | 77 / 解通 2 | 74 / 解通 2 | 同上 |
+ * | `VP8X` + `ANIM`/`ANMF`（动画） | 9 / 解通 9 | 25 / 解通 25 | 复刻原版：画布尺寸空白图 → 函数 1 |
+ * | 合计 | 2548 / 成功 136 | 2883 / 成功 485 | 动画全部成功；有损全部失败 |
+ *
+ * 有损合计 4.980 = 1036 + 26 + 831 = **1893**、4.981 = 1576 + 47 + 18 = **1641**；
+ * 无损合计 4.980 = 569 + 77 = **646**、4.981 = 1143 + 74 = **1217**；
+ * `VP8X` 容器 4.980 = 1036 + 26 + 77 + 9 = **1148**、4.981 = 1576 + 47 + 74 + 25 = **1722**。
+ * 两列都满足「没有无损 + ALPH 的实例」：顶层 `ALPH` 段只与有损位流配对。
+ * 动画文件 4.981 25 个（`EagloV` 5、`l13/留琴` 8、`剧本自定义附件/K97` 9、`动图示例` 3），4.980 9 个；
+ * 全部 `VP8X` 且 ALPHA 标志置位。
+ * 普查最大尺寸：4.980 = 8192x4000；4.981 新增 `resources/FASH绘/26_別顔2.webp` 头声明 **16176x16176**
+ * （约 2.6 亿像素），超出原版 8192 上限与像素总数守卫——该根普查里它按 TOOBIG/像素总数失败属预期。
  *
  * 头解析口径：`VP8X` 的画布宽高 = 小端 24 位 + 1（`webp_dec.c:ParseHeadersInternal`）；
  * `VP8L` 的宽高 = 位流头两个 14 位字段 + 1（`vp8l_dec.c:117-126` `ReadImageInfo`）。
@@ -102,7 +109,10 @@ class WebpDecoderTest {
         val lossy = riffWith("VP8 ", byteArrayOf(0, 0, 0, 0x9d.toByte(), 1, 0x2a, 3, 0, 3, 0))
         val ex = assertFailsWith<WebpDecodeException> { WebpDecoder.decode(lossy) }
         assertTrue(ex.message!!.startsWith("WEBP-UNSUPPORTED-LOSSY"), ex.message)
-        // 语料实测：有损 1893 = 831 裸容器 + 1036 带 ALPH + 26 不带 ALPH
+        // 这一笔**不按根取列**：断言锁的是 main 侧失败消息里的登记数（WebpDecoder.kt:263 的常量文本），
+        // 与当前挂的是哪个语料根无关——两根下解码器吐的都是同一句。该文本登记的是 4.980 普查
+        // 「有损 1893 = 831 裸容器 + 1036 带 ALPH + 26 不带 ALPH」（4.981 实为 1641，见类 KDoc）；
+        // 断言只锁「消息形态带普查登记数」，数字随 main 侧文案走，不随语料升版改。
         assertTrue(ex.message!!.contains("1893"), ex.message)
     }
 
@@ -140,7 +150,7 @@ class WebpDecoderTest {
         assertTrue(ex2.message!!.contains("像素总数"), ex2.message)
     }
 
-    /** 语料普查最大 8192x4000 = 32,768,000 px < 上限，不许被像素总数守卫误杀。 */
+    /** 普查最大尺寸按根两列：4.980 = 8192x4000 = 32,768,000 px；4.981 已是 16176x16176（超限属预期，见类 KDoc）。 */
     @Test
     fun `语料上限内的大图不触发像素总数守卫`() {
         val boundary = riffWith("VP8L", vp8lBody(8192, 4000))
@@ -202,9 +212,7 @@ class WebpDecoderTest {
      */
     @Test
     fun `真实语料三张图的 GWIDTH 与 GHEIGHT`() {
-        val resources = findCorpusResources()
-        Assumptions.assumeTrue(resources != null, "未找到语料 resources 目录（设置 ERATW_GAMEDIR 或 ERATW_CORPUS）")
-        val root = resources ?: return
+        val (root, _) = corpusResources()
 
         val cases = listOf(
             // 裸 VP8L 无损：当前实测能解通的形态。名字按**语料里脚本传给 GCREATEFROMFILE 的形态**
@@ -238,25 +246,29 @@ class WebpDecoderTest {
     /**
      * 遍历语料全部 `.webp`，按容器形态统计成败并打印清单。
      *
-     * 断言的是**本路 Python 普查 + 本路 JVM 全量自查**对上的读数：
-     * 总数 2548、成功 136（裸 `VP8L` 125 + `VP8X`/`VP8L` 2 + 动画 9）、
-     * 有损 1893 全部失败且失败码只能是 `WEBP-UNSUPPORTED-LOSSY`（或结构截断）。
+     * 断言的是**两根 Python 头普查 + 本路 JVM 全量自查**对上的读数，全部按 `when (profile)` 两列：
+     * 总数 4.980 = 2548 / 4.981 = 2883；动画 9 / 25 全部成功；有损 1893 / 1641 全部失败且失败码只能是
+     * `WEBP-UNSUPPORTED-LOSSY`（或结构截断 / 超限），无损解通数见下方逐格断言。
      *
-     * ⚠️ 「无损 127/646 成功」是**当前已知缺口**（`WebpDecoder` 的 VP8L 位流层与 libwebp 不同步，
-     * 515 个报 LZ77/码表类 BADCODE、4 个报位流截断），不是设计目标；
-     * 修好后这里的读数必须上调，见 KDoc 与本路交付报告。
+     * ⚠️ 「无损解通数 < 无损总数」是**当前已知缺口**（`WebpDecoder` 的 VP8L 位流层与 libwebp 不同步），
+     * 不是设计目标：4.980 = 125/646、4.981 = 458/1217；位流层修好后这里的读数必须上调。
      */
     @Test
     fun `语料全量成败清单`() {
-        val resources = findCorpusResources()
-        Assumptions.assumeTrue(resources != null, "未找到语料 resources 目录（设置 ERATW_GAMEDIR 或 ERATW_CORPUS）")
-        val root = resources ?: return
+        val (root, profile) = corpusResources()
         val gameRoot = root.parentFile
 
         val files = gameRoot.walkTopDown()
             .filter { it.isFile && it.extension.equals("webp", ignoreCase = true) }
             .toList()
-        assertEquals(2548, files.size, "语料 .webp 总数（本路 Python 普查）")
+        assertEquals(
+            when (profile) {
+                CorpusProfile.V4_980 -> 2548
+                CorpusProfile.V4_981 -> 2883
+            },
+            files.size,
+            "语料 .webp 总数（$profile 实扫）",
+        )
 
         val total = LinkedHashMap<String, Int>()
         val ok = LinkedHashMap<String, Int>()
@@ -297,22 +309,85 @@ class WebpDecoderTest {
         bad.take(40).forEach { sb.appendLine("[webp-census] !! $it") }
         println(sb)
 
-        assertEquals(1148, total["VP8X-lossy"]!! + total["VP8X-lossless"]!! + total["VP8X-animated"]!!, "VP8X 容器总数（普查 1148）")
-        assertEquals(831, total["bare/VP8 "], "裸有损容器（普查 831）")
-        assertEquals(569, total["bare/VP8L"], "裸无损容器（普查 569）")
-        assertEquals(1893, (total["bare/VP8 "] ?: 0) + (total["VP8X-lossy"] ?: 0), "有损位流合计（普查 1893）")
-        assertEquals(646, (total["bare/VP8L"] ?: 0) + (total["VP8X-lossless"] ?: 0), "无损位流合计（普查 646）")
-        assertEquals(9, total["VP8X-animated"], "动画（普查 9）")
+        assertEquals(
+            when (profile) {
+                CorpusProfile.V4_980 -> 1148
+                CorpusProfile.V4_981 -> 1722
+            },
+            total["VP8X-lossy"]!! + total["VP8X-lossless"]!! + total["VP8X-animated"]!!,
+            "VP8X 容器总数（$profile 实扫）",
+        )
+        assertEquals(
+            when (profile) {
+                CorpusProfile.V4_980 -> 831
+                CorpusProfile.V4_981 -> 18
+            },
+            total["bare/VP8 "],
+            "裸有损容器（$profile 实扫）",
+        )
+        assertEquals(
+            when (profile) {
+                CorpusProfile.V4_980 -> 569
+                CorpusProfile.V4_981 -> 1143
+            },
+            total["bare/VP8L"],
+            "裸无损容器（$profile 实扫）",
+        )
+        assertEquals(
+            when (profile) {
+                CorpusProfile.V4_980 -> 1893
+                CorpusProfile.V4_981 -> 1641
+            },
+            (total["bare/VP8 "] ?: 0) + (total["VP8X-lossy"] ?: 0),
+            "有损位流合计（$profile 实扫）",
+        )
+        assertEquals(
+            when (profile) {
+                CorpusProfile.V4_980 -> 646
+                CorpusProfile.V4_981 -> 1217
+            },
+            (total["bare/VP8L"] ?: 0) + (total["VP8X-lossless"] ?: 0),
+            "无损位流合计（$profile 实扫）",
+        )
+        assertEquals(
+            when (profile) {
+                CorpusProfile.V4_980 -> 9
+                CorpusProfile.V4_981 -> 25
+            },
+            total["VP8X-animated"],
+            "动画条数（$profile 实扫）",
+        )
 
         // 有损一律失败；动画一律成功。
         assertEquals(0, ok["bare/VP8 "] ?: 0, "有损不许解通")
         assertEquals(0, ok["VP8X-lossy"] ?: 0, "有损不许解通")
-        assertEquals(9, ok["VP8X-animated"], "动画 9 个全部按原版给空白图")
-        // 无损当前实测读数（缺口登记，修好后要上调；2026-10-22 复核：color indexing
-        // 的索引通道改取绿字节后，裸 VP8L 从 26 涨到 125）
-        assertEquals(125, ok["bare/VP8L"], "裸 VP8L 当前实测解通数")
-        assertEquals(2, ok["VP8X-lossless"], "VP8X+VP8L 当前实测解通数")
-        assertEquals(136, success, "成功合计")
+        assertEquals(
+            when (profile) {
+                CorpusProfile.V4_980 -> 9
+                CorpusProfile.V4_981 -> 25
+            },
+            ok["VP8X-animated"],
+            "动画全部按原版给空白图（$profile）",
+        )
+        // 无损当前实测读数（缺口登记，修好后要上调；4.980 = 125/2/136、4.981 = 458/2/485，两根实扫）
+        assertEquals(
+            when (profile) {
+                CorpusProfile.V4_980 -> 125
+                CorpusProfile.V4_981 -> 458
+            },
+            ok["bare/VP8L"],
+            "裸 VP8L 当前实测解通数（$profile）",
+        )
+        // 这一格两根同值（4.980 / 4.981 普查都解通 2 个），按实读保留单一常量。
+        assertEquals(2, ok["VP8X-lossless"], "VP8X+VP8L 当前实测解通数（两根同值，实读）")
+        assertEquals(
+            when (profile) {
+                CorpusProfile.V4_980 -> 136
+                CorpusProfile.V4_981 -> 485
+            },
+            success,
+            "成功合计（裸 VP8L + VP8X+VP8L 2 + 动画，$profile）",
+        )
         assertTrue(bad.isEmpty(), bad.joinToString("\n"))
     }
 
@@ -510,25 +585,44 @@ class WebpDecoderTest {
 }
 
 /**
- * 语料 `resources` 目录发现：`ERATW_GAMEDIR`（游戏根，显式给出即权威）优先，
- * 回落 `ERATW_CORPUS`（闸门口径指向 `ERB` 子树）后向上最多 4 层找 `resources`。
- * **不写死任何盘符**；两个变量都没有 → 调用方 `Assumptions.assumeTrue` 跳过。
+ * 语料 `resources` 目录 + 认出来的根版本档，供上面两个真实语料用例按根取列。
+ *
+ * 口径（与 `core/config/ConfigChainTest.kt:554-570` 同一把尺，mediafix 波 2026-11-05 拆掉静默跳过）：
+ *   * `ERATW_GAMEDIR`（游戏根，显式给出即权威）优先，回落 `ERATW_CORPUS`（闸门口径指向 `ERB` 子树），
+ *     从该路径起向上最多 4 段找 `resources`；不写死任何盘符；
+ *   * 两个变量都没设 / 目录不含 `emuera.config` / 找不到 `resources` ⇒ **AssertionError 判红**，
+ *     并把已认到的证据打进消息。旧实现返回 null 让调用方 `Assumptions.assumeTrue` 跳过 —— 假闸已拆；
+ *   * 判根用 `CorpusProfile.detect`：未登记的 `NOW_VERSION` 由它自己抛 AssertionError。
  */
-private fun findCorpusResources(): File? {
-    val gameDir = System.getenv("ERATW_GAMEDIR")?.trim()?.takeIf { it.isNotEmpty() }
-    if (gameDir != null) {
-        val res = File(gameDir, "resources")
-        return if (res.isDirectory) res else null
-    }
-    val env = System.getenv("ERATW_CORPUS")?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-    var dir: File? = File(env)
+private fun corpusResources(): Pair<File, CorpusProfile> {
+    val gameDirEnv = System.getenv("ERATW_GAMEDIR")?.trim()?.takeIf { it.isNotEmpty() }
+    val corpusEnv = System.getenv("ERATW_CORPUS")?.trim()?.takeIf { it.isNotEmpty() }
+    val start = gameDirEnv ?: corpusEnv
+        ?: run {
+            // 公开仓无外部语料/样本：按公开适配口径跳过（上游为硬判红）。
+            org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_GAMEDIR / ERATW_CORPUS：跳过webp 语料判据")
+            throw AssertionError("unreachable")
+        }
+    var dir: File? = File(start)
+    var resources: File? = null
     repeat(4) {
-        val d = dir ?: return null
+        val d = dir ?: return@repeat
         if (d.isDirectory) {
             val res = File(d, "resources")
-            if (res.isDirectory) return res
+            if (res.isDirectory && resources == null) resources = res
         }
         dir = d.parentFile
     }
-    return null
+    val res = resources
+        ?: throw AssertionError(
+            "$start 向上 4 段都没有 resources 目录（已认到：ERATW_GAMEDIR=${gameDirEnv ?: "-"}、" +
+                "ERATW_CORPUS=${corpusEnv ?: "-"}）：语料根不完整，判红不降级",
+        )
+    val gameRoot = res.parentFile
+        ?: throw AssertionError("$res 没有父目录：语料根形态不符")
+    assertTrue(
+        File(gameRoot, "emuera.config").isFile,
+        "语料根 $gameRoot 下没有 emuera.config：它不是游戏根（resources 的上一级必须是游戏根）",
+    )
+    return res to CorpusProfile.detect(gameRoot.toPath())
 }

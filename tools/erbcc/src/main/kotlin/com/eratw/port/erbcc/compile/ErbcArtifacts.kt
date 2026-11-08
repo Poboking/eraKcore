@@ -134,6 +134,13 @@ object ErbcArtifacts {
         stats: CompileStats? = null,
         bootMetadata: BootMetadata? = null,
         repoRoot: Path? = null,
+        /**
+         * 兼容档下按 THROW 桩降级随包的失败清单（`compile --mode compat --allow-parse-failures`）。
+         * 非空时 manifest 追加 `degraded-slices N` + 逐条 `degraded 文件:行 文案`，
+         * 让「产物里有死函数」这件事跟着 APK 走、可被出包闸与事后取证读到；
+         * 干净产物传空列表，manifest 字节保持原样。
+         */
+        degraded: List<CompileFailure> = emptyList(),
     ): WriteReport {
         // 目录名版本号：冻结的跨模块路径常量（见 KDoc），非容器版本；容器真实版本走 manifest。
         val artifactDirVersion = ErbcFormat.VERSION_1
@@ -196,7 +203,9 @@ object ErbcArtifacts {
                     "请在仓库内运行 erbcc，或用 repoRoot 形参显式指定仓库根",
             )
         val compiler = ErbcCompilerDigest.compute(compilerRoot)
-        val manifest = manifestText(corpusRoot, artifacts, sources, compiler.digest, compiler.fileCount, stats)
+        val manifest = manifestText(
+            corpusRoot, artifacts, sources, compiler.digest, compiler.fileCount, stats, degraded,
+        )
         val manifestPath = artifactDir.resolve("manifest.txt")
         AtomicWrite.write(manifestPath, manifest.toByteArray(Charsets.UTF_8))
         return WriteReport(
@@ -245,6 +254,7 @@ object ErbcArtifacts {
         compilerDigest: String,
         compilerSources: Int,
         stats: CompileStats? = null,
+        degraded: List<CompileFailure> = emptyList(),
     ): String {
         val sb = StringBuilder()
         sb.append("# erbc compile manifest —— 确定性构建清单（同一语料两次编译逐字节相同）\n")
@@ -285,6 +295,16 @@ object ErbcArtifacts {
             sb.append("program expressions ").append(stats.expressions).append('\n')
             sb.append("program global-slots ").append(stats.globalSlots).append('\n')
             sb.append("program entry-function ").append(stats.entryFunction).append('\n')
+        }
+        // 容错档留痕：只在真的降级时写（干净产物字节不变，老对拍用例不受影响）。
+        // 排序固定（文件 → 行号 → 文案），同一语料两次编译仍逐字节相同。
+        if (degraded.isNotEmpty()) {
+            sb.append("degraded-slices ").append(degraded.size).append('\n')
+            for (d in degraded.sortedWith(compareBy({ it.file }, { it.line }, { it.message }))) {
+                val oneLine = d.message.replace('\r', ' ').replace('\n', ' ')
+                sb.append("degraded ").append(d.file).append(':').append(d.line)
+                    .append(' ').append(oneLine).append('\n')
+            }
         }
         return sb.toString()
     }

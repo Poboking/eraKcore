@@ -30,8 +30,10 @@ sealed interface FormPart {
  */
 sealed interface FormConversion {
     /**
-     * {expr} —— expr 必须是数值型（解析期检查，spec: StrForm.cs:310-315）。
-     * int→string 的隐式转换发生点：long.ToString()（spec: StrForm.cs:49）。
+     * {expr} —— expr 必须是数值**或浮点**型（解析期检查，spec: fork StrForm.cs:140-144；
+     * 1.824 的 StrForm.cs:310-315 只判 `typeof(long)`，4.981 升版加了 `EraType.Float` 一支）。
+     * 数值→string 的隐式转换发生点：整型走 `long.ToString()`、浮点走 `double.ToString()`
+     * （spec: fork StrForm.cs:236-239，见 [FormStringTerm.formatCurlyBrace]）。
      * width != null 时补齐到宽度；alignLeft=true（写作 LEFT）→ PadRight（左对齐），
      * false（RIGHT 或省略）→ PadLeft（右对齐）。spec: StrForm.cs:50-58
      */
@@ -89,9 +91,24 @@ data class FormStringTerm(
         is FormConversion.YenAt -> formatYenAt(p.ast, c, ctx)
     }
 
-    /** spec: StrForm.cs:45-60 FormatCurlyBrace */
+    /**
+     * spec: fork StrForm.cs:231-248 FormatCurlyBrace。
+     *
+     * 渲染通道按**静态类型**分派（fork :236 判 `arguments[0].GetEraType() == EraType.Float`）：
+     * 浮点走 `GetFloatValue(exm).ToString()`（:237），其余（解析期已保证只剩 Integer）走
+     * `GetIntValue(exm).ToString()`（:239）。
+     *
+     * `TODO(verify)` 文案差：fork 的 `double.ToString()` 是 .NET「最短可回环」形且**随当前文化**
+     * （`1.0` → `"1"`），JVM 的 `Double.toString()` 恒带小数点与 `E`（`1.0` → `"1.0"`）。
+     * 本仓其余浮点→字符串出口（`fn/XmlMethods.kt:140`、`proc/ProcessRuntime.kt:1713`、
+     * `sql/SqlMethods.kt:191`）都是 JVM 口径，本路不单独另起一套格式化器（那会变成「同一台
+     * 机器两种浮点文案」），先与既有口径对齐；要按 .NET 形收口属跨文件统一改造，见交付回执。
+     */
     private fun formatCurlyBrace(expr: Expr, c: FormConversion.Curly, ctx: EvalContext): String {
-        val text = expr.getIntValue(ctx).toString()  // spec: StrForm.cs:49 —— int→string（Long.ToString 与 C# long.ToString 的 "G" 输出一致）
+        val text = if (expr.operandType == OperandType.FLOAT)
+            expr.getFloatValue(ctx).toString()   // spec: fork StrForm.cs:236-237 —— GetFloatValue().ToString()
+        else
+            expr.getIntValue(ctx).toString()     // spec: StrForm.cs:49 / fork :239 —— int→string（Long.ToString 与 C# long.ToString 的 "G" 输出一致）
         val w = c.width ?: return text               // spec: StrForm.cs:50-53
         val width = w.getIntValue(ctx).toInt()       // spec: StrForm.cs:56,58 —— (int) 截断与 C# unchecked 转换一致
         if (width < 0) {
@@ -211,7 +228,11 @@ data class FormStringTerm(
                 }
             }
             return if (isCurly) {
-                if (main.operandType != OperandType.INT) {
+                // 判据是「既不是整型也不是浮点型」才拒（spec: fork StrForm.cs:140-144
+                // `operand.GetEraType() != EraType.Integer && operand.GetEraType() != EraType.Float`）。
+                // 1.824 的 StrForm.cs:310-315 只判 `!= typeof(long)` ⇒ 浮点被拒；4.981 升版放行浮点，
+                // 渲染走 FormatCurlyBrace 的 float 支（同文件 :236-237）。路次 g5 按 fork 对齐。
+                if (main.operandType != OperandType.INT && main.operandType != OperandType.FLOAT) {
                     throw ExprParseException(line, col, "{ } 内的表达式不是数值型")  // spec: StrForm.cs:310-315
                 }
                 FormPart.Embedded(main, FormConversion.Curly(width, alignLeft))
@@ -251,6 +272,8 @@ data class FormStringTerm(
             when (w) {
                 is Token.Identifier -> ExprToken(ExprTokenKind.IDENTIFIER, w.code, 0L, w.line, w.col)
                 is Token.Integer -> ExprToken(ExprTokenKind.INT_LITERAL, w.text, w.value, w.line, w.col)
+                is Token.Float ->
+                    ExprToken(ExprTokenKind.FLOAT_LITERAL, w.raw, 0L, w.line, w.col, floatValue = w.value)
                 is Token.StringLiteral -> ExprToken(ExprTokenKind.STR_LITERAL, w.value, 0L, w.line, w.col)
                 is Token.Operator -> {
                     val oc = OperatorCode.fromCSharpName(w.code.name)

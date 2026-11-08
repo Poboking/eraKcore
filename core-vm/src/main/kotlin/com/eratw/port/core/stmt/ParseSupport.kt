@@ -1,5 +1,6 @@
 package com.eratw.port.core.stmt
 
+import com.eratw.port.core.err.erbDisplayLine
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.ExprParser
 import com.eratw.port.core.expr.ExprToken
@@ -26,13 +27,25 @@ import com.eratw.port.core.expr.OperatorCode as ExprOperatorCode
  * 原版一律走 ParserMediator.Warn(msg, line, level)，level>=2 时把 InstructionLine 标记为
  * IsError（spec: ArgumentBuilder.cs:19-40）；由于原版继续装载、仅在运行到该行时抛 ExeEE，
  * 本实现改为**解析期立即抛出**，避免静默吞错（纪律要求）。
+ *
+ * - [line]：**内部 0 基**行下标（= 来源 `LogicalLine.lineNo`，spec: EraStreamReader.cs:30
+ *   的 `LineNo => curNo`）。它是给装载/编译链取的坐标值，不是给人读的。
+ * - [displayLine]：给人读的 **1 基**行号（口径与原版一致 —— 原版在 `ScriptPosition`
+ *   构造里一次归一，spec: ScriptPosition.cs:15-17，之后 `ParserMediator.cs:134`
+ *   把 `line.Position` 直接交给 `Warn`，文案模板 `Lang.cs:3334`
+ *   「警告Lv{0}:{1}:{2}行目:{3}」里那个 {2} 就是归一后的值）。
+ *   message 用的就是本属性，换算只经由 [com.eratw.port.core.err.erbDisplayLine] 一处。
+ *   判据与运行期错误面 [com.eratw.port.core.err.CodeEE.displayLine] 同一条。
  */
 class StmtParseException(
     val line: Int,
     val col: Int,
     val statementName: String,
     message: String,
-) : RuntimeException("语句解析错误(行:$line,列:$col)$statementName: $message")
+) : RuntimeException("语句解析错误(行:${erbDisplayLine(line)},列:$col)$statementName: $message") {
+    /** 屏上/报告口径的 1 基行号（[line] 为负时原样返回负数，判据同 [CodeEE.displayLine]）。 */
+    val displayLine: Int get() = erbDisplayLine(line)
+}
 
 /**
  * 语句层解析配置 —— 与原版 Config/JSONConfig 中**解析期**读取的语句级开关对应。
@@ -103,6 +116,9 @@ object StrictSymbolResolver : StmtResolver {
 
     override fun resolveFunction(name: String): OperandType? = BuiltinSymbols.function(name)
 
+    /** `POWER` 一类：任一实参浮点 ⇒ 返回浮点（spec: FunctionMethodTerm.cs:44-56）。 */
+    override fun canReturnFloat(name: String): Boolean = BuiltinSymbols.canReturnFloat(name)
+
     /** 内建方法只能在 `NAME(...)` 形式出现（IdentifierDictionary.cs:538-547 / :607-612）。 */
     override fun canBeReferencedBare(name: String): Boolean = !BuiltinSymbols.isBuiltinMethod(name)
 
@@ -150,6 +166,14 @@ class SymbolTable : StmtResolver {
         funcs[name.uppercase()] ?: BuiltinSymbols.function(name)
 
     /**
+     * 用户 `#FUNCTION` 声明（[funcs]）按声明返回类型，不参与 `CanReturnFloat` 晋升
+     * （fork 只给内建方法设该位，spec: FunctionMethodCreator.cs:5418-5436）；
+     * 其余落到内建名单（[BuiltinSymbols.canReturnFloat]）。
+     */
+    override fun canReturnFloat(name: String): Boolean =
+        !funcs.containsKey(name.uppercase()) && BuiltinSymbols.canReturnFloat(name)
+
+    /**
      * 内建方法只能带括号调用；用户 `#FUNCTION` 同名声明（[funcs]）按用户函数处理。
      * spec: IdentifierDictionary.cs:538-547（无括号只查 refmethodDic）与 :607-612。
      */
@@ -173,6 +197,8 @@ class SymbolTable : StmtResolver {
 fun Token.toExprToken(): ExprToken = when (this) {
     is Token.Identifier -> ExprToken(ExprTokenKind.IDENTIFIER, code, line = line, col = col)
     is Token.Integer -> ExprToken(ExprTokenKind.INT_LITERAL, text, intValue = value, line = line, col = col)
+    is Token.Float ->
+        ExprToken(ExprTokenKind.FLOAT_LITERAL, raw, line = line, col = col, floatValue = value)
     is Token.StringLiteral -> ExprToken(ExprTokenKind.STR_LITERAL, value, line = line, col = col)
     // 表达式解析器按源码符号文本取运算符（OperatorCode.fromText），
     // 而词法器给出的是原版 C# 枚举名，需再转一次（同 FormStringTerm.toExprTokens）。

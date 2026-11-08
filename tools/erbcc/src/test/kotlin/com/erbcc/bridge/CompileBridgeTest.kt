@@ -168,7 +168,7 @@ class CompileBridgeTest {
         org.junit.jupiter.api.Assumptions.assumeTrue(!raw.isNullOrBlank(), "未提供语料路径，跳过全量对比")
         val corpus = java.nio.file.Path.of(raw!!)
         org.junit.jupiter.api.Assumptions.assumeTrue(java.nio.file.Files.isDirectory(corpus), "语料目录不存在: $corpus")
-        val table = com.eratw.port.erbcc.SymbolTable.build(corpus)
+        val table = com.eratw.port.erbcc.LabelTable.build(corpus, sizeConsts = ::sizeConsts)
         val consts = sizeConsts(table)
         var dropBefore = 0
         var dropAfter = 0

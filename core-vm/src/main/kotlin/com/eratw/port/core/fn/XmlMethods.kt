@@ -18,6 +18,8 @@ import com.eratw.port.core.xml.XmlPathException
 import com.eratw.port.core.xml.XmlPool
 import com.eratw.port.core.xml.XmlProcessingInstruction
 import com.eratw.port.core.xml.XmlText
+import com.eratw.port.core.xml.XmlWhitespace
+import com.eratw.port.core.xml.isWhitespaceOnly
 
 /**
  * XML 文档池家族（[registerXmlMethods]）。**文件所有者：A2**（M3-B 第二波）。
@@ -86,13 +88,35 @@ internal fun registerXmlMethods(r: BuiltinRegistry) {
     // ---- 文档池生命周期（spec: :1067-1146）----
 
     // Create：已存在返回 0 且不解析新文本；成功 1。解析错误走 XmlGetError 文案（:1127）。
+    //
+    // ## 空文本兜底（2026-10-31 真机，8 份 `XML_GET函数:""解析错误:缺少根元素（位置 0）`）
+    //
+    // 现场定位（报告只给「函数名 + 行号」，行号是 **0 起**：同批 `THROW 判定地点位于主地图上`
+    // 报 `行390` 而语句在 `PLACE_拠点別分岐.ERB:391`、`RAND:RESULT` 报 `行6087` 而在 6088 行）
+    // ⇒ `@ RM_リソース情報初期化 行49` 是 `リソース管理/ResourceManager.ERB:50`：
+    //
+    //     LOCAL = ENUMFILES("resources", "*.xml", 1)
+    //     FOR I, 0, LOCAL
+    //         XML_DOCUMENT RM_XML_TEMP, LOADTEXT(RESULTS:I)   ← 就是这一行
+    //
+    // 也就是说 `LOADTEXT` 交回了空串。`ENUMFILES` 刚把同一个名字列出来，所以只剩两条路：
+    // 文件读失败、或文件是 0 字节的空壳（解包途中被杀／存储写满，见
+    // `GameAssetInstaller.needsCopy` 同步补的「0 字节目标必须重拷」）。原版 `LoadXml("")`
+    // 抛「缺少根元素」⇒ 整个标题初始化中止，玩家停在 `[ 0％] 少女祈祷中…`、点重试每次都
+    // 死在同一行（两台机各连报 3~5 次）。
+    //
+    // 移植侧把空/全空白文本建成**空文档**：后续 `XML_GET_BYNAME` 命中 0 条，脚本自己
+    // 跳过这一个文件（`FOR J` 不进），其余 90 多个资源照常装载 —— 少几张立绘也好过硬停。
+    // **非空但格式错**的文本仍按原版抛 CodeEE：那条路才是脚本真写坏了，静默吞掉等于把
+    // 语法错误变成「莫名其妙少了立绘」，比崩更难查。
     intVal("XML_DOCUMENT", 2, 2) { c, a ->
         val key = xmlKey(a[0])
         val pool = xmlPool(c)
         if (pool.contains(key)) {
             0L
         } else {
-            pool.create(key, xmlParse(xmlStr(a[1]), "XML_GET"))
+            val text = xmlStr(a[1])
+            pool.create(key, if (text.isBlank()) XmlDocument() else xmlParse(text, "XML_GET"))
             1L
         }
     }
@@ -136,6 +160,8 @@ private fun xmlPool(c: BuiltinContext): XmlPool = c.store.aux.slot("xml") { XmlP
 private fun xmlKey(v: Value?): String = when (v) {
     is Value.IntV -> v.v.toString()
     is Value.StrV -> v.v
+    // TODO(verify): 浮点键/文本口径无 C# 证据（1.824 无浮点值）；按十进制文本处理
+    is Value.FloatV -> v.v.toString()
     null -> throw CodeEE("XML 文档键参数缺失")
 }
 
@@ -146,6 +172,8 @@ private fun xmlKey(v: Value?): String = when (v) {
 private fun xmlStr(v: Value?): String = when (v) {
     is Value.IntV -> v.v.toString()
     is Value.StrV -> v.v
+    // TODO(verify): 同 [xmlKey]，浮点按十进制文本
+    is Value.FloatV -> v.v.toString()
     null -> ""
 }
 
@@ -197,24 +225,56 @@ private fun resolveXmlDoc(
     return XmlDocSource.Inline(xmlParse(text, msgName))
 }
 
-/** 解析错误 → CodeEE（文案格式对齐 `Lang.Error.XmlParseError` / `XmlGetError`）。 */
+/**
+ * 解析错误 → CodeEE。
+ *
+ * 文案分两条通道（2026-11-04 lane errtext 收口）：
+ * - **XML_GET 家族**（[msgName] = `XML_GET`，即 `XML_GET`/`XML_GET_BYNAME`/`XML_DOCUMENT`）
+ *   走官方 `Lang.Error.XmlGetError` 逐字：`XML_GET函数:"{0}"的解析错误:{1}`。
+ *   出处 日文 `Lang.cs:1330`；中文两份表**同文** —— 语料根 `lang/emuera.zhs.xml:770` /
+ *   reference 表 `:287`。原版抛出点 `FunctionMethodCreator.cs:183`（XML_GET 现场解析）与
+ *   `:1127`（XML_DOCUMENT 建池）。此前移植侧漏了「的」，玩家上报里
+ *   `XML_GET函数:""解析错误:缺少根元素（位置 0）`（29 份，0.2.3/0.2.32）即此串。
+ * - **其余函数**走自身名字，形态仍是既有串（官方模板 `Error.XmlParseError` 的
+ *   `{0}函数:` 与 `函数{0}:` 两种前缀在两份 zhs 表里**不同文**，口径待组长裁定，本路不动）。
+ */
 private fun xmlParse(text: String, msgName: String): XmlDocument = try {
     XmlParser.parse(text)
 } catch (ex: XmlParseException) {
-    throw CodeEE("${msgName}函数:\"$text\"解析错误:${ex.message}")
+    throw CodeEE(xmlParseErrorMessage(msgName, text, ex.message ?: ""))
 }
+
+/** XML_GET 家族的官方前缀名（两份 zhs 表都把这段串烤死在模板里，没有占位符）。 */
+private const val XML_GET_MSG_NAME = "XML_GET"
+
+internal fun xmlParseErrorMessage(msgName: String, text: String, cause: String): String =
+    if (msgName == XML_GET_MSG_NAME) {
+        "XML_GET函数:\"$text\"的解析错误:$cause"
+    } else {
+        "${msgName}函数:\"$text\"解析错误:$cause"
+    }
+
+internal fun xmlPathErrorMessage(fn: String, path: String, cause: String): String =
+    if (fn == XML_GET_MSG_NAME) {
+        // 官方 `Error.XmlGetPathError` = `XML_GET函数:XPath"{0}"的解析错误:{1}`
+        //（Lang.cs:1334；语料根 emuera.zhs.xml:771 / reference 表 :288；
+        //  原版抛出点 FunctionMethodCreator.cs:193）
+        "XML_GET函数:XPath\"$path\"的解析错误:$cause"
+    } else {
+        "${fn}函数:XPath\"$path\"解析错误:$cause"
+    }
 
 private fun xmlParseFragment(text: String, fn: String): List<XmlNode> = try {
     XmlParser.parseFragment(text)
 } catch (ex: XmlParseException) {
-    throw CodeEE("${fn}函数:\"$text\"解析错误:${ex.message}")
+    throw CodeEE(xmlParseErrorMessage(fn, text, ex.message ?: ""))
 }
 
-/** XPath 错误 → CodeEE（文案格式对齐 `Lang.Error.XmlXPathParseError`）。 */
+/** XPath 错误 → CodeEE（XML_GET 家族取官方 `Error.XmlGetPathError`，其余口径同上）。 */
 private fun xmlSelect(doc: XmlDocument, path: String, fn: String): List<XmlNode> = try {
     XmlPath.select(doc, path)
 } catch (ex: XmlPathException) {
-    throw CodeEE("${fn}函数:XPath\"$path\"解析错误:${ex.message}")
+    throw CodeEE(xmlPathErrorMessage(fn, path, ex.message ?: ""))
 }
 
 /**
@@ -330,19 +390,27 @@ private fun setXmlNode(node: XmlNode, text: String, style: Long, fn: String) {
             // .NET `XmlNode.InnerText` setter 对元素**总是**建一个文本子节点，空串也不例外
             //（dotnet 8.0.27 实测：`<a x="1">1</a>` 设 InnerText="" 后 OuterXml 是 `<a x="1"></a>`，
             // FirstChild != null）。所以这里保留空 XmlText，输出 `<a></a>` 而不是 `<a />`。
+            // XML-FIVE X4 翻案读数（dotnet 8.0.425）：值是纯空白（如 "  "）也建**普通 #text**
+            // 而非 #whitespace —— #whitespace 只从 InnerXml 片段赋值产生（见 XmlWhitespace KDoc）。
             is XmlElement -> node.replaceChildren(listOf(XmlText(text)))
             is XmlAttribute -> node.attrValue = text
             is XmlText -> node.text = text
+            is XmlWhitespace -> setWhitespaceText(node, text, fn)
             is XmlCData -> node.data = text
             is XmlComment -> node.data = text
             is XmlProcessingInstruction -> node.data = text
             else -> throw xmlSetValueError(node, fn)
         }
         2L -> when (node) {
-            is XmlElement -> node.replaceChildren(xmlParseFragment(text, fn))
+            is XmlElement -> {
+                val children = xmlParseFragment(text, fn)
+                guardChildDepth(node, children, fn)
+                node.replaceChildren(children)
+            }
             is XmlAttribute -> node.attrValue = text
-            // 文本/CDATA/注释/PI 没有子节点：.NET 的 InnerXml setter 抛 InvalidOperationException
-            //（dotnet 8 实测 "Cannot set the 'InnerXml' for the current node ..."），原版不捕获 ⇒ 中止。
+            // 文本/CDATA/注释/PI（含 #whitespace）没有子节点：.NET 的 InnerXml setter 抛
+            // InvalidOperationException（dotnet 8 实测 "Cannot set the 'InnerXml' for the
+            // current node ..."），原版不捕获 ⇒ 中止。
             else -> throw CodeEE(
                 "${fn}函数:不能给节点类型 '${node.name}' 设置 InnerXml" +
                     "（原版 InvalidOperationException: Cannot set the 'InnerXml' for the current node " +
@@ -352,12 +420,36 @@ private fun setXmlNode(node: XmlNode, text: String, style: Long, fn: String) {
         else -> when (node) {
             is XmlAttribute -> node.attrValue = text
             is XmlText -> node.text = text
+            is XmlWhitespace -> setWhitespaceText(node, text, fn)
             is XmlCData -> node.data = text
             is XmlComment -> node.data = text
             is XmlProcessingInstruction -> node.data = text
             else -> throw xmlSetValueError(node, fn)
         }
     }
+}
+
+/**
+ * 给 [XmlWhitespace]（#whitespace）节点赋值（XML_SET style=0/1 打到它，路径形如
+ * `/r/node()`）。.NET `XmlWhitespace` 的 Value/InnerText setter 只收空白串：
+ * dotnet 8.0.425 实测赋非空白抛 **ArgumentException**「The string for whitespace
+ * contains an invalid character.」，Emuera 只 catch XmlException ⇒ 原版未捕获崩溃；
+ * 本实现按 ADR-005 折化成 [CodeEE]（中止等价）。
+ *
+ * 空串读数（RESIDUE-BX2 R2，dotnet 8.0.425 探针 `<work-root>/residue-probe/probe-output.txt`
+ * R2b/R2c/R2e/R2f）：Value/InnerText 赋**空串**都放行——节点保持 `XmlWhitespace`
+ * 类型与 `#whitespace` 名、`text()` 照选、元素 OuterXml 写出空文本段（`<r></r>`）；
+ * `InnerXml=""`（对**元素**）把含空白在内的全部子节点清空。与本实现现状逐项一致
+ * ⇒ 只销账不改码：`isWhitespaceOnly("")` 为真、节点原样写入空串。
+ */
+private fun setWhitespaceText(node: XmlWhitespace, text: String, fn: String) {
+    if (!isWhitespaceOnly(text)) {
+        throw CodeEE(
+            "${fn}函数:不能给节点类型 '${node.name}' 赋非空白值" +
+                "（原版 ArgumentException: The string for whitespace contains an invalid character.）",
+        )
+    }
+    node.text = text
 }
 
 private fun xmlSetValueError(node: XmlNode, fn: String): CodeEE =
@@ -419,6 +511,7 @@ private fun xmlAddNode(c: BuiltinContext, e: List<Expr?>, byName: Boolean, attri
  */
 private fun insertXmlNode(target: XmlNode, child: XmlNode, method: Int, attribute: Boolean, fn: String): Boolean {
     if (!attribute) {
+        guardInsertDepth(target, child, method, fn)
         return when (method) {
             0 -> {
                 when (target) {
@@ -583,6 +676,7 @@ private fun replaceXmlNode(node: XmlNode, newNode: XmlNode, fn: String): Boolean
         throw CodeEE("${fn}函数:不能替换属性节点（原版 ArgumentException）")
     }
     val p = node.parent ?: return false
+    guardReplaceDepth(node, newNode, fn)
     return when (p) {
         is XmlElement -> {
             val idx = p.children.indexOf(node)
@@ -613,6 +707,88 @@ private fun replaceXmlNode(node: XmlNode, newNode: XmlNode, fn: String): Boolean
 }
 
 // ---------------------------------------------------------------------------
+// 插入型 API 的整文档深度闸
+// ---------------------------------------------------------------------------
+
+/**
+ * 插入 / 替换**之前**的整文档元素深度闸：结果超过 [XmlParser.MAX_ELEMENT_DEPTH] 抛 CodeEE。
+ *
+ * 为什么需要：解析器只在**单次** [XmlParser.parse] 内限制深度。XML_ADDNODE、XML_SET 的
+ * style 2（InnerXml）、XML_REPLACE 都能把一棵接近上限的子树挂到已有深度的节点下，
+ * 总深度随调用次数叠加。而本仓的遍历/序列化都是递归的
+ * （`XmlElement.writeOuterXml` / `appendInnerText` / `XmlPath` 的 descendants /
+ * `cloneXmlNode`），超深文档会抛 StackOverflowError —— 它既不是
+ * [XmlParseException] 也不是 [XmlPathException]，不会被换成 CodeEE，等于绕开错误通道
+ * 直接打死 VM。原版 .NET 同样在这里栈溢出且不捕获；按 verify-notes §12
+ * 「官方未捕获崩溃不复刻」，本实现改成可诊断的 CodeEE。
+ *
+ * 判据口径与解析器一致：根元素 depth = 0，`parseElement(0)` 在 depth > 上限时失败，
+ * 所以插入后允许的最大元素深度同样是 [XmlParser.MAX_ELEMENT_DEPTH]。
+ *
+ * 两个度量：
+ * - [xmlDepthOf]：节点的元素深度（根 = 0；文本/注释等按父元素 +1 计）；
+ * - [xmlSubtreeDepthOf]：以该节点为根的子树的相对深度（自身 = 0）。
+ * 二者相加即「插入后的最深元素深度」。闸门在写之前判，池里的文档不会先被改坏再报错；
+ * 两个度量都用显式栈/while，闸门自己不能因为深文档递归（否则防的就是自己）。
+ * 只在插入路径调用，不在 `XML_GET` / `XML_TOSTR` 热路径上。
+ */
+private fun xmlDepthOf(node: XmlNode): Int {
+    var depth = 0
+    var p = node.parent
+    while (p is XmlElement) {
+        depth++
+        p = p.parent
+    }
+    return depth
+}
+
+private fun xmlSubtreeDepthOf(root: XmlNode): Int {
+    var max = 0
+    val stack = ArrayDeque<Pair<XmlNode, Int>>()
+    stack.addLast(root to 0)
+    while (stack.isNotEmpty()) {
+        val (node, depth) = stack.removeLast()
+        if (node !is XmlElement) continue
+        if (depth > max) max = depth
+        for (child in node.children) stack.addLast(child to depth + 1)
+    }
+    return max
+}
+
+private fun xmlDepthError(fn: String): CodeEE = CodeEE(
+    "${fn}函数:XML 元素嵌套超过 ${XmlParser.MAX_ELEMENT_DEPTH} 层，" +
+        "序列化时会栈溢出（原版同样崩溃，本实现中止脚本）",
+)
+
+/** XML_ADDNODE 的插入前闸；容器与 [insertXmlNode] 的分支一一对应（method 1/2 是父节点）。 */
+private fun guardInsertDepth(target: XmlNode, child: XmlNode, method: Int, fn: String) {
+    if (child !is XmlElement) return
+    val container: XmlNode = when (method) {
+        0 -> target
+        else -> target.parent ?: return
+    }
+    val base = if (container is XmlElement) xmlDepthOf(container) + 1 else 0
+    if (base + xmlSubtreeDepthOf(child) > XmlParser.MAX_ELEMENT_DEPTH) throw xmlDepthError(fn)
+}
+
+/** XML_SET style 2 的闸：片段的顶层元素落在 target 的下一层。 */
+private fun guardChildDepth(target: XmlElement, children: List<XmlNode>, fn: String) {
+    val base = xmlDepthOf(target) + 1
+    for (child in children) {
+        if (child !is XmlElement) continue
+        if (base + xmlSubtreeDepthOf(child) > XmlParser.MAX_ELEMENT_DEPTH) throw xmlDepthError(fn)
+    }
+}
+
+/** XML_REPLACE 的闸：新子树根替换原节点，落在同一深度。 */
+private fun guardReplaceDepth(node: XmlNode, newNode: XmlNode, fn: String) {
+    if (newNode !is XmlElement) return
+    if (xmlDepthOf(node) + xmlSubtreeDepthOf(newNode) > XmlParser.MAX_ELEMENT_DEPTH) {
+        throw xmlDepthError(fn)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 节点复制（原版 CreateNode + 拷属性 + InnerXml，:1554-1562 / :1872-1881）
 // ---------------------------------------------------------------------------
 
@@ -626,6 +802,7 @@ private fun cloneXmlElement(src: XmlElement): XmlElement {
 private fun cloneXmlNode(src: XmlNode): XmlNode = when (src) {
     is XmlElement -> cloneXmlElement(src)
     is XmlText -> XmlText(src.text)
+    is XmlWhitespace -> XmlWhitespace(src.text)
     is XmlCData -> XmlCData(src.data)
     is XmlComment -> XmlComment(src.data)
     is XmlProcessingInstruction -> XmlProcessingInstruction(src.name, src.data)

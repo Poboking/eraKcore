@@ -24,7 +24,10 @@ data class ButtonOpt(val text: String, val value: Long)
  * - [buttons] —— 候选（INT 题的合法取值优先来源）；
  * - [consoleTail] —— 控制台尾（缺省 30 行、去空白尾行，按控制台顺序最旧在前，
  *   与 Commands.kt:92-95 的 snapshot().takeLast(...) 同口径）；
- * - [stackTop] —— 「函数名:pc」；E1 拿不到调用栈口时传空串（合同 §3 原注）。
+ * - [stackTop] —— 「函数名:pc」；sink 面 VM 停在语句边界、必有帧（[VmStackReader]，Explore.kt:404）。
+ *   队列面（喂入线程构造的等待点）在 ERB 帧间停车、无「当前最内层函数」可读时退
+ *   「state:状态机态名」（fix-longsoak 口径，见 ExploreDriver.queueFaceStackTopLocked 的 KDoc）；
+ *   反射不可得才为空串（合同 §3 原注的兜底）。
  */
 data class WaitPoint(
     val request: InputRequest,
@@ -283,5 +286,6 @@ fun createExplorePolicy(name: String, seed: Long = DEFAULT_EXPLORE_SEED, loopCap
     when (name) {
         "exhaustive" -> ExhaustivePolicy(seed, loopCap)
         "least-visited" -> LeastVisitedPolicy(seed, loopCap)
-        else -> throw CliError("--policy 只认 exhaustive|least-visited: $name")
+        "soak" -> SoakPolicy(seed)
+        else -> throw CliError("--policy 只认 exhaustive|least-visited|soak: $name")
     }

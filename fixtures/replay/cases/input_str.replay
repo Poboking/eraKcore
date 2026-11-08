@@ -1,0 +1,15 @@
+# INPUTS：字符串取值。空文本 + 无默认值 ⇒ 按提交原文交付（:1190-1204），
+# process.InputString 写 RESULTS:0（Process.cs:432-436），脚本打 INPUTS=HELLO。
+case: input_str
+target: REPLAY_INPUT_STR
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:871-913
+anchor: reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs:1190-1204
+anchor: reference/emuera-cs/MinorShift.Emuera.GameProc/Process.cs:432-436
+--- inputs
+submit HELLO
+--- expect-console
+START-INPUT-STR
+INPUTS=HELLO
+END-INPUT-STR
+--- expect-vars
+RESULTS:0 = "HELLO"

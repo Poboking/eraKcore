@@ -1,0 +1,36 @@
+# 标注（rust-staging-refresh 车道，2026-11-01）：本档是 1101 波动合并**前**的历史快照档，
+#         记录的 compiler-digest c166fa80b711… 已过期（core-vm 收编 31 个文件后现读为
+#         4ef357c0758d…）；正文读数按纪律不改写，现状判据见
+#         haruki-staging-accept-full-corpus-1101.txt。
+# erbcc-rs / rust-staging 车道登记：闸 1 认账读数（Haruki 机实测）
+# 产法：python devtools/verify_rust_erbc_staging.py gate1 --register --corpus $ERATW_CORPUS --game-root $ERATW_GAMEDIR
+# 时间：2026-11-01 12:44:01　语料：C:\DSH\eratw-安卓移植计划\eratw-画蛇添足版eratw4.980\ERB（3,971 文件全量档；Rust 腿 28.9 s）
+# 机相关：erbc-freshness / erbc-source / game-root 含产出机绝对路径；换机（或改 core-vm 源码树）后重跑本命令刷新，不放宽判据。
+
+## 档 A（corpus-root 兜底档）
+erbc-source C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-staging\gate1-20261101-124247\rust\erbc.v1
+erbc-dir-fallback false
+erbc-freshness verified(erbcc 0.1.0-SNAPSHOT, compiler c166fa80b711, container v2, program f12b58f90be90b10ac2eb15d21dff8c2a612e937efdc7512b749a209465295b5, 源 3971 个文件来自 C:\DSH\eratw-安卓移植计划\eratw-画蛇添足版eratw4.980\ERB)
+program-sha256 f12b58f90be90b10ac2eb15d21dff8c2a612e937efdc7512b749a209465295b5
+program-bytes 329105851
+program-parts 0
+manifest-sha256 51beed482f949d12f4d3efe8a8f7c47ed2446c34bb90c4a9ab35e396df2604cf
+entries-erbc 4
+bytes-erbc 385946762
+staged-entries 4
+staged-bytes 385946762
+program-mode stored
+
+## 档 B（-PeratwGameRoot/ERB 正路档）
+erbc-source C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-staging\gate1-20261101-124247\rust\erbc.v1
+erbc-dir-fallback false
+erbc-freshness verified(erbcc 0.1.0-SNAPSHOT, compiler c166fa80b711, container v2, program f12b58f90be90b10ac2eb15d21dff8c2a612e937efdc7512b749a209465295b5, 源 3971 个文件来自 C:\DSH\eratw-安卓移植计划\eratw-画蛇添足版eratw4.980\ERB)
+program-sha256 f12b58f90be90b10ac2eb15d21dff8c2a612e937efdc7512b749a209465295b5
+program-bytes 329105851
+program-parts 0
+manifest-sha256 51beed482f949d12f4d3efe8a8f7c47ed2446c34bb90c4a9ab35e396df2604cf
+entries-erbc 4
+bytes-erbc 385946762
+staged-entries 10256
+staged-bytes 766964432
+program-mode stored

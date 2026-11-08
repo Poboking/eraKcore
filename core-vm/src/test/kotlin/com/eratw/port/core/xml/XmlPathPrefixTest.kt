@@ -82,6 +82,50 @@ class XmlPathPrefixTest {
         assertEquals(1, sel("<a><b>p:q</b></a>", "/a[b='p:q']").size)
     }
 
+    // ---------------- 畸形限定名（XML-FIVE X3：整串文案 + 两族分类） ----------------
+
+    /**
+     * 畸形限定名的报错文案带**整串查询原文**（含前导空白 / 谓词方括号 / 联合竖线）且分两族
+     * ——全部取自 dotnet 8.0.425 `SelectNodes` 实测（2026-11-06 复探，XML-FIVE X3）：
+     * - 多冒号（`a:b:c`、`a::b`）与空前缀（`:c`、`:`）⇒ `'<全文>' has an invalid token.`
+     * - 空本地名（`a:`、`@a:`）与名字含空白（`a: b`、`@a: b`）⇒
+     *   `'<全文>' has an invalid qualified name.`
+     * 旧实现只钉「报错」不逐字，且 `[/a: b]`（.NET=qualified name）与 `[/:]`（.NET=token）
+     * 两支判反，均已按探针翻案。
+     */
+    private fun assertInvalidMessage(path: String, expected: String) {
+        val ex = assertFailsWith<XmlPathException>("'$path' 应报错") { sel("<r/>", path) }
+        assertEquals(expected, ex.message, "报错文案应与 dotnet 8.0.425 实测逐字一致")
+    }
+
+    @Test
+    fun `畸形限定名整串文案逐字`() {
+        // 多冒号 / 空前缀 ⇒ invalid token（引号里是整串原文）
+        assertInvalidMessage("/a:b:c", "'/a:b:c' has an invalid token.")
+        assertInvalidMessage("/a::b", "'/a::b' has an invalid token.")
+        assertInvalidMessage("/:c", "'/:c' has an invalid token.")
+        assertInvalidMessage("/:", "'/:' has an invalid token.")
+        // 空本地名 / 名字含空白 ⇒ invalid qualified name（旧实现这两支恰好判反）
+        assertInvalidMessage("/a:", "'/a:' has an invalid qualified name.")
+        assertInvalidMessage("/a: b", "'/a: b' has an invalid qualified name.")
+    }
+
+    @Test
+    fun `畸形限定名文案带整串路径原文`() {
+        // 引号里是整串原文：步前缀（/root/a:b:c）、联合（a:b:c|/b）、谓词方括号都原样保留
+        assertInvalidMessage("/root/a:b:c", "'/root/a:b:c' has an invalid token.")
+        assertInvalidMessage("/a:b:c|/b", "'/a:b:c|/b' has an invalid token.")
+        assertInvalidMessage(" /a:b:c", "' /a:b:c' has an invalid token.")
+        // 谓词里的畸形限定名：空本地名 ⇒ qualified name（@a: 同）、多冒号 ⇒ token
+        assertInvalidMessage("/root/a[a:]", "'/root/a[a:]' has an invalid qualified name.")
+        assertInvalidMessage("/root[a:]", "'/root[a:]' has an invalid qualified name.")
+        assertInvalidMessage("/root/a[a:b:c]", "'/root/a[a:b:c]' has an invalid token.")
+        assertInvalidMessage("/root/a[@a:]", "'/root/a[@a:]' has an invalid qualified name.")
+        // 含空白的谓词名（NAME 宽匹配收不下）：.NET 报 qualified name，移植同口径
+        assertInvalidMessage("/root/a[a: b]", "'/root/a[a: b]' has an invalid qualified name.")
+        assertInvalidMessage("/root/a[@a: b]", "'/root/a[@a: b]' has an invalid qualified name.")
+    }
+
     // ---------------- 默认命名空间 ----------------
 
     /** 默认 `xmlns` 会施加到未加前缀的元素 ⇒ 无前缀名字测试全 0 命中（dotnet 实测）。 */

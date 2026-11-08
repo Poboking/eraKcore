@@ -277,6 +277,26 @@ interface ConsoleSink {
     fun holdFrame() {}
 
     /**
+     * 页中保活：只重抓当前可见行做快照并推进宿主帧版本号（LineBufferConsoleSink.revision），
+     * **不开口闸**、不改变冻结段
+     * 批量语义、不影响死循环闸计数。
+     *
+     * 背景与口径：`EVENTTRAIN` 整段在慢机上可连续跑上百秒（见 specs/verify-notes.md 的
+     * 22.2 节），而帧闸只有在让出边界（[publishFrame]）才发布冻结段内容 —— 长链中途
+     * 玩家看到的是上一页，观感等同卡死。本方法给宿主一个**只上屏、不算段落边界**的
+     * 发布机会：闸关时用当前 displayLines 的不可变拷贝替换冻结快照，让渲染层下一次
+     * 轮询能拿到新帧；闸开时内容本来就实时发布，缺省即 no-op。
+     *
+     * 与原版的关系：原版 `EmueraConsole.Await`（EmueraConsole.cs:840-856）在脚本线程里
+     * 强制重绘，长链中途没有等价的绘制点；本方法不是新增原版语句，也不进入
+     * `Process.cs:470-489` 的死循环判据。宿主调用频率与停顿由自己的检查点决定。
+     *
+     * 缺省 no-op：headless 装置 / golden 管线 / 不追踪显示行的宿主零改动。
+     * 委托型宿主（[ConsoleBridge]）必须转发，否则真机永远走缺省空实现。
+     */
+    fun publishProgressFrame() {}
+
+    /**
      * 整组样式复位 —— 原版 `EmueraConsole.ResetStyle()`（spec: EmueraConsole.cs:2838-2842）：
      * `userStyle = defaultStyle` + `alignment = DisplayLineAlignment.LEFT`，两条语句级动作
      * 一次性完成。调用点共四处：BEGIN（FunctionIdentifier.cs:2930-2936，方法体第 3 句 :2935）、
