@@ -2,6 +2,7 @@ package com.eratw.port.core.host
 
 import com.eratw.port.core.image.PngDecoder
 import java.io.IOException
+import java.nio.ByteBuffer
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -189,7 +190,7 @@ class MappedPngPayloadStore(private val dir: Path) : PngPayloadStore, AutoClosea
             val m = mapping ?: return null
             return try {
                 // duplicate：位置游标各自独立，多次 decode / 并发读互不串位。
-                val dup = m.duplicate()
+                val dup = (m as ByteBuffer).duplicate()
                 val bytes = ByteArray(size)
                 dup.get(bytes)
                 PngDecoder.decode(bytes).pixels
@@ -203,7 +204,7 @@ class MappedPngPayloadStore(private val dir: Path) : PngPayloadStore, AutoClosea
             return try {
                 // 与 decode 同一条 duplicate 纪律；这份拷贝只在调用栈里活一瞬，
                 // 渲染侧解完 native 位图就丢，不能拿它当缓存键（见接口 KDoc）。
-                val dup = m.duplicate()
+                val dup = (m as ByteBuffer).duplicate()
                 ByteArray(size).also { dup.get(it) }
             } catch (_: Throwable) {
                 null

@@ -128,7 +128,7 @@ class RootedSaveFileIo(
      * 正是玩家报的两条现象。故快路失败时退到原地截断，把「存不上」换成「这一次没有
      * 崩溃安全保证」；快路成功时行为与本条补丁之前逐字相同。
      *
-     * 对外可观测语义：返回 false = 两条路都以 Exception 失败；成功时读回字节 == [bytes]；
+     * 对外可观测语义：返回 false = 目标只读（显式拒绝）或两条路都以 Exception 失败；成功时读回字节 == [bytes]；
      * `Error`（OOM）从这条路**上抛**，由调用方的求援/重试链接管
      * （见 [writeByAtomicReplace] 的 KDoc）；越界路径仍由 [resolve]
      * 拒绝并返回 false；父目录不存在会先建出来。
@@ -138,6 +138,9 @@ class RootedSaveFileIo(
      */
     override fun write(path: String, bytes: ByteArray): Boolean {
         val f = resolve(path) ?: return false
+        // 只读档显式拒绝：POSIX（Android/Linux）上「临时文件 + rename」可以覆盖只读目标，
+        // 光靠 OS 的 AccessDenied 拦不住；这里与 DELDATA 的只读口径同源，跨平台一致。
+        if (isReadOnly(path)) return false
         val parent = f.parent ?: return false
         // 快路：同目录临时文件 → 原子换名（见上一条 KDoc 的崩溃安全理由）。
         if (writeByAtomicReplace(parent, f, bytes)) return true
@@ -170,6 +173,8 @@ class RootedSaveFileIo(
      */
     override fun write(path: String, producer: (OutputStream) -> Unit): Boolean {
         val f = resolve(path) ?: return false
+        // 同 [write]：只读档显式拒绝，不依赖 POSIX rename 的权限差异。
+        if (isReadOnly(path)) return false
         val parent = f.parent ?: return false
         return when (writeByAtomicReplace(parent, f, producer)) {
             StreamWriteOutcome.OK -> true
