@@ -33,24 +33,33 @@ EraTW をネイティブに遊びたい。[eratw-pocket](https://github.com/Pobo
 - **互換性の基準は Emuera。** エンジンの挙動の基準は Emuera の実際の動作で、
   すべての結論は `specs/` の差分検証仕様として文章化し、Emuera ソースの
   `ファイル:行号` を添える必要があります。
+- **現代的な ERA ランタイム機能。** 基本 VM に加え、リンク可能なパッチ / Mod、
+  エンティティと仮想キャラクター、SQL セッション、更新マニフェスト署名、
+  サイドカーセーブとクラッシュ復旧、メモリ階層などを備えます。
 - **Android に依存しない。** 純 JVM 実装で、グラフィックのない環境でもテストが
   できます。これが CI での継続的な差分検証を可能にしています。
 - **自己完結。** ゲームデータがなくても、ビルド・テスト・再現がすべて可能です。
 
 `specs/` は本プロジェクトの意味論的な権威で、ISA・組み込み関数・変数・ロード・
-セーブ形式・RNG を扱います。
+セーブ形式・RNG・パッチコンテナ・エラーメッセージを扱います。各ファイルの関係は
+[specs/README.md](specs/README.md) を参照してください。
 
+## リポジトリ構成
 
-## モジュール
-
-| モジュール | 概要 |
+| パス | 概要 |
 |---|---|
-| `core-vm` | ERA セマンティック VM：ERB バイトコード実行、変数・キャラクターシステム、セーブ I/O、組み込み関数、SFMT 乱数 |
+| `core-vm` | ERA セマンティック VM：ERB バイトコード実行、変数・キャラクター、セーブ I/O、組み込み関数、SFMT 乱数、パッチ / Mod ランタイム |
 | `render` | 純 JVM レンダリング：グリフキャッシュ、テキストグリッド、ボタン当たり判定、ディスプレイリスト、グラフィックレイヤー |
-| `tools/erbcc` | ERB / ERH → `erbc.v1` バイトコードコンテナコンパイラ |
+| `tools/erbcc` | ERB / ERH → `erbc.v1` バイトコードコンテナコンパイラ。コーパスコンパイル・シンボル監査・Rust 対拍接続を含む |
+| `tools/erbcc-rs` | erbcc の Rust 側実装（Cargo プロジェクト）。Kotlin コンパイラとのバイト単位対拍用 |
 | `tools/vmdbg` | エージェント向け非対話デバッグ CLI：call / trace / where / var / disasm / sweep / ledger |
 | `tools/uipreview` | デスクトップ描画プレビュー：実物の core-vm + render を駆動し、ブラウザで画面を確認 |
 | `tools/fontsubset` | フォントサブセット再生成スクリプト（Python）。`render/src/main/resources/fonts` の保守用 |
+| `specs/` | 意味論仕様と差分検証の根拠（ISA・組み込み・変数・ロード・セーブ・RNG・パッチ・エラー文言） |
+| `fixtures/` | 自己完結したテストフィクスチャ：golden ERB、リプレイ軌跡、Rust 対拍データ |
+| `buildSrc/` | ビルド時タスクと純関数（コーパスパッチ、erbc 鮮度、アセット staging） |
+| `devtools/` | コーパス内容パッチと erbcc-rs 対拍ドライバ |
+| `gradle/libs.versions.toml` | 依存座標と JVM / ツールチェーンのバージョンの単一ソース |
 
 ## ビルドとテスト
 
@@ -58,21 +67,55 @@ JDK 17 以上が必要です。コマンドはすべてリポジトリのルー�
 
 ```bash
 ./gradlew :core-vm:test             # モジュール単位のテスト
+./gradlew :render:test
 ./gradlew :tools:erbcc:installDist  # コンパイラ CLI
+./gradlew :tools:vmdbg:installDist  # デバッグ CLI
 ```
 
-一部のテストは実ゲームのコーパスや計測産物に依存し、`ERATW_CORPUS` /
-`ERATW_GAMEDIR` / `ERATW_ERBC_DIR` 環境変数でゲートされています：変数が未設定なら
-そのケースは生成されず、それ以外は自己完結しています。CI はこの範囲のテストを
-実行しています。
+CI と同等のコマンド（5 モジュールをまとめて実行）：
 
-## リポジトリ構成
+```bash
+./gradlew --no-daemon \
+  :core-vm:test :render:test :tools:erbcc:test \
+  :tools:vmdbg:test :tools:uipreview:test
+```
+
+一部のテストは実コーパス・実産物・実セーブ・Android コンパイル面に依存し、
+環境変数でゲートされています。変数が未設定の場合は JUnit assumption により
+**スキップ**され、それ以外は自己完結しています。公開 CI が回すのはこの範囲です。
+
+| 環境変数 / プロパティ | 役割 |
+|---|---|
+| `ERATW_CORPUS` | ゲームの `ERB/` ディレクトリ。実コーパスコンパイルとコーパス監査 |
+| `ERATW_GAMEDIR` | ゲームルート（`CSV/`・`resources/`・`emuera.config`）。XML / 設定 / 画像の実測 |
+| `ERATW_ERBC_DIR` | コンパイル済み `erbc.v1` 産物ディレクトリ。ロード / サイドカー / mmap |
+| `ERATW_SAVE_SAMPLES` / `-PsaveSamples` | 実 `.sav` サンプルディレクトリ。セーブ往復・変異書き込み |
+| `ERATW_ANDROID_JAR` | Android `android.jar`。未設定時は `ANDROID_HOME` / `ANDROID_SDK_ROOT` を自動探索し、見つからない場合のみ `AndroidApiCompatTest` をスキップ |
+| `ERATW_ROOT` | 任意の共有チェックアウトルート。少数の内部リプレイ用例のみ使用し、公開リポジトリに既定値はありません |
+
+`ERATW_CORPUS` が未設定の場合、`compileCorpus` などのコーパス依存タスクは
+空パッケージを黙って作らず、明確なエラーで停止します。
+
+### erbcc-rs 対拍
+
+Rust 側には Cargo が必要です。ビルド後、Gradle 接続を使います：
+
+```bash
+cargo build --release --manifest-path tools/erbcc-rs/Cargo.toml
+./gradlew :tools/erbcc:erbccClasspathFile
+./gradlew :tools:erbcc:rsParity -Pcorpus=<ERBディレクトリ>
+./gradlew :tools/erbcc:regenRsBaselines -Plane=all
+```
+
+詳細は [tools/erbcc-rs/README.md](tools/erbcc-rs/README.md) を参照してください。
+
+## リポジトリ関係
 
 ```
 eraKcore（本リポジトリ、MIT）     eratw-pocket（GPL-3.0）
 ├── core-vm   ←─────────────     ├── render-canvas
 ├── render    ←─────────────     ├── platform
-└── erbcc                        └── app（Compose シェル）
+└── tools/erbcc                  └── app（Compose シェル）
 ```
 
 eratw-pocket がゲームの意味論を一切知らないのは、意図的な設計です。スクリプトの
@@ -84,19 +127,26 @@ eratw-pocket がゲームの意味論を一切知らないのは、意図的な�
 
 ## アーキテクチャと設計判断
 
-**仕様先行の差分検証開発。** `specs/` の 6 本の仕様はいずれも実装に先立って
-執筆され、全結論に Emuera 逆コンパイルソースの `ファイル:行号` を根拠として
-付けます。ドキュメントだけでは見落とす細部を差分検証で拾えます。たとえば
-デフォルトの RNG は `System.Random` ではなく自前実装の SFMT19937
-（周期 2^19937−1）であり、これをそのまま再現しています。プロジェクト内の
-ルールは単純です：仕様と実装が食い違ったら仕様を優先する。実装によって仕様の
-誤りが判明した場合は、先に仕様を直し、それから実装を直す——この順序だけは
-変えません。
+**仕様先行の差分検証開発。** `specs/` の仕様はいずれも実装に先立って執筆され、
+全結論に Emuera 逆コンパイルソースの `ファイル:行号` を根拠として付けます。
+ドキュメントだけでは見落とす細部を差分検証で拾えます。たとえばデフォルトの RNG は
+`System.Random` ではなく自前実装の SFMT19937（周期 2^19937−1）であり、これを
+そのまま再現しています。プロジェクト内のルールは単純です：仕様と実装が食い違ったら
+仕様を優先する。実装によって仕様の誤りが判明した場合は、先に仕様を直し、それから
+実装を直す——この順序だけは変えません。
 
 **AOT バイトコード + mmap ゼロ解析ロード。** ERB/ERH はビルド時に erbcc が
 `.erbc` コンテナ（リトルエンディアン、i64 値、文字列インターニング、命令固定長
 4×u32、セクションテーブル）へコンパイルし、実行時は mmap で直接参照して解析なしで
-実行します。Android での高速ロードの直接の源です。
+実行します。Android での高速ロードの直接の源です。ロード層には
+`FlatPoolBudget` によるヒープ予算の事前検査、命令ページキャッシュ、ホットパスの
+融合命令もあり、それぞれ `core-vm` 内に専用テストと反証があります。
+
+**リンク可能なパッチと Mod。** パッチコンテナは完全で正当な `.erbc` を内包し、
+ロード時に `ModuleLinker` / `CallRelocation` / `ExternalImportTable` がモジュール
+リンク・呼び出し再配置・外部インポート解決を行います。`PatchCompiler` はパッチを
+リンク可能モジュールへコンパイルします。形式の権威は
+`specs/patch-format.yaml` です。
 
 **コンパイルの決定性はテスト対象であり、前提ではない。** 産物はバイト単位で
 再現可能（`ErbcDeterminismTest`）に加え、ロード順序の監査もあります。同名定義
@@ -123,9 +173,9 @@ eratw-pocket がゲームの意味論を一切知らないのは、意図的な�
 ## コーパスと著作権
 
 本リポジトリは era ゲームのデータ（スクリプト・画像・音声・セーブ・設定）を一切
-配布しません。`fixtures/golden/` の `GOLDEN_*.ERB` は本プロジェクトが書いたテスト
-フィクスチャで、ゲームテキストは含みません。正規に入手したゲームデータをご自身で
-ご用意のうえ、環境変数で指定してください。
+配布しません。`fixtures/` の `GOLDEN_*.ERB`、リプレイ軌跡、Rust 対拍データは
+本プロジェクトが書いたテストフィクスチャで、ゲームテキストは含みません。正規に
+入手したゲームデータをご自身でご用意のうえ、環境変数で指定してください。
 
 Emuera に関する帰属表示と改変の明示は [NOTICE.md](NOTICE.md) をご覧ください。
 
@@ -155,4 +205,3 @@ issue を立てて相談するだけで十分です。
 
 [MIT](LICENSE)。同梱フォントはそれぞれオープンソースライセンスに従います。
 フォント一覧は [NOTICE.md](NOTICE.md) をご覧ください。
-

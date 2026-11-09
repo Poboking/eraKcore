@@ -31,6 +31,9 @@ builds and runs standalone on desktop, server, and CI.
   functions. Rendering is emitted as a display list for frontends to present.
 - **Emuera is the behavioral baseline.** Every conclusion must land in the
   differential specs under `specs/`, citing the Emuera source (`file:line`).
+- **Modern ERA runtime capabilities.** Beyond the base VM, the engine includes
+  linkable patches / Mods, entities and virtual characters, SQL sessions,
+  signed update manifests, sidecar saves with crash recovery, and memory tiers.
 - **No Android dependency.** It is plain JVM and is tested in headless
   environments — which is what makes continuous differential auditing on CI
   possible at all.
@@ -38,19 +41,25 @@ builds and runs standalone on desktop, server, and CI.
   no game data whatsoever.
 
 `specs/` is the semantic authority of this project, covering the ISA, built-ins,
-variables, loading, save format, and RNG.
+variables, loading, save format, RNG, patch container, and error texts. See
+[specs/README.md](specs/README.md) for how the files fit together.
 
+## Repository Layout
 
-## Modules
-
-| Module | Description |
+| Path | Description |
 |---|---|
-| `core-vm` | ERA semantic VM: ERB bytecode execution, variable & character systems, save I/O, built-in functions, SFMT RNG |
+| `core-vm` | ERA semantic VM: ERB bytecode execution, variables & characters, save I/O, built-ins, SFMT RNG, patch / Mod runtime |
 | `render` | Pure-JVM rendering: glyph cache, text grid, button hit regions, display list, graphics layers |
-| `tools/erbcc` | ERB / ERH → `erbc.v1` bytecode container compiler |
+| `tools/erbcc` | ERB / ERH → `erbc.v1` bytecode container compiler; corpus compilation, symbol audit, Rust parity wiring |
+| `tools/erbcc-rs` | Rust-side erbcc implementation (Cargo project) used for byte-for-byte parity against the Kotlin compiler |
 | `tools/vmdbg` | Non-interactive, agent-oriented debug CLI: call / trace / where / var / disasm / sweep / ledger |
 | `tools/uipreview` | Desktop render preview: drives the real core-vm + render, viewable in a browser |
 | `tools/fontsubset` | Font subsetting scripts (Python) that maintain `render/src/main/resources/fonts` |
+| `specs/` | Semantic specs and differential evidence (ISA, built-ins, variables, loading, saves, RNG, patches, error texts) |
+| `fixtures/` | Self-contained test fixtures: golden ERB, replay traces, Rust parity data |
+| `buildSrc/` | Build-time tasks and pure helpers (corpus patches, erbc freshness, asset staging) |
+| `devtools/` | Corpus content patches and the erbcc-rs parity driver |
+| `gradle/libs.versions.toml` | Single source for dependency coordinates and JVM / toolchain versions |
 
 ## Build & Test
 
@@ -58,21 +67,56 @@ Requires JDK 17+. Run all commands from the repository root.
 
 ```bash
 ./gradlew :core-vm:test             # per-module tests
+./gradlew :render:test
 ./gradlew :tools:erbcc:installDist  # compiler CLI
+./gradlew :tools:vmdbg:installDist  # debug CLI
 ```
 
-A few tests depend on real corpora or profiling artifacts and are gated by the
-`ERATW_CORPUS` / `ERATW_GAMEDIR` / `ERATW_ERBC_DIR` environment variables: with
-the variables unset, those cases are simply not generated; everything else is
-self-contained. CI runs exactly that tier.
+The CI-equivalent command runs all five modules:
 
-## Repository Layout
+```bash
+./gradlew --no-daemon \
+  :core-vm:test :render:test :tools:erbcc:test \
+  :tools:vmdbg:test :tools:uipreview:test
+```
+
+A few tests depend on a real corpus, real artifacts, real saves, or the Android
+compile surface. They are gated by environment variables; when a variable is
+unset the case is **skipped** via a JUnit assumption, while everything else stays
+self-contained. That is exactly the tier public CI runs.
+
+| Environment variable / property | Purpose |
+|---|---|
+| `ERATW_CORPUS` | Game `ERB/` directory; real-corpus compilation and corpus-audit cases |
+| `ERATW_GAMEDIR` | Game root (with `CSV/`, `resources/`, `emuera.config`); XML / config / image readout cases |
+| `ERATW_ERBC_DIR` | Compiled `erbc.v1` artifact directory; loading / sidecar / mmap cases |
+| `ERATW_SAVE_SAMPLES` / `-PsaveSamples` | Real `.sav` sample directory; save round-trip and mutated-write cases |
+| `ERATW_ANDROID_JAR` | Android `android.jar`; when unset, `ANDROID_HOME` / `ANDROID_SDK_ROOT` are probed, and only then is `AndroidApiCompatTest` skipped |
+| `ERATW_ROOT` | Optional shared checkout root used by a few internal replay cases; no public default |
+
+When `ERATW_CORPUS` is unset, corpus-dependent tasks such as `compileCorpus`
+fail with a clear message instead of silently producing an empty package.
+
+### erbcc-rs parity
+
+The Rust side needs Cargo. Build it, then use the Gradle wiring:
+
+```bash
+cargo build --release --manifest-path tools/erbcc-rs/Cargo.toml
+./gradlew :tools:erbcc:erbccClasspathFile
+./gradlew :tools:erbcc:rsParity -Pcorpus=<ERB dir>
+./gradlew :tools:erbcc:regenRsBaselines -Plane=all
+```
+
+See [tools/erbcc-rs/README.md](tools/erbcc-rs/README.md) for details.
+
+## Repository Relationship
 
 ```
 eraKcore (this repo, MIT)      eratw-pocket (GPL-3.0)
 ├── core-vm   ←────────────    ├── render-canvas
 ├── render    ←────────────    ├── platform
-└── erbcc                      └── app (Compose shell)
+└── tools/erbcc                └── app (Compose shell)
 ```
 
 eratw-pocket knows nothing about game semantics — on purpose. The authoritative
@@ -84,21 +128,28 @@ a phone.
 
 ## Architecture & Design Decisions
 
-**Spec-first differential development.** The six specs under `specs/` were all
-written before the implementation, each conclusion backed by `file:line`
-citations from the decompiled Emuera sources. Differential reading catches what
-documentation alone cannot — for instance, the engine's default RNG is not
-`System.Random` but a hand-rolled SFMT19937 (period 2^19937−1), reproduced
-as-is. One simple rule governs the project: when the specs and the
-implementation disagree, the specs win; and if the implementation proves a spec
-wrong, fix the spec first and the implementation second — never the other way
-around.
+**Spec-first differential development.** The specs under `specs/` were written
+before the implementation, each conclusion backed by `file:line` citations from
+the decompiled Emuera sources. Differential reading catches what documentation
+alone cannot — for instance, the engine's default RNG is not `System.Random` but
+a hand-rolled SFMT19937 (period 2^19937−1), reproduced as-is. One simple rule
+governs the project: when the specs and the implementation disagree, the specs
+win; and if the implementation proves a spec wrong, fix the spec first and the
+implementation second — never the other way around.
 
 **AOT bytecode + mmap zero-parse loading.** ERB/ERH sources are compiled at
 build time by erbcc into `.erbc` containers (little-endian, i64 values, string
 interning, fixed 4×u32 instructions, section table). At runtime they are
 memory-mapped and executed with no parsing at all — the direct source of fast
-cold loads on Android.
+cold loads on Android. The loading layer also has a `FlatPoolBudget` heap
+preflight, an instruction-page cache, and fused hot-path instructions, each with
+dedicated tests and negative controls in `core-vm`.
+
+**Linkable patches and Mods.** A patch container embeds a complete, valid
+`.erbc`. At load time `ModuleLinker` / `CallRelocation` / `ExternalImportTable`
+perform module linking, call relocation, and external-import resolution, while
+`PatchCompiler` compiles patches into linkable modules. The format authority is
+`specs/patch-format.yaml`.
 
 **Deterministic compilation is tested, not assumed.** Output is byte-for-byte
 reproducible (`ErbcDeterminismTest`), backed by a load-order audit: if the
@@ -128,9 +179,9 @@ values.
 ## Corpus & Copyright
 
 This repository distributes **no** era game data (scripts, images, audio, saves,
-configs). The `GOLDEN_*.ERB` files under `fixtures/golden/` are fixtures written
-by this project and contain no game text. Bring your own legally obtained game
-data and point the environment variables at it.
+configs). The `GOLDEN_*.ERB` files, replay traces, and Rust parity data under
+`fixtures/` are fixtures written by this project and contain no game text. Bring
+your own legally obtained game data and point the environment variables at it.
 
 See [NOTICE.md](NOTICE.md) for attribution and modification statements regarding
 Emuera.
@@ -163,4 +214,3 @@ files that accompany it.
 
 [MIT](LICENSE). Bundled fonts carry their own open-source licenses — see the
 font table in [NOTICE.md](NOTICE.md).
-

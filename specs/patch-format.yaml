@@ -3,7 +3,7 @@
 # 状态：v1 定稿（R7 波 B）。字段表与 <internal-workdir>/CONTRACT-R7-B.md §2/L3 逐字段一致 ——
 #   字段名、顺序、类型、必填性**不许两边各自演化**；任何一侧改动都必须同时改另一侧。
 # 上位决策：eratw-架构决策记录.md ADR-011（补丁通道边界：编译只在导入路径、装载只读产物、失败整体回退）。
-# 容器侧权威：eratw-android/specs/erbc-format.md。补丁体是**内嵌一份完整合法的 .erbc**，
+# 容器侧权威：specs/erbc-format.md。补丁体是**内嵌一份完整合法的 .erbc**，
 #   本规约**不新造容器**，也**不升** `ErbcFormat.VERSION_1`（core/code/ErbcFormat.kt:42）。
 # 代码侧：core-vm/src/main/kotlin/com/eratw/port/core/patch/PatchHeader.kt、PatchArtifacts.kt。
 #
@@ -13,14 +13,14 @@
 #   计数       = Program 的六个读数：instructionCount / functionCount / statementCount /
 #                stringCount / longCount / exprCount
 #
-# 证据口径：source 一律为「相对 eratw-android/ 的路径:行号」或「仓库根相对路径:行号」。
+# 证据口径：source 一律为「相对仓库根的路径:行号」或「仓库根相对路径:行号」。
 
 schema: 1
 
 meta:
   contract: <internal-workdir>/CONTRACT-R7-B.md:83-100
   decision: eratw-架构决策记录.md ADR-011
-  container_spec: eratw-android/specs/erbc-format.md
+  container_spec: specs/erbc-format.md
   implementation: core-vm/src/main/kotlin/com/eratw/port/core/patch/PatchHeader.kt、PatchArtifacts.kt
   version: 1
   status: 定稿
@@ -189,7 +189,7 @@ fields:
     meaning: '补丁入口函数名；写侧大写归一后落盘'
     check: '去引号后必须非空；必须是大写归一形态（与 CodeBuilder.declareFunction 的 uppercase 同口径）；必须能在补丁体函数表里命中，否则拒绝装载'
     source: <internal-workdir>/CONTRACT-R7-B.md:99
-    normalize_evidence: eratw-android/specs/erbc-format.md:280
+    normalize_evidence: specs/erbc-format.md:280
 
   - name: '---'
     index: 15

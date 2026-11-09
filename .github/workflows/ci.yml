@@ -20,6 +20,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: 编译 + 单测
-        # 语料 / 性能 / 真档依赖用例由 ERATW_* 环境变量门控，CI 上无变量即自动不生成，
-        # 计入的只有自足的 fixture 用例（fixtures/golden 等）。
+        # 语料 / 真产物 / 真存档依赖用例由 ERATW_* 环境变量门控：CI 上无变量时按
+        # JUnit assumption 跳过；计入的只有自足的 fixture 用例（fixtures/golden 等）。
+        # GitHub runner 自带 Android SDK，AndroidApiCompatTest 会真跑编译面闸。
         run: ./gradlew --no-daemon :core-vm:test :render:test :tools:erbcc:test :tools:vmdbg:test :tools:uipreview:test

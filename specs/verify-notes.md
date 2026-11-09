@@ -328,10 +328,10 @@ case '\'':
 
 ## 9. 2026-10-19 spec 与 C# 交叉验证（CONTRACT-M4-A §4 · worker l-specgap2）
 
-工具：`eratw-android/tools/spec_crosscheck.py` + 新增的 `tools/miniyaml.py`（specs yaml 的零依赖解析器）。
-分工：`tools/golden-coverage.py` 管 **golden 覆盖率**；本工具管 **spec 与 C# 注册表的一致性**
+工具：`spec_crosscheck.py`（内部工具） + 新增的 `miniyaml.py`（内部工具）（specs yaml 的零依赖解析器）。
+分工：`golden-coverage.py`（内部工具） 管 **golden 覆盖率**；本工具管 **spec 与 C# 注册表的一致性**
 （条目名 / 参数形态 / flag 位 / 引用行号）。两者现在都不再 `import yaml`——本机 Python 3.14.3 无 PyYAML，
-AGENTS.md §2 禁止装依赖 ⇒ 统一走 `tools/miniyaml.py`。它只覆盖本项目 yaml 实际用到的构造
+AGENTS.md §2 禁止装依赖 ⇒ 统一走 `miniyaml.py`（内部工具）。它只覆盖本项目 yaml 实际用到的构造
 （块映射、块序列、单行流式集合、裸串/单双引号串、多行裸串折叠、` #` 注释），
 碰到块标量 `|` `>`、锚点、多文档、跨行流式集合一律抛 `MiniYamlError`——**宁可崩也不静默给错值**。
 
@@ -576,13 +576,13 @@ python tools/golden-coverage.py                # 300/303 语句、252/271 函数
 - 缺口 变量：yaml 缺 0；yaml 多出（非 varTokenDic 来源）0
 
 复现一致性：`--json` 连跑两次逐字节相同；`--section` 同上。
-`tools/golden-coverage.py` 读数与波前基线一致：**300/303 语句、252/271 函数**（未回退）。
+`golden-coverage.py`（内部工具） 读数与波前基线一致：**300/303 语句、252/271 函数**（未回退）。
 
 ---
 
 ## 10. 2026-10-19 SPEC-FIX 处置（CONTRACT-M4-A §4 · worker l-specfix，worktree `<work-root>/eratw-wt-specfix`）
 
-工具链：`eratw-android/tools/spec_crosscheck.py` + `tools/miniyaml.py` + `tools/golden-coverage.py`
+工具链：`spec_crosscheck.py`（内部工具） + `miniyaml.py`（内部工具） + `golden-coverage.py`（内部工具）
 （Python 3.13.14，零第三方依赖；reference 走 `<work-root>/eratw-安卓移植计划/reference/emuera-cs`）。
 本节只登记 §9.2 那 98 条差异的逐条处置与由此产生的工具/规约动作，不改历史节。
 
@@ -816,7 +816,7 @@ C# 语义依据：反编译里重载常在 `: this()` 之后整体重写 `argume
 - `specs/isa.yaml`：PRINT 条目增 `flag_by_alias`（77 名）+ `flag_source_by_alias`（77 名），
   PRINT_DATA 条目增 9 + 9；值与依据即 §10.3 快照表原样落地（`PRINT|8196`、`PRINTC|8196`、
   `PRINTCD|10246`… 抽查逐行一致），注释行注明模拟口径与 §10.3/§11 出处。
-- `tools/spec_crosscheck.py`：
+- `spec_crosscheck.py`（内部工具）：
   - 新增 `per_alias_flag_crosscheck()`：yaml 映射 vs `NameSuffixSim` 逐名对拍，
     五类判定（缺键 / 值不符 / 依据行号不符 / 模拟不出 / 多键），输出全排序保确定性；
   - `--section` 的「flag 位缺失」改由对拍驱动（映射未落的条目即缺键清单，旧行为可复现）；
@@ -832,7 +832,7 @@ C# 语义依据：反编译里重载常在 `: this()` 之后整体重写 `argume
   比较器按注释行剔除后比对）。
 - 变异测试：`PRINT: 8196 → 8197` 后 `--section` 即报
   「`yaml flag_by_alias.PRINT=8197 与模拟值 8196 不符`」（缺口 1），还原后归零 ⇒ 对拍非摆设。
-- `tools/golden-coverage.py` 在改后 isa.yaml 上跑通（别名抽取不受新字段影响，GOLDEN 13 文件 / 1,717 行）。
+- `golden-coverage.py`（内部工具） 在改后 isa.yaml 上跑通（别名抽取不受新字段影响，GOLDEN 13 文件 / 1,717 行）。
 - 本波未触碰 Kotlin / render / core / `build.gradle.kts` / BOARD.md（BOARD 回执在交付合并提交里）；
   本路无 gradle 闸，未跑 gradle。
 
@@ -1161,7 +1161,7 @@ C# 语义依据：反编译里重载常在 `: this()` 之后整体重写 `argume
 | `PRINT_DATA` | `PRINT_DATA_Instruction` `:231` | `PRINTDATA*` 9 名 `:3902-3910`（经 `addPrintDataFunction` `:3817-3820`） |
 | `SAVELOADGAME` | `SAVELOADGAME_Instruction` `:2956` | `SAVEGAME` / `LOADGAME` `:3951-3952` |
 
-### 14.3 工具改动（`tools/spec_crosscheck.py`）
+### 14.3 工具改动（`spec_crosscheck.py`（内部工具））
 
 - 新增 `classify_entry_name_ghosts()`：返回 `(explained, gaps, stale)`，三者全排序；
 - `report["diff"]` 增 `explained_entry_names` / `unexplained_entry_names` / `stale_entry_name_kinds`
@@ -1183,7 +1183,7 @@ C# 语义依据：反编译里重载常在 `: this()` 之后整体重写 `argume
   2. 加 `PRINT: class_derived`（已是 funcDic 注册名）⇒ stale 1、缺口 1；
   3. 加 `NOSUCH: class_derived` ⇒ stale 1；
   4. 清空整块映射 ⇒ 四条全部回缺口 ⇒ 判定不是硬编码白名单。
-- `tools/golden-coverage.py` 在改后 isa.yaml 上读数不变：语句 300/303、函数 252/271、13 文件 1,717 行。
+- `golden-coverage.py`（内部工具） 在改后 isa.yaml 上读数不变：语句 300/303、函数 252/271、13 文件 1,717 行。
 - 本路无 Kotlin 面，未跑 gradle；未 commit / push（worker 纪律）。
 
 ### 14.5 遗留

@@ -595,7 +595,7 @@ v1 两个池都覆盖，因此 `HAS_EXPRESSIONS` / `HAS_STATEMENTS` 在真实产
   下除 `manifest.txt` 与 `package.report` 的全部条目）、`container-artifact ...`（切分前的整容器
   字节数 + SHA-256）、`container-shards N` + `shard ...`（行序 = 拼接序，每片字节数 + SHA-256）。
   `package.report` 同时写 `manifest-sha256`（清单字节的摘要），供「报告 ↔ 清单」对账。
-* **对账器** `tools/apkpack/inspect_apk.py` 的四条判据：①清单 `package-artifact` 表与 zip 里
+* **对账器** eratw-pocket 的 `tools/apkpack/inspect_apk.py` 的四条判据：①清单 `package-artifact` 表与 zip 里
   `erbc.v1/` 的实际文件集**双向相等**；②逐条字节数 + SHA-256；③分片行序与 `program.parts`
   一致、逐片 sha 正确、按行序汇总后等于 `container-artifact`；④`package.report` 的
   `manifest-sha256` 等于清单字节摘要。单条形态下 `container-shards 0`，此时

@@ -75,6 +75,6 @@
 ## 七、复现
 
 ```
-cd eratw-android
-JAVA_HOME=../.tooling/jdk-17.0.20.1+1 ../.tooling/gradle-8.10.2/bin/gradle --no-daemon :tools:erbcc:run --args="scan --corpus '<游戏>/ERB' --use-index '<游戏>/lazyloadingfiles.dat' --out tools/erbcc/scan-report"
+cd eraKcore
+./gradlew --no-daemon :tools:erbcc:run --args="scan --corpus '<游戏>/ERB' --use-index '<游戏>/lazyloadingfiles.dat' --out tools/erbcc/scan-report"
 ```

@@ -296,7 +296,7 @@ C.8 的「267 个重名标签 → 死文件」反证**被推翻**：原版对重
 | 4 | 同文件内重复定义 | **不报错**，与跨文件同规则：非事件后者覆盖前者；事件全部入桶按行序执行。仅在 `WarnNormalFunctionOverloading` 开启时告警（warnLevel=1，不中断装载、不影响 `noError`）。本游戏该配置为 `YES`。 | `ErbLoader.cs:443-451`（告警但不置错）、`ConfigData.cs:94`、游戏 `emuera.config:DUPLICATED FUNCTIONS WARNING:YES` |
 | 5 | 与系统语句/内建函数重名 | `AllowFunctionOverloading` 默认 **true**（本游戏 `YES`）→ 与保留字/系统方法重名仅 warnLevel=1（**允许**，标签照常注册）；为 false 时 warnLevel=2 → `InvalidLabelLine`，标签**不注册**。语句位置仍由指令表优先（行首标识符查 `instructionDic`）；用户 `#FUNCTION` 同名时在**表达式**位置覆盖内建方法，普通 `@label` 同名则回落到内建方法。 | `ConfigData.cs:89`、`Config.cs:344-352`、`IdentifierDictionary.cs:206-256`（`:210-243` 两分支）、`LogicalLineParser.cs:409-414`、`IdentifierDictionary.cs:548-586` |
 | 6 | 玩家自制 ERB 与本体冲突 | **无任何"用户优先"特权**，胜负完全由装载序（路径排序）决定。注意 `getFiles` 是「同层文件 → 同层子目录（递归）」：放子目录的自制文件必然晚于根目录文件装载 → 覆盖本体；放根目录则按文件名 culture 序竞争（`zz_*.erb` 可稳定压过本体）。名字含 `#` 的目录**最先**装载（最容易被覆盖）。 | `ErbLoader.cs:214-264`、`Config.cs:654-706` |
-| 7 | 全量实测 | 见 D.3：引擎层重名 **6 个名字 / 30 条定义，全部是事件函数**；非事件重名 **0**；无法解释 **0**。文本层「≈280 个重名」是**未建模 `[SKIPSTART]`** 的假象（283 个幽灵重名）。 | `tools/symbols-report/` |
+| 7 | 全量实测 | 见 D.3：引擎层重名 **6 个名字 / 30 条定义，全部是事件函数**；非事件重名 **0**；无法解释 **0**。文本层「≈280 个重名」是**未建模 `[SKIPSTART]`** 的假象（283 个幽灵重名）。 | 内部符号报告（未随公开仓发布） |
 
 ### D.2 装载序（本游戏配置下的精确定义）
 

@@ -6,7 +6,7 @@
 - `saitamaar-advance.txt`（契约 §3 sidecar，由 `tools/fontsubset/build_subset.py` 生成，禁手改）
 - `subset-build-manifest.txt`（复现凭据）
 
-原始文件与工具证据：`eratw-android/tools/fontsubset/name-table-audit.txt`（各字体 name 表 dump）。
+原始文件与工具证据：`tools/fontsubset/name-table-audit.txt`（各字体 name 表 dump）。
 
 ## 1 逐条核授权
 

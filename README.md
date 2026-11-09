@@ -13,7 +13,7 @@
 
 **Kotlin 实现的纯 JVM ERA 引擎。**
 
-eraKcore 起源于一个很朴素的需求：想在 Android 上原生地玩 EraTW，而不是套一层
+eraKcore 起源于一个朴素的需求：想在 Android 上原生地玩 EraTW，而不是套一层
 模拟器。[eratw-pocket](https://github.com/Poboking/eratw-pocket) 就是这个需求的
 答案——它是用本引擎做出来的第一个 Android 原生版 EraTW（上游：画蛇添足版
 4.980），在部分低端设备上比模拟器跑得更顺畅。引擎本身不包含任何游戏数据，在
@@ -29,24 +29,31 @@ eraKcore 起源于一个很朴素的需求：想在 Android 上原生地玩 EraT
   系统、存档、内建函数。画面以显示列表输出，交由各前端自行呈现。
 - **兼容性看齐 Emuera。** 引擎的行为基准是 Emuera 的实际表现，所有结论都要求
   落到 `specs/` 的对拍规格上，并附 Emuera 源码的 `文件:行号` 出处。
+- **现代 ERA 运行时能力。** 除基础 VM 外，还包含可链接补丁 / Mod 装载、实体与
+  虚拟角色、SQL 会话、更新清单签名、侧车存档与崩溃恢复、内存分级等运行时能力。
 - **不依赖 Android。** 纯 JVM 实现，在无图形环境下照常测试，这也是它能在 CI
   上持续对拍的前提。
 - **自足。** 不需要任何游戏数据即可构建、跑测试、复现问题。
 
-`specs/` 是本项目的语义权威，涵盖 ISA、内建函数、变量、装载、存档格式与 RNG。
+`specs/` 是本项目的语义权威，覆盖 ISA、内建函数、变量、装载、存档格式、RNG、
+补丁容器与错误文案。各文件之间的关系见 [specs/README.md](specs/README.md)。
 
+## 仓库结构
 
-## 模块
-
-| 模块 | 说明 |
+| 路径 | 说明 |
 |---|---|
-| `core-vm` | ERA 语义虚拟机：ERB 字节码执行、变量与角色系统、存档读写、内建函数、SFMT 随机数 |
+| `core-vm` | ERA 语义虚拟机：ERB 字节码执行、变量与角色系统、存档读写、内建函数、SFMT 随机数、补丁 / Mod 运行时 |
 | `render` | 纯 JVM 渲染层：字形缓存、文本网格、按钮命中区、显示列表、图形层 |
-| `tools/erbcc` | ERB / ERH → `erbc.v1` 字节码容器编译器 |
-| `tools/erbcc-rs` | erbcc 的 Rust 侧实现（Cargo 工程），由 `tools/erbcc` 的 Gradle 对拍脚本接线 |
+| `tools/erbcc` | ERB / ERH → `erbc.v1` 字节码容器编译器；含语料编译、符号审计与 Rust 对拍接线 |
+| `tools/erbcc-rs` | erbcc 的 Rust 侧实现（Cargo 工程），用于与 Kotlin 编译器做逐字节对拍 |
 | `tools/vmdbg` | 面向 agent 的无交互调试 CLI：call / trace / where / var / disasm / sweep / ledger |
 | `tools/uipreview` | 桌面渲染预览：驱动真实的 core-vm + render，浏览器查看画面 |
 | `tools/fontsubset` | 字体子集再生成脚本（Python），维护 `render/src/main/resources/fonts` |
+| `specs/` | 语义规格与对拍证据（ISA、内建、变量、装载、存档、RNG、补丁、错误文案） |
+| `fixtures/` | 自包含测试夹具：golden ERB、回放轨迹、Rust 对拍数据等 |
+| `buildSrc/` | 构建期任务与纯函数（语料补丁、erbc 新鲜度、资产 staging 等） |
+| `devtools/` | 语料内容补丁与 erbcc-rs 对拍驱动脚本 |
+| `gradle/libs.versions.toml` | 全仓依赖坐标与 JVM / 工具链版本的唯一落点 |
 
 ## 构建与测试
 
@@ -54,12 +61,47 @@ eraKcore 起源于一个很朴素的需求：想在 Android 上原生地玩 EraT
 
 ```bash
 ./gradlew :core-vm:test             # 单模块测试
+./gradlew :render:test
 ./gradlew :tools:erbcc:installDist  # 编译器 CLI
+./gradlew :tools:vmdbg:installDist  # 调试 CLI
 ```
 
-少数测试依赖真实语料或性能产物，由 `ERATW_CORPUS` / `ERATW_GAMEDIR` /
-`ERATW_ERBC_DIR` 环境变量门控：变量未设置时这些用例不会生成，其余用例自足。
-CI 上跑的就是这一档。
+CI 等价命令（五个模块一起跑）：
+
+```bash
+./gradlew --no-daemon \
+  :core-vm:test :render:test :tools:erbcc:test \
+  :tools:vmdbg:test :tools:uipreview:test
+```
+
+少数测试依赖真实语料、真产物、真存档或 Android 编译面，由环境变量门控。
+变量未设置时这些用例走 JUnit assumption **跳过**，其余用例自足；公开仓 CI
+跑的就是这一档。
+
+| 环境变量 / 属性 | 作用 |
+|---|---|
+| `ERATW_CORPUS` | 游戏 `ERB/` 目录；真实语料编译与语料审计用例 |
+| `ERATW_GAMEDIR` | 游戏根目录（含 `CSV/`、`resources/`、`emuera.config`）；XML / 配置 / 图像实测用例 |
+| `ERATW_ERBC_DIR` | 已编译的 `erbc.v1` 产物目录；装载 / 侧车 / mmap 用例 |
+| `ERATW_SAVE_SAMPLES` / `-PsaveSamples` | 真实 `.sav` 样本目录；存档回环与变异写入用例 |
+| `ERATW_ANDROID_JAR` | Android `android.jar`；未设置时自动探测 `ANDROID_HOME` / `ANDROID_SDK_ROOT`，仍找不到才跳过 `AndroidApiCompatTest` |
+| `ERATW_ROOT` | 可选的共享检出根；仅少数内部重放用例使用，公开仓无默认值 |
+
+`ERATW_CORPUS` 未设置时，`compileCorpus` 等需要语料的任务也会直接给出明确报错，
+不会静默产出空包。
+
+### erbcc-rs 对拍
+
+Rust 侧需要 Cargo；先构建，再走 Gradle 接线：
+
+```bash
+cargo build --release --manifest-path tools/erbcc-rs/Cargo.toml
+./gradlew :tools:erbcc:erbccClasspathFile
+./gradlew :tools:erbcc:rsParity -Pcorpus=<ERB目录>
+./gradlew :tools:erbcc:regenRsBaselines -Plane=all
+```
+
+细节见 [tools/erbcc-rs/README.md](tools/erbcc-rs/README.md)。
 
 ## 仓库关系
 
@@ -67,7 +109,7 @@ CI 上跑的就是这一档。
 eraKcore（本仓库，MIT）        eratw-pocket（GPL-3.0）
 ├── core-vm   ←────────────  ├── render-canvas
 ├── render    ←────────────  ├── platform
-└── erbcc                    └── app（Compose 壳层）
+└── tools/erbcc              └── app（Compose 壳层）
 ```
 
 eratw-pocket 对游戏语义一无所知——这是有意为之。脚本行为、内建函数、存档格式
@@ -77,7 +119,7 @@ eratw-pocket 对游戏语义一无所知——这是有意为之。脚本行为�
 
 ## 架构与设计取舍
 
-**规格先行的对拍开发。** `specs/` 下的六份规约都成文于实现之前，逐条附有 Emuera
+**规格先行的对拍开发。** `specs/` 下的规约都成文于实现之前，逐条附有 Emuera
 反编译源码的 `文件:行号` 证据。许多只看文档发现不了的细节，正是靠对拍抓出来的——
 比如引擎默认 RNG 并不是 `System.Random`，而是自实现的 SFMT19937
 （周期 2^19937−1），我们照原样复刻了它。项目内部有一条简单的约定：规格与实现
@@ -85,7 +127,14 @@ eratw-pocket 对游戏语义一无所知——这是有意为之。脚本行为�
 
 **AOT 字节码 + mmap 零解析装载。** ERB/ERH 在构建期由 erbcc 编译成 `.erbc`
 容器（小端、i64 数值、字符串驻留、指令定长 4×u32、段表寻址），运行时经 mmap
-直接寻址，不做任何解析。这是安卓端冷启动装载速度的直接来源。
+直接寻址，不做任何解析。这是安卓端冷启动装载速度的直接来源。装载层另有
+`FlatPoolBudget` 按堆预算预检、取指页缓存与热路径融合指令等优化，均在
+`core-vm` 内有定向用例与反向证明。
+
+**可链接补丁与 Mod。** 补丁容器内嵌完整合法的 `.erbc`，装载期由
+`ModuleLinker` / `CallRelocation` / `ExternalImportTable` 完成模块链接、调用重定位
+与外部导入解析；`PatchCompiler` 负责把补丁编译成可链接模块。格式权威见
+`specs/patch-format.yaml`。
 
 **编译确定性是受测性质，不是假设。** 产物逐字节可复现（`ErbcDeterminismTest`），
 另设装载序审计：若重名定义文件之间的相对次序受文件系统枚举顺序影响，审计计数
@@ -107,8 +156,8 @@ eratw-pocket 对游戏语义一无所知——这是有意为之。脚本行为�
 ## 语料与版权
 
 本仓库不分发任何 era 游戏数据（脚本、图片、音频、存档、配置）。
-`fixtures/golden/` 下的 `GOLDEN_*.ERB` 是本项目自写的语义夹具，不含游戏文本。
-请自备合法获得的游戏数据，用环境变量指向它。
+`fixtures/` 下的 `GOLDEN_*.ERB`、回放轨迹与 Rust 对拍数据都是本项目自写的测试
+夹具，不含游戏文本。请自备合法获得的游戏数据，用环境变量指向它。
 
 Emuera 的出处声明与修改说明见 [NOTICE.md](NOTICE.md)。
 
@@ -134,4 +183,3 @@ Emuera 的出处声明与修改说明见 [NOTICE.md](NOTICE.md)。
 ## 许可
 
 [MIT](LICENSE)。内置字体另有各自的开源许可，见 [NOTICE.md](NOTICE.md) 的字体表。
-
