@@ -2,7 +2,7 @@
 
 ## Emuera
 
-eraKcore 是对 [Emuera](https://osdn.net/projects/emuera/)（原作者：MinorShift，2008–）所实现的 era 游戏运行时语义的 **Kotlin 独立重写**：不是衍生自其源码的移植，但语义规约（`specs/`）以其可观察行为为对拍基准，并按原样复刻其官方 bug。
+eraKcore 是对 [Emuera](https://osdn.net/projects/emuera/)（原作者：MinorShift，2008–）所实现的 era 游戏引擎语义的 **Kotlin 独立重写**：不是衍生自其源码的移植，但语义规约（`specs/`）以其可观察行为为对拍基准，并按原样复刻其官方 bug。
 
 Emuera 原版的许可声明（译文摘要与原文要点）：
 

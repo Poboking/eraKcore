@@ -11,13 +11,13 @@
 ![Platform](https://img.shields.io/badge/platform-JVM-6a737d?style=flat-square)
 ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)
 
-**A pure-JVM ERA runtime, implemented in Kotlin.**
+**A pure-JVM ERA engine, implemented in Kotlin.**
 
 eraKcore started from a plain wish: to play EraTW natively on Android instead of
 wrapping an emulator. [eratw-pocket](https://github.com/Poboking/eratw-pocket) is
 the answer to that wish — the first native-Android EraTW client built on this
-runtime (upstream: the EraTW fork 画蛇添足版 4.980), and it runs more smoothly than
-the emulator on some low-end devices. The runtime itself ships no game data and
+engine (upstream: the EraTW fork 画蛇添足版 4.980), and it runs more smoothly than
+the emulator on some low-end devices. The engine itself ships no game data and
 builds and runs standalone on desktop, server, and CI.
 
 </div>
@@ -31,7 +31,7 @@ builds and runs standalone on desktop, server, and CI.
   functions. Rendering is emitted as a display list for frontends to present.
 - **Emuera is the behavioral baseline.** Every conclusion must land in the
   differential specs under `specs/`, citing the Emuera source (`file:line`).
-- **Modern ERA runtime capabilities.** Beyond the base VM, the runtime includes
+- **Modern ERA runtime capabilities.** Beyond the base VM, the engine includes
   linkable patches / Mods, entities and virtual characters, SQL sessions,
   signed update manifests, sidecar saves with crash recovery, and memory tiers.
 - **No Android dependency.** It is plain JVM and is tested in headless
@@ -131,7 +131,7 @@ a phone.
 **Spec-first differential development.** The specs under `specs/` were written
 before the implementation, each conclusion backed by `file:line` citations from
 the decompiled Emuera sources. Differential reading catches what documentation
-alone cannot — for instance, the runtime's default RNG is not `System.Random` but
+alone cannot — for instance, the engine's default RNG is not `System.Random` but
 a hand-rolled SFMT19937 (period 2^19937−1), reproduced as-is. One simple rule
 governs the project: when the specs and the implementation disagree, the specs
 win; and if the implementation proves a spec wrong, fix the spec first and the
@@ -158,7 +158,7 @@ order, a non-zero audit counter fails the build. Results therefore match across
 machines and platforms.
 
 **Pure-JVM layering.** `core-vm` bans Android APIs and `kotlin.random` and has
-no static mutable globals (state lives in the store's aux slots), so the runtime
+no static mutable globals (state lives in the store's aux slots), so the engine
 is fully testable on desktop and CI. `render` is likewise a pure-JVM
 display-list model; any front end (Compose, desktop preview) is merely a
 consumer.
@@ -166,13 +166,13 @@ consumer.
 **Version reconciliation at build time.** erbcc's version has a single source
 of truth in `Version.kt` under `core-vm`. Downstream builds verify the bytecode
 artifact's compiler version and source fingerprint, and any drift fails the
-build — stale artifacts never ship alongside a newer runtime.
+build — stale artifacts never ship alongside a newer engine.
 
 **Three-tier state-hash regression.** The L3 harness observes the entire VM
 state (variables, XML, sprite pools, intern tables) exclusively through
 `VariableStore`'s public read/write surface, summarizes it cluster by cluster
 into a hash chain, and compares it byte-for-byte against a full PC-baseline
-run. It never touches a line of runtime code: internal layout refactors leave
+run. It never touches a line of engine code: internal layout refactors leave
 the metric untouched, while semantic changes land faithfully in the chain
 values.
 
@@ -200,7 +200,7 @@ no need to draft a spec first.
 This project stands on work the era community has accumulated over the years.
 
 - **MinorShift** and **妊）|дﾟ)の中の人**, authors of Emuera — every compatibility
-  judgment in this runtime defers to their work.
+  judgment in this engine defers to their work.
 - **まだ名前は無い人**, the modifier/creator credited in eraThe World (eraTW)'s
   `GameBase.csv`, along with everyone who has written eraTW dialogues, events,
   data, and documentation.

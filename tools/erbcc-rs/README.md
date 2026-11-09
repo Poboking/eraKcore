@@ -1,7 +1,7 @@
 # erbcc-rs
 
 erbcc 的 Rust 侧实现，用于和 Kotlin 版 `tools/erbcc` 做逐字节对拍。它不是运行时
-依赖；运行时和 Android 壳层都不需要它即可构建。
+依赖；引擎和 Android 壳层都不需要它即可构建。
 
 ## 构建
 
