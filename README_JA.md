@@ -1,11 +1,11 @@
 <div align="center">
 
-# eraKcore
+# erak-engine
 
 [简体中文](README.md) | [English](README_EN.md) | **日本語**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-263146?style=flat-square)](LICENSE)
-[![CI](https://github.com/Poboking/eraKcore/actions/workflows/ci.yml/badge.svg)](https://github.com/Poboking/eraKcore/actions/workflows/ci.yml)
+[![CI](https://github.com/Poboking/erak-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/Poboking/erak-engine/actions/workflows/ci.yml)
 ![Kotlin](https://img.shields.io/badge/Kotlin-2.0.20-7F52FF?style=flat-square)
 ![JDK](https://img.shields.io/badge/JDK-17-263146?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-JVM-6a737d?style=flat-square)
@@ -13,7 +13,7 @@
 
 **Kotlin で実装した、純 JVM の ERA エンジン。**
 
-eraKcore は、ごくありふれた願いから始まりました：エミュレータを介さず、Android で
+erak-engine は、ごくありふれた願いから始まりました：エミュレータを介さず、Android で
 EraTW をネイティブに遊びたい。[eratw-pocket](https://github.com/Poboking/eratw-pocket)
 はその答えで、本エンジンを使って作った最初の Android ネイティブ版 EraTW
 （上流：画蛇添足版 4.980）です。一部のローエンド端末ではエミュレータより快適に
@@ -26,7 +26,7 @@ EraTW をネイティブに遊びたい。[eratw-pocket](https://github.com/Pobo
 
 ## これは何か
 
-- **セマンティクス層であり、フロントエンドではありません。** eraKcore が持つのは
+- **セマンティクス層であり、フロントエンドではありません。** erak-engine が持つのは
   ゲームのルールそのもの：ERB バイトコード実行、変数・キャラクターシステム、
   セーブ、組み込み関数です。描画はディスプレイリストとして出力し、見た目は各
   フロントエンドに任せます。
@@ -112,7 +112,7 @@ cargo build --release --manifest-path tools/erbcc-rs/Cargo.toml
 ## リポジトリ関係
 
 ```
-eraKcore（本リポジトリ、MIT）     eratw-pocket（GPL-3.0）
+erak-engine（本リポジトリ、MIT）  eratw-pocket（GPL-3.0）
 ├── core-vm   ←─────────────     ├── render-canvas
 ├── render    ←─────────────     ├── platform
 └── tools/erbcc                  └── app（Compose シェル）

@@ -1,4 +1,4 @@
-// eraKcore 根工程 —— Kotlin 重写的 ERA 运行时（纯 JVM，零 Android 依赖）
+// erak-engine 根工程 —— Kotlin 重写的 ERA 运行时（纯 JVM，零 Android 依赖）
 //
 // 模块：
 //   :core-vm        ERA 语义虚拟机（ERB 字节码执行、变量/存档/内建函数）
@@ -26,7 +26,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "eraKcore"
+rootProject.name = "erak-engine"
 
 include(":core-vm")
 include(":render")

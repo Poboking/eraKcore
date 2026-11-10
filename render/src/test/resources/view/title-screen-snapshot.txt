@@ -1,5 +1,5 @@
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-eraKcore TEST BANNER
+erak-engine TEST BANNER
 v0.0.0 - synthetic banner, not game text
 (test fixture)
  

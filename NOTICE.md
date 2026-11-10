@@ -2,7 +2,7 @@
 
 ## Emuera
 
-eraKcore 是对 [Emuera](https://osdn.net/projects/emuera/)（原作者：MinorShift，2008–）所实现的 era 游戏引擎语义的 **Kotlin 独立重写**：不是衍生自其源码的移植，但语义规约（`specs/`）以其可观察行为为对拍基准，并按原样复刻其官方 bug。
+erak-engine 是对 [Emuera](https://osdn.net/projects/emuera/)（原作者：MinorShift，2008–）所实现的 era 游戏引擎语义的 **Kotlin 独立重写**：不是衍生自其源码的移植，但语义规约（`specs/`）以其可观察行为为对拍基准，并按原样复刻其官方 bug。
 
 Emuera 原版的许可声明（译文摘要与原文要点）：
 
@@ -14,7 +14,7 @@ Emuera 原版的许可声明（译文摘要与原文要点）：
 > 2. 若修改了源码，必须明示这一点；不得虚假表示其为原版软件。
 > 3. 不得删除或修改本声明及其内容。
 
-eraKcore 遵守上述条款：本文件即出处声明；对 Emuera 行为的复刻在代码注释与 `specs/` 中均有明示（带 `文件:行号` 出处）。若你再分发 eraKcore 的修改版，请保留本声明。
+erak-engine 遵守上述条款：本文件即出处声明；对 Emuera 行为的复刻在代码注释与 `specs/` 中均有明示（带 `文件:行号` 出处）。若你再分发 erak-engine 的修改版，请保留本声明。
 
 era 游戏运行时的原始概念源自 eramaker（by 佐藤敏 / サークル獏）。
 

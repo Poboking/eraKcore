@@ -75,6 +75,6 @@
 ## 七、复现
 
 ```
-cd eraKcore
+cd erak-engine
 ./gradlew --no-daemon :tools:erbcc:run --args="scan --corpus '<游戏>/ERB' --use-index '<游戏>/lazyloadingfiles.dat' --out tools/erbcc/scan-report"
 ```

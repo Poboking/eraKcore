@@ -1,11 +1,11 @@
 <div align="center">
 
-# eraKcore
+# erak-engine
 
 [简体中文](README.md) | **English** | [日本語](README_JA.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-263146?style=flat-square)](LICENSE)
-[![CI](https://github.com/Poboking/eraKcore/actions/workflows/ci.yml/badge.svg)](https://github.com/Poboking/eraKcore/actions/workflows/ci.yml)
+[![CI](https://github.com/Poboking/erak-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/Poboking/erak-engine/actions/workflows/ci.yml)
 ![Kotlin](https://img.shields.io/badge/Kotlin-2.0.20-7F52FF?style=flat-square)
 ![JDK](https://img.shields.io/badge/JDK-17-263146?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-JVM-6a737d?style=flat-square)
@@ -13,7 +13,7 @@
 
 **A pure-JVM ERA engine, implemented in Kotlin.**
 
-eraKcore started from a plain wish: to play EraTW natively on Android instead of
+erak-engine started from a plain wish: to play EraTW natively on Android instead of
 wrapping an emulator. [eratw-pocket](https://github.com/Poboking/eratw-pocket) is
 the answer to that wish — the first native-Android EraTW client built on this
 engine (upstream: the EraTW fork 画蛇添足版 4.980), and it runs more smoothly than
@@ -26,7 +26,7 @@ builds and runs standalone on desktop, server, and CI.
 
 ## What it is
 
-- **A semantics layer, not a frontend.** eraKcore owns the game rules: ERB
+- **A semantics layer, not a frontend.** erak-engine owns the game rules: ERB
   bytecode execution, the variable and character systems, saves, built-in
   functions. Rendering is emitted as a display list for frontends to present.
 - **Emuera is the behavioral baseline.** Every conclusion must land in the
@@ -113,7 +113,7 @@ See [tools/erbcc-rs/README.md](tools/erbcc-rs/README.md) for details.
 ## Repository Relationship
 
 ```
-eraKcore (this repo, MIT)      eratw-pocket (GPL-3.0)
+erak-engine (this repo, MIT)   eratw-pocket (GPL-3.0)
 ├── core-vm   ←────────────    ├── render-canvas
 ├── render    ←────────────    ├── platform
 └── tools/erbcc                └── app (Compose shell)

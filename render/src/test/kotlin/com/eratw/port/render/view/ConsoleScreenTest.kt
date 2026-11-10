@@ -83,7 +83,7 @@ class ConsoleScreenTest {
         // 上游版本的界面文案，不属于引擎语义；版式判据（行数、脏区列跨、按钮列位）
         // 由 :61/:68 的 ━ 条和各按钮行提供，banner 文本换成什么都不影响这些断言。
         // 同步项：`render/src/test/resources/view/title-screen-snapshot.txt` 第 2-7 行。
-        ScreenRows.textLine("eraKcore TEST BANNER"),
+        ScreenRows.textLine("erak-engine TEST BANNER"),
         ScreenRows.textLine("v0.0.0 - synthetic banner, not game text"),
         ScreenRows.textLine("(test fixture)"),
         ScreenRows.textLine(" "),                                         // :65     TITLE.ERB:69 的空 PRINTL
